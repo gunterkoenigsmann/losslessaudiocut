@@ -209,7 +209,7 @@ pub struct CutPlan {
 | MP3 | frame headers, Xing/LAME tag | copy frames incl. reservoir pre-roll, write new LAME tag with delay/padding | sample-exact on gapless-aware players, otherwise ±1 frame (26 ms) | `main_data_begin` tells exactly how many earlier frames are needed |
 | AAC (ADTS) | ADTS headers | copy frames + 1 pre-roll frame | 1 frame (21 ms at 48 kHz) | ADTS has no trimming metadata |
 | AAC (M4A) | `stsz`/`stco`/`stts` | new `moov` with edit list | sample-exact via `elst` | most phone recorders produce M4A |
-| Ogg Vorbis | pages, granule pos | new pages, copy headers, new serial, CRC | sample-exact via granule positions | block size variable, pre-roll of one packet |
+| Ogg Vorbis | pages; timestamps from packet durations, granule pos only as hint | new pages, copy headers, new serial, CRC | sample-exact via granule positions | block size variable, pre-roll of one packet |
 | Ogg Opus | as above | as above, adjust `pre_skip` | sample-exact | |
 | Speex | Ogg pages, Speex header | as Vorbis | sample-exact via granule positions | |
 
@@ -227,6 +227,34 @@ Tags live outside the audio packets, so rewriting them never touches audio.
 | WAV | `LIST/INFO` chunk plus an `id3 ` chunk | INFO has no album artist or cover |
 
 Milestone order *(proposed)*: WAV, FLAC, MP3, Ogg Vorbis, AAC/M4A, ADTS, Speex, Opus.
+
+### Ogg with unreliable granule positions
+
+Many Ogg recordings (especially radio/Icecast captures) contain **random or
+inconsistent granule positions**: a large arbitrary start value, jumps,
+values that go backwards, or garbage. Players cope because they mostly ignore
+them, so we must too:
+
+- The Ogg demuxer **never derives timestamps from granule positions**. Each
+  packet's duration comes from the codec itself: Vorbis from the block-size
+  flags of the current and previous packet (mode header), Opus from the TOC
+  byte, Speex from frames-per-packet in the header. `first_sample` is the
+  running sum of those durations.
+- Granule positions are read only as a hint and compared with the computed
+  timeline. Disagreement is not an error; the file is flagged "granule
+  positions unreliable" so that end trimming based on the last page's granule
+  is not trusted either.
+- Export **always writes fresh, consistent granule positions** starting at
+  zero, a new serial number and recomputed CRCs, so cut files are cleaner
+  than the source.
+- Radio captures are often **chained** (a new logical stream, with new
+  headers, per song or metadata change). Each chain link is indexed
+  separately; a link boundary with a new comment header is offered as a
+  track boundary and its title tag as the track's title.
+- Captures can start mid-stream or contain damaged pages from network
+  dropouts. The demuxer resyncs on the next `OggS` capture pattern with a
+  valid CRC, skips damaged pages and lists them in a load report instead of
+  refusing the file.
 
 ### Join points inside a file
 
@@ -406,6 +434,7 @@ packets in the same state. This gives:
 | Platforms | Linux, macOS, Windows |
 | GUI binding | `wxdragon` |
 | Recording length | up to several hours |
+| Ogg timestamps | computed from packet durations; source granule positions are not trusted (radio captures contain random values) |
 | Waveform cache | per-user cache directory with automatic eviction |
 | Channels | 1 to 4 (no fixed limit in code), one lane per channel |
 | Editing model | delete parts and join the rest into one file; split into tracks with own tags. Joining separate recordings is not planned. |
