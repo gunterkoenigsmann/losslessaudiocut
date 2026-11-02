@@ -1,0 +1,20 @@
+[package]
+name = "lac-cli"
+description = "Command line interface of losslessaudiocut."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "lac"
+path = "src/main.rs"
+
+[dependencies]
+lac-core.workspace = true
+lac-container.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

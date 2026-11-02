@@ -1,0 +1,16 @@
+[package]
+name = "lac-core"
+description = "Core data model of losslessaudiocut: time base, packets, edit lists, cut planning."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
