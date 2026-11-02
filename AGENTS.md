@@ -21,8 +21,8 @@ decode(cut(file, range)) == decode(file)[actual_range]   // bit for bit
 The one documented exception are **internal join points** of lossy codecs
 (after a deleted part): there the first packet(s) decode with a different
 predecessor state. Tests compare everything outside that window bit for bit
-and check that the window is exactly as long as `docs/architecture.md`
-(section "Join points inside a file") says.
+and check that the window is no longer than `docs/architecture.md`
+(section "Join points inside a file") says for the codec.
 
 Never "fix" a failing equivalence test by loosening the comparison. A lossy
 codec is never re-encoded; FLAC/PCM boundary frames may be, because that is

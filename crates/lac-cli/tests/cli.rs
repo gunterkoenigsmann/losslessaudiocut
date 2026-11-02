@@ -155,3 +155,30 @@ fn flac_is_detected_and_cut() {
     assert!(text.contains("0:00.750"), "{text}");
     assert!(!text.contains("warning"), "{text}");
 }
+
+#[test]
+fn ogg_is_detected_and_cut() {
+    let d = temp_dir("ogg");
+    let input = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../lac-container/tests/fixtures/ogg_speex_16k.spx");
+    let output = d.join("out.spx");
+    let out = lac()
+        .arg("cut")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .args(["--delete", "0.2..0.6"])
+        .output()
+        .expect("run lac");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let info = lac().arg("info").arg(&output).output().expect("run lac");
+    let text = String::from_utf8_lossy(&info.stdout);
+    assert!(text.contains("Ogg (Speex)"), "{text}");
+    // 1 s source minus 0.4 s; Speex packets are 20 ms, so the cut is exact.
+    assert!(text.contains("0:00.600"), "{text}");
+    assert!(!text.contains("warning"), "{text}");
+}

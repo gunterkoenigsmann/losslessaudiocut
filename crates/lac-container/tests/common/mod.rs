@@ -31,10 +31,15 @@ pub fn noise(len: usize, seed: u64) -> Vec<u8> {
 }
 
 /// Writes `data` to a fresh temporary file and returns its path.
+///
+/// Every call gets its own file (`name` is prefixed with a counter), so
+/// tests running in parallel never overwrite each other's files.
 pub fn temp_file(name: &str, data: &[u8]) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("lac-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join(name);
+    let path = dir.join(format!("{n}-{name}"));
     std::fs::write(&path, data).expect("write temp file");
     path
 }
@@ -75,6 +80,34 @@ pub fn ffmpeg_decode(file: &Path, raw_format: &str) -> Option<Vec<u8>> {
     assert!(
         o.status.success(),
         "ffmpeg failed: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    Some(o.stdout)
+}
+
+/// Decodes an Ogg Vorbis file with the reference decoder (`oggdec` from
+/// vorbis-tools, i.e. libvorbisfile) to interleaved 16-bit little-endian
+/// samples, or `None` if it is not installed.
+///
+/// Used instead of ffmpeg for Vorbis because ffmpeg does not reset its
+/// Vorbis decoder at the start of a chained stream and so outputs one
+/// block overlap too many at every chain boundary.
+pub fn oggdec_decode(file: &Path) -> Option<Vec<u8>> {
+    let o = run_tool(
+        "oggdec",
+        &[
+            "-Q".as_ref(),
+            "-R".as_ref(),
+            "-b".as_ref(),
+            "16".as_ref(),
+            "-o".as_ref(),
+            "-".as_ref(),
+            file.as_os_str(),
+        ],
+    )?;
+    assert!(
+        o.status.success(),
+        "oggdec failed: {}",
         String::from_utf8_lossy(&o.stderr)
     );
     Some(o.stdout)
