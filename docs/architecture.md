@@ -139,6 +139,7 @@ pub struct PacketInfo {
     pub byte_len: u32,
     pub first_sample: SamplePos, // presentation position after decoder delay
     pub n_samples: u32,
+    pub flags: PacketFlags,      // e.g. `independent` (see section 13)
 }
 
 /// Immutable, built once per source file by the demuxer.
@@ -389,19 +390,50 @@ packets in the same state. This gives:
 | Recording length | up to several hours |
 | Waveform cache | per-user cache directory with automatic eviction |
 | Channels | 1 to 4 (no fixed limit in code), one lane per channel |
+| Exactness | packet granularity first; sample-exact trimming metadata is a later, optional feature (the `CutPlan` fields exist from the start, set to 0) |
+| Video | future extension, see section 13; the core model must not rule it out |
 
 ## 12. Open questions
 
 1. **Editing model**: delete regions and keep one file, split one recording
    into several files (tracks), join several recordings, or all three?
    Joining needs identical codec parameters to stay lossless.
-2. **Exactness**: is packet granularity (20-26 ms) acceptable everywhere, or
-   should we use trimming metadata for sample-exact cuts, knowing a few
-   players ignore it and play a few ms extra? *(Proposed: sample-exact
-   wherever the container supports it, with the UI showing the real cut
-   position when it does not.)*
-3. **Output format**: always the same container as the input, or also
+2. **Output format**: always the same container as the input, or also
    rewrapping without re-encoding, e.g. ADTS `.aac` to `.m4a`? *(Proposed:
    same container by default, rewrapping as a later feature.)*
-4. **Matroska/WebM** (`.mka`, `.webm`): also used by some recorders. Add to
+3. **Matroska/WebM** (`.mka`, `.webm`): also used by some recorders. Add to
    the format list later?
+
+## 13. Future: lossless video cutting
+
+Cutting camera and phone videos follows the same principle, with one
+difference: in video the independent unit is not a packet but a **keyframe**
+(an I/IDR frame), and phones often put only one keyframe every 1-2 seconds.
+Lossless video cuts therefore work like this:
+
+- A cut keeps whole **GOPs** (keyframe plus following frames). The start of a
+  cut is snapped back to the previous keyframe.
+- For frame-exact starts the container's **edit list** (`elst` in MP4/MOV,
+  which is what phones and most cameras write) hides the extra frames in
+  front of the cut point, exactly like audio pre-roll. Players that ignore
+  edit lists show up to one GOP extra, which is the same trade-off as for
+  audio trimming metadata.
+- Audio in the same file is cut with the existing audio planner and aligned
+  to the video cut.
+
+To keep this possible without building it now, the core model follows three
+rules from the start:
+
+1. `PacketInfo` carries a `flags` field with an `independent` bit (keyframe /
+   decodable without predecessors). For audio, the planner derives pre-roll
+   from codec rules; for video it would search backwards for the previous
+   independent packet.
+2. Positions are stored per stream in that stream's own **time base**
+   (a rational, e.g. 1/48000 for audio, 1/90000 for video). For audio-only
+   files this is the sample rate, so the "integer sample count" rule above
+   still holds.
+3. The MP4 and (later) Matroska demuxers and muxers are written for
+   **multiple tracks** from day one, even while only one audio track is used.
+
+The waveform, playback and analysis stay audio-only; a video extension would
+add a thumbnail strip lane and a preview window in `lac-gui`.
