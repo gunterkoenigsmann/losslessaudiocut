@@ -26,6 +26,9 @@ Before coding, collect in a module-level `//!` doc comment of the new
   samples"? Which field (LAME tag, `elst`, granule position, Opus `pre_skip`)?
 - Header fields that must be rewritten on export (sizes, sample counts, CRCs,
   checksums, seek tables, serial numbers, frame numbers).
+- Where tags live (ID3v2, Vorbis comment, `ilst`, `LIST/INFO`) and which
+  fields map to title, artist, album, album artist, track number, date,
+  genre, comment and cover.
 
 ## 2. Demuxer -> `PacketIndex`
 
@@ -51,6 +54,9 @@ Before coding, collect in a module-level `//!` doc comment of the new
 - Copy packet payloads **verbatim** (lossy codecs must never be re-encoded).
 - Rewrite every header field listed in step 1; recompute CRCs.
 - Write trimming metadata from the `CutPlan` when supported.
+- Write the track's `Tags` in the container's native tag format (see the
+  tag table in `docs/architecture.md` section 5) and read the source's tags
+  in the demuxer so they can be inherited. Tag round-trip gets its own test.
 - A segment list with several segments must produce one valid stream; if the
   format cannot join segments with different codec parameters, return an
   error rather than writing a broken file.

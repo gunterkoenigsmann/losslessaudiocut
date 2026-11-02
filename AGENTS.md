@@ -58,10 +58,12 @@ lac-gui, lac-cli  ->  lac-app  ->  lac-analysis, lac-peaks, lac-playback
 - Only `lac-gui` may depend on wxWidgets bindings. All UI logic (selection,
   zoom, snapping, undo) lives in view models in `lac-app` so it is testable
   without a display.
-- Only `lac-decode` may depend on Symphonia or C codec libraries.
-- Container parsing and writing is our own code in `lac-container`. Do not add
-  FFmpeg as a dependency of any crate; `ffmpeg` may only be used as an
-  external reference tool in tests and fixture scripts.
+- Only `lac-decode` may depend on FFmpeg (`ffmpeg-next`), and only on its
+  decoders (libavcodec). It is fed packets from our own demuxers, so the
+  packet index stays the single source of truth.
+- Container parsing and writing, cut planning and tag writing are our own
+  code in `lac-container`. Never use FFmpeg's demuxers, muxers or stream copy
+  for exporting; decoded PCM must never end up in an exported lossy file.
 
 ## Code conventions
 
