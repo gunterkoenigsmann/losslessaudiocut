@@ -1,7 +1,7 @@
 # losslessaudiocut: Architecture Proposal
 
 Status: **draft for discussion**. Open questions are collected in
-[section 10](#10-open-questions); decisions marked *(proposed)* are
+[section 12](#12-open-questions) and decisions so far in [section 11](#11-decisions-so-far); decisions marked *(proposed)* are
 recommendations that still need a yes/no.
 
 ## 1. Goals and non-goals
@@ -251,15 +251,57 @@ indexed by packet number, not by time; a column maps to a packet range via
 binary search on `first_sample`. Per entry we store `min`, `max` (as `i16`,
 plenty for display) and `rms` (reused by silence detection) per channel.
 
-Size estimate: a 3 h stereo 44.1 kHz MP3 has ~410 000 packets, i.e. ~5 MB for level 0
-and ~0.35 MB for all higher levels.
+Size estimate: a 3 h, 4-channel, 48 kHz AAC recording has ~506 000 packets,
+i.e. ~12 MB for level 0 (6 bytes per channel per packet) and under 1 MB for all
+higher levels.
+
+### Multichannel display
+
+Recordings have 1 to 4 channels (the code makes no assumption about the
+maximum). Nothing in the summary or the renderer is stereo-specific:
+
+- The summary stores one `(min, max, rms)` entry per channel per packet, in a
+  channel-interleaved array so one packet's data is contiguous.
+- The waveform widget draws one **lane per channel**, stacked vertically, with
+  the channel name (from the container's channel layout, or "Ch 1..n") at the
+  left. Lane height is the available height divided by the channel count.
+- A "mixed" view option draws a single lane with the min of all channel mins
+  and the max of all channel maxes, useful for finding cut points quickly on
+  small screens.
+- Selections and cuts always apply to all channels together: packets contain
+  all channels, so cutting a single channel would require re-encoding.
 
 ### Building the cache
 
 Opening a file demuxes the packet index immediately (fast, no decoding), then a
 background thread decodes the file once and fills the summary front to back.
 The display shows what is already available and refreshes progressively.
-*(Open question: persist the cache in a sidecar file?)*
+
+### Persistent cache *(decided)*
+
+Decoding a multi-hour recording takes a while, so the summary is stored on
+disk. To avoid littering the recording folders, it does **not** go next to the
+recording but into the per-user cache directory, which the OS and cleanup
+tools already treat as disposable:
+
+| OS | Location (via the `directories` crate) |
+|---|---|
+| Linux | `$XDG_CACHE_HOME/losslessaudiocut`, default `~/.cache/losslessaudiocut` |
+| macOS | `~/Library/Caches/<bundle id>` |
+| Windows | `%LOCALAPPDATA%\losslessaudiocut\cache` |
+
+- **Key**: hash of canonical path, file size and modification time, plus a
+  hash of the first and last 64 kB. A changed or replaced file never gets a
+  stale waveform; a moved file is simply re-analysed.
+- **Format**: a small versioned binary file per recording (magic, format
+  version, key, packet count, channel count, levels). A version mismatch
+  means "rebuild", never an error.
+- **Eviction**, so unused caches go away by themselves: on startup and
+  after each new entry, delete entries whose source file no longer exists,
+  entries not opened for 90 days, and then the least recently used entries
+  until the total is below a size limit (default 1 GB). Both limits are
+  settings, and there is a "clear cache" menu entry.
+- The cache is purely an accelerator: deleting it at any time is safe.
 
 ## 7. Playback
 
@@ -318,24 +360,48 @@ packets in the same state. This gives:
 - Doxygen-style `///` docs on all public items, `#![deny(missing_docs)]` in the
   library crates, `cargo doc` in CI, plus `clippy` and `rustfmt`.
 
-## 10. Open questions
+## 10. Platforms and packaging *(decided: Linux, macOS, Windows)*
 
-1. **Platforms**: Linux only, or also Windows/macOS? (Affects packaging of
-   wxWidgets and the FFmpeg libraries.)
-2. **wxWidgets binding**: OK to use `wxdragon` (the actively maintained Rust
-   binding)? Fallback would be our own thin C++ layer via `cxx`.
-3. **Containers in practice**: is your AAC in `.m4a` (phone/recorder) or raw
-   `.aac` (ADTS)? Is your Speex in Ogg (`.spx`)? Is your Ogg Vorbis, Opus or both?
-4. **Editing model**: which do you need: delete regions and keep one file,
-   split one recording into several files (tracks), join several recordings,
-   or all three? Joining needs identical codec parameters to stay lossless.
-5. **Exactness**: is packet granularity (20-26 ms) acceptable everywhere, or
+- **GUI**: `wxdragon`, which builds and statically links wxWidgets itself on
+  all three platforms.
+- **FFmpeg**: only the decoder libraries are needed (libavcodec, libavutil,
+  libswresample). Linux uses the system packages; macOS and Windows bundles
+  ship a minimal FFmpeg built with only the needed decoders (LGPL build, which
+  also keeps the binaries small).
+- **Audio output**: `cpal` (ALSA/PulseAudio/PipeWire, CoreAudio, WASAPI).
+- **CI**: GitHub Actions matrix on `ubuntu-latest`, `macos-latest` and
+  `windows-latest` for build and tests. Format equivalence tests run on all
+  three, because endianness-independent parsing and path handling are exactly
+  what breaks between platforms.
+- Release packaging (AppImage or `.deb`, `.app` in a `.dmg`, an installer or
+  zip for Windows) comes later in its own PR.
+
+## 11. Decisions so far
+
+| Topic | Decision |
+|---|---|
+| Decoding | FFmpeg libavcodec, for playback, waveform and analysis only |
+| Cutting | own demuxers, cut planners, muxers and tag writers |
+| Containers | all of them: WAV, FLAC, MP3, ADTS `.aac`, MP4/M4A, Ogg Vorbis, Ogg Opus, Speex |
+| Tags | per-track tags when splitting |
+| Platforms | Linux, macOS, Windows |
+| GUI binding | `wxdragon` |
+| Recording length | up to several hours |
+| Waveform cache | per-user cache directory with automatic eviction |
+| Channels | 1 to 4 (no fixed limit in code), one lane per channel |
+
+## 12. Open questions
+
+1. **Editing model**: delete regions and keep one file, split one recording
+   into several files (tracks), join several recordings, or all three?
+   Joining needs identical codec parameters to stay lossless.
+2. **Exactness**: is packet granularity (20-26 ms) acceptable everywhere, or
    should we use trimming metadata for sample-exact cuts, knowing a few
-   players ignore it and play a few ms extra?
-6. **Output format**: always the same container as the input, or e.g. allow
-   ADTS to M4A rewrapping (still lossless)?
-7. ~~**Tags**~~: decided. Each track gets its own tags (title, artist,
-   album and so on), see section 4 and the tag table in section 5.
-8. **Recording sizes**: typical and maximum length? Hours-long recordings make
-   a persistent waveform cache (sidecar file vs. user cache dir) worthwhile.
-9. **Channels**: draw each channel separately, or a combined waveform?
+   players ignore it and play a few ms extra? *(Proposed: sample-exact
+   wherever the container supports it, with the UI showing the real cut
+   position when it does not.)*
+3. **Output format**: always the same container as the input, or also
+   rewrapping without re-encoding, e.g. ADTS `.aac` to `.m4a`? *(Proposed:
+   same container by default, rewrapping as a later feature.)*
+4. **Matroska/WebM** (`.mka`, `.webm`): also used by some recorders. Add to
+   the format list later?
