@@ -104,7 +104,7 @@ graph TD
 | `lac-container` | One demuxer and one muxer per container: WAV, FLAC native, MP3 elementary stream, ADTS, MP4/M4A, Ogg. Builds the packet index, copies packets, writes trimming metadata and per-track tags, recomputes CRCs, seek tables and headers. **This is the lossless heart and is written by us.** | `crc`, maybe `mp4-atom` for box parsing |
 | `lac-decode` | Turns packets into `f32`/`i32` PCM for playback, the waveform cache and analysis. Wraps FFmpeg's decoders (libavcodec only, not its demuxers): it is fed packets from *our* demuxer, so the packet index stays the single source of truth and waveform positions match cut positions exactly. | `ffmpeg-next` |
 | `lac-peaks` | Per-packet min/max/RMS summary, multi-level pyramid, optional on-disk cache. | none |
-| `lac-playback` | Audio output, transport (play/pause/seek), position reporting for the cursor. | `cpal` (directly, `rodio` is not needed) |
+| `lac-playback` | Audio output, transport (play/pause/seek), scrubbing, position reporting for the cursor. | `cpal` (directly, `rodio` is not needed), `rtrb`; later `rubato` for varispeed |
 | `lac-analysis` | Pluggable analyzers that turn PCM/summary data into labeled regions. | later: `webrtc-vad` or an ONNX model via `ort` |
 | `lac-app` | Use cases (open, select, cut, split, edit track tags, undo, export, analyse) and view models. Knows nothing about wxWidgets, so all UI logic is unit-testable. | none |
 | `lac-gui` | wxWidgets windows, waveform widget, menus, key bindings. Renders view models, forwards user events. | `wxdragon` |
@@ -357,6 +357,63 @@ plays the **EditList**, not the source, so you hear the result of your cuts
 (including the snapped positions) before exporting. Position is reported via
 an atomic sample counter that the GUI polls on a timer to move the cursor.
 
+### Engine structure
+
+Three parts, so that the real-time audio callback never blocks and the
+interesting logic is testable without a sound card:
+
+```mermaid
+graph LR
+    gui["GUI / lac-app"] -- "commands (lock-free queue)" --> dec
+    dec["decoder thread<br/>decode + render"] -- "PCM ring buffer" --> cb
+    cb["cpal callback<br/>(real-time, copies only)"] -- "atomic position" --> gui
+```
+
+- **Commands** (`Play`, `Pause`, `Seek(pos)`, `Scrub { pos, velocity }`,
+  `SetRate`) go through a lock-free single-producer/single-consumer queue
+  (`rtrb`). Every command carries a generation number; audio already in the
+  ring buffer from an older generation is dropped, so a seek takes effect
+  within one callback period instead of after the whole buffer.
+- The **decoder thread** turns the `EditList` timeline into PCM: it maps a
+  timeline position to source packets, decodes from the needed pre-roll
+  packet, and runs the result through a **render stage** (plain copy,
+  grain crossfade, resampler or time-stretcher, see below). Decoded packets
+  are kept in the same LRU cache that the zoomed-in waveform uses, so
+  scrubbing back and forth over the same spot does not decode twice.
+- The **cpal callback** only copies from the ring buffer and advances the
+  position counter. Output latency is kept small (target below 30 ms) by
+  sizing the ring buffer dynamically: large during normal playback, small
+  while scrubbing.
+- The render stage is a pure function `(commands, decoded audio) -> PCM`,
+  so tests drive it with scripted mouse movements and inspect the output
+  without any audio device.
+
+### Scrubbing
+
+Dragging the cursor while playback is active plays the audio around the
+cursor, so one can find a spot by ear. There are several ways to do it; the
+engine treats them as interchangeable `ScrubMode`s of the render stage:
+
+| Mode | How it works | Good for | Cost |
+|---|---|---|---|
+| **Grain restart** (first implementation) | On every mouse move, but at most every ~40 ms, restart playback at the cursor and play a grain of normal-speed audio until the next restart. Grains are joined with a ~5 ms crossfade, so there are no clicks. A held mouse keeps playing normally from there. | finding a word or a note: you hear real, undistorted audio | trivial |
+| **Varispeed ("tape")** | Playback speed and direction follow the mouse velocity, including reverse, with pitch changing like tape on a reel. Needs a resampler (`rubato`). | fast orientation by the "sound" of a passage, music | moderate |
+| **Pitch-preserving scrub** | Like varispeed, but a time-stretcher (WSOLA for speech, a phase vocoder for music) keeps the pitch, so speech stays intelligible at 2-4x and when slowed down. | voice recordings, finding a word | higher, but fine for one stream |
+| **Fast skim** | Not mouse-driven: play at a fixed 1.5-3x with pitch preserved, from a key or a button. | listening through hours of speech | as above |
+
+Grain restart comes first because it is the simplest and proven. Varispeed
+and pitch preservation reuse the same command and render structure and only
+add a render step, so they can follow without changing the engine.
+
+Scrubbing works on the **timeline** (after edits), so you scrub through the
+result of your cuts. Two details make it feel right:
+
+- The visual cursor, the scrub position and the audible position are the
+  same timeline position, so the waveform and what you hear never drift.
+- Silence-aware help, once the analysis exists: optionally skip regions
+  marked as silence during skim, and snap the scrub cursor to region
+  boundaries when the mouse is released.
+
 ## 8. Future: silence and track detection
 
 ```rust
@@ -439,6 +496,7 @@ packets in the same state. This gives:
 | Channels | 1 to 4 (no fixed limit in code), one lane per channel |
 | Editing model | delete parts and join the rest into one file; split into tracks with own tags. Joining separate recordings is not planned. |
 | Exactness | packet granularity first; sample-exact trimming metadata is a later, optional feature (the `CutPlan` fields exist from the start, set to 0) |
+| Scrubbing | grain restart while dragging (~40 ms grains, 5 ms crossfade) first; varispeed and pitch-preserving scrub later as further render modes |
 | Video | future extension, see section 13; the core model must not rule it out |
 
 ## 12. Open questions
