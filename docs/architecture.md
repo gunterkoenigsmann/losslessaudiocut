@@ -101,29 +101,34 @@ graph TD
 | Crate | Responsibility | External deps *(proposed)* |
 |---|---|---|
 | `lac-core` | Integer time base (`SamplePos: u64`), `PacketInfo`, `PacketIndex`, `EditList`, `CutCapabilities`, error types. Pure data, no I/O. | none |
-| `lac-container` | One demuxer and one muxer per container: WAV, FLAC native, MP3 elementary stream, ADTS, MP4/M4A, Ogg. Builds the packet index, copies packets, writes trimming metadata, recomputes CRCs, seek tables and headers. **This is the lossless heart and is written by us.** | `crc`, maybe `mp4-atom` for box parsing |
-| `lac-decode` | Turns packets into `f32`/`i32` PCM. Adapter over Symphonia; Speex via FFI to libspeex. Decoders are fed packets from *our* demuxer, so the packet view stays consistent. | `symphonia`, `speex-sys` (or own FFI) |
+| `lac-container` | One demuxer and one muxer per container: WAV, FLAC native, MP3 elementary stream, ADTS, MP4/M4A, Ogg. Builds the packet index, copies packets, writes trimming metadata and per-track tags, recomputes CRCs, seek tables and headers. **This is the lossless heart and is written by us.** | `crc`, maybe `mp4-atom` for box parsing |
+| `lac-decode` | Turns packets into `f32`/`i32` PCM for playback, the waveform cache and analysis. Wraps FFmpeg's decoders (libavcodec only, not its demuxers): it is fed packets from *our* demuxer, so the packet index stays the single source of truth and waveform positions match cut positions exactly. | `ffmpeg-next` |
 | `lac-peaks` | Per-packet min/max/RMS summary, multi-level pyramid, optional on-disk cache. | none |
 | `lac-playback` | Audio output, transport (play/pause/seek), position reporting for the cursor. | `cpal` (directly, `rodio` is not needed) |
 | `lac-analysis` | Pluggable analyzers that turn PCM/summary data into labeled regions. | later: `webrtc-vad` or an ONNX model via `ort` |
-| `lac-app` | Use cases (open, select, cut, split, undo, export, analyse) and view models. Knows nothing about wxWidgets, so all UI logic is unit-testable. | none |
+| `lac-app` | Use cases (open, select, cut, split, edit track tags, undo, export, analyse) and view models. Knows nothing about wxWidgets, so all UI logic is unit-testable. | none |
 | `lac-gui` | wxWidgets windows, waveform widget, menus, key bindings. Renders view models, forwards user events. | `wxdragon` |
 | `lac-cli` | Same use cases without a GUI: `lac cut in.mp3 --keep 0:10-3:45 -o out.mp3`. Doubles as the integration-test driver. | `clap` |
 
-### Why own containers instead of FFmpeg
+### Decoding with FFmpeg, cutting with our own code *(decided)*
 
-FFmpeg (`ffmpeg-next`) would give us every codec including Speex and a stream
-copy muxer. I recommend against it as the *core* because:
+Decoding and cutting have different requirements, so they use different code:
 
-- Stream copy in FFmpeg is packet-granular but its pre-roll and trimming
-  handling differs per muxer and is hard to verify; the lossless guarantee is
-  the product, so we want to own it and test it exhaustively.
-- It is a large C dependency that makes Windows/macOS packaging the main
-  maintenance burden of a fire-and-forget project.
+- **Decoding** (playback, waveform, analysis) uses FFmpeg's libavcodec. It
+  covers every format we need, including Speex and Opus, which pure-Rust
+  decoders and libsndfile (no AAC, no Speex) do not. Decoding output never
+  ends up in an exported file, so it cannot cost quality.
+- **Cutting** (demux, plan, mux, tags) is our own code. FFmpeg's stream copy
+  is packet-granular, but its pre-roll and trimming handling differs per
+  muxer and is hard to verify. The lossless guarantee is the product, so we
+  own it and test it exhaustively.
 
 The container formats involved are small and well specified (Ogg pages,
 ADTS headers, MP3 frame headers, FLAC frames, RIFF, MP4 boxes). MP4 is the
 largest; it only needs `ftyp`/`moov`/`mdat` with a single audio track.
+
+Keeping FFmpeg behind the `lac-decode` interface means it can later be
+replaced per codec (for example by Symphonia) without touching anything else.
 
 ## 4. Core data model
 
@@ -142,17 +147,44 @@ pub struct PacketIndex { packets: Vec<PacketInfo>, /* + stream params */ }
 /// A kept region of a source, in samples (half-open interval).
 pub struct Segment { pub source: SourceId, pub range: Range<SamplePos> }
 
-/// Non-destructive edit: the document is an ordered list of segments.
+/// One output file: an ordered list of kept segments plus its own tags.
+pub struct Track { pub segments: Vec<Segment>, pub tags: Tags }
+
+/// Non-destructive edit: the document is an ordered list of tracks.
 /// Cutting, deleting and splitting only rewrite this list; the source file is
 /// never modified. Undo/redo = keeping previous EditLists (they are small).
-pub struct EditList { pub segments: Vec<Segment> }
+/// Deleting parts of one recording is simply the single-track case.
+pub struct EditList { pub tracks: Vec<Track> }
+
+/// Format-neutral metadata of one track. Mapped to each container's native
+/// tag format by the muxer (see section 5).
+pub struct Tags {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub album_artist: Option<String>,
+    pub track_number: Option<u32>,
+    pub track_total: Option<u32>,
+    pub date: Option<String>,
+    pub genre: Option<String>,
+    pub comment: Option<String>,
+    /// Front cover image (MIME type, bytes); shared between tracks by `Arc`.
+    pub cover: Option<Arc<Picture>>,
+    /// Anything else found in the source, kept as key/value pairs.
+    pub extra: Vec<(String, String)>,
+}
 ```
+
+When a recording is split into tracks, every new track starts with the
+source's tags, gets `track_number`/`track_total` filled in automatically, and
+the user then edits the per-track fields (typically title) in a track list
+next to the waveform.
 
 Time is always an integer sample count at the source rate. Floating point
 seconds only appear in the UI layer, so rounding can never shift a cut.
 
-Export walks the `EditList`, asks the format's `CutPlanner` to map each
-segment boundary to packet ranges plus trim values, and hands the plan to the
+Export writes one file per `Track`. For each one it asks the format's
+`CutPlanner` to map each segment boundary to packet ranges plus trim values, and hands the plan to the
 muxer:
 
 ```rust
@@ -177,8 +209,21 @@ pub struct CutPlan {
 | AAC (ADTS) | ADTS headers | copy frames + 1 pre-roll frame | 1 frame (21 ms at 48 kHz) | ADTS has no trimming metadata |
 | AAC (M4A) | `stsz`/`stco`/`stts` | new `moov` with edit list | sample-exact via `elst` | most phone recorders produce M4A |
 | Ogg Vorbis | pages, granule pos | new pages, copy headers, new serial, CRC | sample-exact via granule positions | block size variable, pre-roll of one packet |
-| Ogg Opus | as above | as above, adjust `pre_skip` | sample-exact | Symphonia has no Opus decoder; needs libopus via the `opus` crate |
-| Speex | Ogg pages, Speex header | as Vorbis | sample-exact via granule positions | decoder via libspeex FFI; the only C dependency |
+| Ogg Opus | as above | as above, adjust `pre_skip` | sample-exact | |
+| Speex | Ogg pages, Speex header | as Vorbis | sample-exact via granule positions | |
+
+### Tags per container
+
+Tags live outside the audio packets, so rewriting them never touches audio.
+
+| Container | Tag format written | Notes |
+|---|---|---|
+| MP3 | ID3v2.4 at the start (`TIT2`, `TPE1`, `TALB`, `TPE2`, `TRCK`, `TDRC`, `TCON`, `COMM`, `APIC`, `TXXX` for extras) | no ID3v1 |
+| AAC (ADTS) | ID3v2.4 at the start | not standardised, but read by common players |
+| AAC (M4A) | `moov/udta/meta/ilst` (`©nam`, `©ART`, `©alb`, `aART`, `trkn`, `©day`, `©gen`, `©cmt`, `covr`, `----` for extras) | |
+| FLAC | `VORBIS_COMMENT` and `PICTURE` metadata blocks | |
+| Ogg Vorbis / Opus / Speex | the comment header packet (`TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `TRACKNUMBER`, `TRACKTOTAL`, `DATE`, `GENRE`, `COMMENT`, `METADATA_BLOCK_PICTURE`) | the header is re-paged; audio packets stay verbatim |
+| WAV | `LIST/INFO` chunk plus an `id3 ` chunk | INFO has no album artist or cover |
 
 Milestone order *(proposed)*: WAV, FLAC, MP3, Ogg Vorbis, AAC/M4A, ADTS, Speex, Opus.
 
@@ -276,7 +321,7 @@ packets in the same state. This gives:
 ## 10. Open questions
 
 1. **Platforms**: Linux only, or also Windows/macOS? (Affects packaging of
-   wxWidgets and libspeex.)
+   wxWidgets and the FFmpeg libraries.)
 2. **wxWidgets binding**: OK to use `wxdragon` (the actively maintained Rust
    binding)? Fallback would be our own thin C++ layer via `cxx`.
 3. **Containers in practice**: is your AAC in `.m4a` (phone/recorder) or raw
@@ -289,8 +334,8 @@ packets in the same state. This gives:
    players ignore it and play a few ms extra?
 6. **Output format**: always the same container as the input, or e.g. allow
    ADTS to M4A rewrapping (still lossless)?
-7. **Tags**: preserve tags/cover art? When splitting, per-track title and
-   track number?
+7. ~~**Tags**~~: decided. Each track gets its own tags (title, artist,
+   album and so on), see section 4 and the tag table in section 5.
 8. **Recording sizes**: typical and maximum length? Hours-long recordings make
    a persistent waveform cache (sidecar file vs. user cache dir) worthwhile.
 9. **Channels**: draw each channel separately, or a combined waveform?
