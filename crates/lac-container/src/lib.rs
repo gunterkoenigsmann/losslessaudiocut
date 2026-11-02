@@ -7,12 +7,14 @@
 //! new files by copying packets verbatim according to
 //! [`lac_core::CutPlan`]s. Lossy audio is never decoded or re-encoded here.
 //!
-//! Supported so far: [`wav`], [`flac`] and [`ogg`] (Vorbis, Opus, Speex). [`open`] detects the format
+//! Supported so far: [`wav`], [`flac`], [`ogg`] (Vorbis, Opus, Speex) and
+//! [`mp3`]. [`open`] detects the format
 //! from the file's content and returns it behind the common [`Container`]
 //! interface.
 
 mod bits;
 pub mod flac;
+pub mod mp3;
 pub mod ogg;
 pub mod wav;
 mod window;
@@ -134,6 +136,32 @@ impl Container for ogg::OggFile {
     }
 }
 
+impl Container for mp3::Mp3File {
+    fn format_name(&self) -> &'static str {
+        "MP3"
+    }
+    fn details(&self) -> String {
+        mp3::Mp3File::details(self)
+    }
+    fn index(&self) -> &PacketIndex {
+        mp3::Mp3File::index(self)
+    }
+    fn capabilities(&self) -> CutCapabilities {
+        mp3::Mp3File::capabilities(self)
+    }
+    fn warnings(&self) -> &[String] {
+        mp3::Mp3File::warnings(self)
+    }
+    fn write_cut(
+        &self,
+        r: &mut dyn ReadSeek,
+        plans: &[CutPlan],
+        w: &mut dyn WriteSeek,
+    ) -> Result<()> {
+        mp3::Mp3File::write_cut(self, r, plans, w)
+    }
+}
+
 /// Detects the container format from the first bytes of `r` and opens it.
 pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
     let mut head = [0u8; 12];
@@ -143,16 +171,30 @@ pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
     if head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WAVE" {
         return Ok(Box::new(wav::WavFile::open(r)?));
     }
-    // FLAC may be preceded by an ID3v2 tag; the FLAC parser skips it and
-    // fails cleanly if no FLAC stream follows.
-    if head.starts_with(b"fLaC") || head.starts_with(b"ID3") {
+    if head.starts_with(b"fLaC") {
         return Ok(Box::new(flac::FlacFile::open(r)?));
+    }
+    // An ID3v2 tag precedes MP3 and sometimes FLAC: look behind it.
+    if head.starts_with(b"ID3") {
+        let len = r.seek(SeekFrom::End(0))?;
+        let after = flac::skip_id3v2(r, len)?;
+        let mut magic = [0u8; 4];
+        r.seek(SeekFrom::Start(after))?;
+        let n = std::io::Read::read(r, &mut magic)?;
+        if &magic[..n] == b"fLaC" {
+            return Ok(Box::new(flac::FlacFile::open(r)?));
+        }
+        return Ok(Box::new(mp3::Mp3File::open(r)?));
+    }
+    // MPEG audio frame sync: 11 set bits.
+    if head.len() >= 2 && head[0] == 0xFF && head[1] & 0xE0 == 0xE0 {
+        return Ok(Box::new(mp3::Mp3File::open(r)?));
     }
     if head.starts_with(b"OggS") {
         return Ok(Box::new(ogg::OggFile::open(r)?));
     }
     Err(ContainerError::Unsupported(
-        "unknown file format (supported: WAV, FLAC, Ogg)".into(),
+        "unknown file format (supported: WAV, FLAC, Ogg, MP3)".into(),
     ))
 }
 

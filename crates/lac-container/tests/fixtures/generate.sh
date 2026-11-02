@@ -49,3 +49,18 @@ cat "$tmp/o1.opus" "$tmp/o2.opus" > ogg_opus_chained.opus
 python3 ogg_mangle.py granules ogg_vorbis_stereo_44k.ogg ogg_vorbis_badgranule.ogg
 python3 ogg_mangle.py granules ogg_opus_stereo.opus ogg_opus_badgranule.opus
 python3 ogg_mangle.py damage ogg_vorbis_stereo_44k.ogg ogg_vorbis_damaged.ogg 5
+
+# MP3, encoded by LAME (reference encoder) and by ffmpeg's libmp3lame.
+$synth "$tmp/p.wav" 44100 2 16 1.5
+lame --quiet -b 128 "$tmp/p.wav" mp3_cbr128_44k.mp3            # Info + LAME tag
+lame --quiet -V 2 "$tmp/p.wav" mp3_vbr_44k.mp3                 # Xing + LAME tag
+$synth "$tmp/q.wav" 22050 1 16 1.0
+lame --quiet -b 64 "$tmp/q.wav" mp3_mpeg2_mono_22k.mp3         # MPEG-2, 576 samples/frame
+$synth "$tmp/u.wav" 8000 1 16 1.0
+lame --quiet -b 16 "$tmp/u.wav" mp3_mpeg25_8k.mp3              # MPEG 2.5
+# No Xing/LAME tag, CRC-protected frames, ID3v1 tag at the end.
+lame --quiet -b 160 -t -p --id3v1-only --tt Fixture "$tmp/p.wav" mp3_notag_crc.mp3
+# ffmpeg's encoder string "Lavc", and an ID3v2 tag in front.
+$og -i "$tmp/p.wav" -fflags +bitexact -c:a libmp3lame -b:a 96k -metadata title=Fixture mp3_ffmpeg_id3v2.mp3
+# Junk in the middle, as left by a broken download.
+python3 mp3_damage.py mp3_cbr128_44k.mp3 mp3_junk.mp3

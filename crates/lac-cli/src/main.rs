@@ -6,7 +6,7 @@
 //! lac cut recording.wav -o out.wav --keep 0:10..3:45
 //! ```
 //!
-//! Supported formats: WAV, FLAC and Ogg Vorbis/Opus/Speex (detected from the content). Besides being useful for scripting, the CLI drives the end-to-end tests.
+//! Supported formats: WAV, FLAC, Ogg Vorbis/Opus/Speex and MP3 (detected from the content). Besides being useful for scripting, the CLI drives the end-to-end tests.
 
 mod time;
 
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use lac_container::Container;
-use lac_core::{CutPlan, EditList, SamplePos, Segment, SourceId, Tags, plan_cut};
+use lac_core::{CutPlan, EditList, SamplePos, Segment, SourceId, Tags, plan_cuts};
 
 use crate::time::{TimeRange, format_samples};
 
@@ -132,10 +132,8 @@ fn cut(input: &Path, output: &Path, delete: &[TimeRange], keep: &[TimeRange]) ->
     };
 
     let segments: Vec<Segment> = segments.into_iter().filter(|s| !s.is_empty()).collect();
-    let plans: Vec<CutPlan> = segments
-        .iter()
-        .map(|s| plan_cut(wav.index(), wav.capabilities(), s.range.clone()))
-        .collect::<Result<_, _>>()?;
+    let ranges: Vec<_> = segments.iter().map(|s| s.range.clone()).collect();
+    let plans: Vec<CutPlan> = plan_cuts(wav.index(), wav.capabilities(), &ranges)?;
 
     let mut w = BufWriter::new(
         File::create(output).with_context(|| format!("cannot create {}", output.display()))?,
