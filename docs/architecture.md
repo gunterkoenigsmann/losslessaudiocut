@@ -228,6 +228,24 @@ Tags live outside the audio packets, so rewriting them never touches audio.
 
 Milestone order *(proposed)*: WAV, FLAC, MP3, Ogg Vorbis, AAC/M4A, ADTS, Speex, Opus.
 
+### Join points inside a file
+
+Deleting a part and joining the rest creates an **internal join**: the packet
+after the gap is decoded right after the packet before the gap, not after its
+real predecessor. For PCM and FLAC this is harmless (bit-exact). For lossy
+codecs the decoder state at the join is wrong for one or two packets:
+
+| Codec | Effect at an internal join | Mitigation |
+|---|---|---|
+| MP3 | first frame after the join may reference bit-reservoir bytes that are no longer there | repack the reservoir: move the referenced main-data bytes into the frame before the join where there is room (no re-encoding); otherwise keep one pre-roll frame |
+| AAC, Vorbis, Opus | MDCT overlap-add mixes the tails of two unrelated frames: a transient of one frame (~20 ms) | Ogg: write each kept part as a **chained** logical stream with its own headers and granule trimming, which avoids the transient entirely; M4A: keep the frame and rely on the short crossfade-like overlap |
+| Speex | predictor state converges within one or two frames | none needed in practice |
+
+On top of that, the editor **suggests join points in quiet packets** (it has
+the per-packet RMS from the waveform cache), because most deletions remove
+pauses, and a transient in near-silence is inaudible. The exactness report
+lists every internal join and the samples that are not bit-identical.
+
 ## 6. Waveform display
 
 ### Rendering rule
@@ -390,18 +408,16 @@ packets in the same state. This gives:
 | Recording length | up to several hours |
 | Waveform cache | per-user cache directory with automatic eviction |
 | Channels | 1 to 4 (no fixed limit in code), one lane per channel |
+| Editing model | delete parts and join the rest into one file; split into tracks with own tags. Joining separate recordings is not planned. |
 | Exactness | packet granularity first; sample-exact trimming metadata is a later, optional feature (the `CutPlan` fields exist from the start, set to 0) |
 | Video | future extension, see section 13; the core model must not rule it out |
 
 ## 12. Open questions
 
-1. **Editing model**: delete regions and keep one file, split one recording
-   into several files (tracks), join several recordings, or all three?
-   Joining needs identical codec parameters to stay lossless.
-2. **Output format**: always the same container as the input, or also
+1. **Output format**: always the same container as the input, or also
    rewrapping without re-encoding, e.g. ADTS `.aac` to `.m4a`? *(Proposed:
    same container by default, rewrapping as a later feature.)*
-3. **Matroska/WebM** (`.mka`, `.webm`): also used by some recorders. Add to
+2. **Matroska/WebM** (`.mka`, `.webm`): also used by some recorders. Add to
    the format list later?
 
 ## 13. Future: lossless video cutting
