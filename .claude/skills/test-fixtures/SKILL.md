@@ -43,6 +43,21 @@ Typical encoders: `pcm_s16le` (WAV), `flac`, `libmp3lame`, `aac` (`.m4a` and
 encoder is missing in ffmpeg, note it in the script and skip that fixture
 with a clear message.
 
+## Damaged and hostile fixtures
+
+Real recordings are messy, so the generator also derives broken variants from
+clean files (with a small Rust or Python helper committed next to the
+script, never by hand-editing bytes):
+
+- `_badgranule`: Ogg with random granule positions (large start offset,
+  jumps, values going backwards), as written by many radio stream captures.
+  Tests assert that the computed timeline is identical to the clean file's.
+- `_chained`: two or more Ogg logical streams concatenated, each with its own
+  comment header.
+- `_midstream`: Ogg starting with a partial page, and a variant with a page
+  whose CRC is wrong; the demuxer must resync and report, not fail.
+- `_truncated`: any format cut off in the middle of a packet.
+
 ## Verifying a cut by hand
 
 Decode both files to raw PCM with an independent decoder and compare:
