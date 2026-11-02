@@ -405,6 +405,21 @@ Grain restart comes first because it is the simplest and proven. Varispeed
 and pitch preservation reuse the same command and render structure and only
 add a render step, so they can follow without changing the engine.
 
+### Playback speed
+
+Normal playback has an adjustable speed, e.g. 0.5x to 3x in steps
+(keyboard shortcuts plus a control in the transport bar), for listening
+through long speech recordings faster or slowing down a passage to find an
+exact cut point:
+
+- By default the **pitch is preserved** with the same time-stretcher as
+  pitch-preserving scrub (WSOLA, which keeps speech intelligible and is
+  cheap). An option switches to plain varispeed (pitch follows speed).
+- Speed is a `SetRate` command like any other, so it can change during
+  playback without a gap. The position counter always reports *timeline*
+  positions, so the cursor stays correct at any speed.
+- Speed only affects listening. It is never applied to exported files.
+
 Scrubbing works on the **timeline** (after edits), so you scrub through the
 result of your cuts. Two details make it feel right:
 
@@ -497,6 +512,7 @@ packets in the same state. This gives:
 | Editing model | delete parts and join the rest into one file; split into tracks with own tags. Joining separate recordings is not planned. |
 | Exactness | packet granularity first; sample-exact trimming metadata is a later, optional feature (the `CutPlan` fields exist from the start, set to 0) |
 | Scrubbing | grain restart while dragging (~40 ms grains, 5 ms crossfade) first; varispeed and pitch-preserving scrub later as further render modes |
+| Playback speed | adjustable (e.g. 0.5x-3x), pitch-preserving (WSOLA) by default, varispeed as option; listening only |
 | Video | future extension, see section 13; the core model must not rule it out |
 
 ## 12. Open questions
