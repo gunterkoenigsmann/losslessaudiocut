@@ -3,8 +3,8 @@
 A lossless audio cutter in Rust: delete parts of a recording, join the rest
 or split it into tracks, without ever re-encoding lossy audio.
 
-Status: early development. WAV cutting works from the command line; the
-other formats and the wxWidgets GUI follow. See
+Status: early development. WAV and FLAC cutting work from the command line;
+Ogg, MP3, the other formats and the wxWidgets GUI follow. See
 [`docs/architecture.md`](docs/architecture.md) for the design.
 
 ## Command line
@@ -26,7 +26,9 @@ cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
-Some tests cross-check results with `ffmpeg` if it is installed. See
+Some tests cross-check results with `ffmpeg` and `flac` if they are
+installed; set `LAC_REQUIRE_TOOLS=1` to make missing tools an error.
+Test fixtures are regenerated with `crates/lac-container/tests/fixtures/generate.sh`. See
 [`AGENTS.md`](AGENTS.md) for conventions.
 
 ## License

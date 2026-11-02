@@ -128,3 +128,30 @@ fn rejects_unsupported_format() {
     let out = lac().arg("info").arg(&input).output().expect("run lac");
     assert!(!out.status.success());
 }
+
+#[test]
+fn flac_is_detected_and_cut() {
+    let d = temp_dir("flac");
+    let input = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../lac-container/tests/fixtures/flac_stereo16_44k.flac");
+    let output = d.join("out.flac");
+    let out = lac()
+        .arg("cut")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .args(["--delete", "0.25..1"])
+        .output()
+        .expect("run lac");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let info = lac().arg("info").arg(&output).output().expect("run lac");
+    let text = String::from_utf8_lossy(&info.stdout);
+    assert!(text.contains("FLAC"), "{text}");
+    // 1.5 s source minus 0.75 s.
+    assert!(text.contains("0:00.750"), "{text}");
+    assert!(!text.contains("warning"), "{text}");
+}

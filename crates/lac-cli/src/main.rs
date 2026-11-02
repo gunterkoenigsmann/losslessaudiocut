@@ -6,7 +6,7 @@
 //! lac cut recording.wav -o out.wav --keep 0:10..3:45
 //! ```
 //!
-//! Besides being useful for scripting, the CLI drives the end-to-end tests.
+//! Supported formats: WAV and FLAC (detected from the content). Besides being useful for scripting, the CLI drives the end-to-end tests.
 
 mod time;
 
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use lac_container::wav::WavFile;
+use lac_container::Container;
 use lac_core::{CutPlan, EditList, SamplePos, Segment, SourceId, Tags, plan_cut};
 
 use crate::time::{TimeRange, format_samples};
@@ -69,31 +69,21 @@ fn main() -> Result<()> {
     }
 }
 
-/// Opens a WAV file; other formats follow in later versions.
-fn open(path: &Path) -> Result<(WavFile, BufReader<File>)> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase);
-    if ext.as_deref() != Some("wav") {
-        bail!("{}: only WAV files are supported so far", path.display());
-    }
+/// Opens a file of any supported format, detected from its content.
+fn open(path: &Path) -> Result<(Box<dyn Container>, BufReader<File>)> {
     let mut r = BufReader::new(
         File::open(path).with_context(|| format!("cannot open {}", path.display()))?,
     );
-    let wav = WavFile::open(&mut r).with_context(|| format!("cannot read {}", path.display()))?;
-    Ok((wav, r))
+    let c =
+        lac_container::open(&mut r).with_context(|| format!("cannot read {}", path.display()))?;
+    Ok((c, r))
 }
 
 fn info(path: &Path) -> Result<()> {
-    let (wav, _) = open(path)?;
-    let i = wav.info();
-    let total = wav.index().total_samples();
-    println!(
-        "format:      WAV ({:?}, {} bit)",
-        wav.encoding(),
-        wav.bits_per_sample()
-    );
+    let (c, _) = open(path)?;
+    let i = c.index().info();
+    let total = c.index().total_samples();
+    println!("format:      {} ({})", c.format_name(), c.details());
     println!("sample rate: {} Hz", i.sample_rate);
     println!("channels:    {}", i.channels);
     println!(
@@ -101,7 +91,7 @@ fn info(path: &Path) -> Result<()> {
         format_samples(total, i.sample_rate),
         total
     );
-    for w in wav.warnings() {
+    for w in c.warnings() {
         println!("warning:     {w}");
     }
     Ok(())
@@ -112,7 +102,7 @@ fn cut(input: &Path, output: &Path, delete: &[TimeRange], keep: &[TimeRange]) ->
         bail!("output must not be the input file");
     }
     let (wav, mut r) = open(input)?;
-    let rate = wav.info().sample_rate;
+    let rate = wav.index().info().sample_rate;
     let total = wav.index().total_samples();
     let source = SourceId(0);
 

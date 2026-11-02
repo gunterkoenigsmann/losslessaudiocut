@@ -3,26 +3,16 @@
 //! Test files are built in memory by [`build_wav`] from deterministic
 //! pseudo-random samples, so no fixtures are needed for this format.
 
+mod common;
+
 use std::io::Cursor;
-use std::process::Command;
 
 use lac_container::ContainerError;
 use lac_container::wav::{BLOCK_FRAMES, SampleEncoding, WavFile};
 use lac_core::{EditList, SourceId, Tags, plan_cut};
 use proptest::prelude::*;
 
-/// Deterministic pseudo-random bytes (xorshift), so failures reproduce.
-fn noise(len: usize, seed: u64) -> Vec<u8> {
-    let mut x = seed | 1;
-    (0..len)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            (x >> 24) as u8
-        })
-        .collect()
-}
+use common::noise;
 
 /// Parameters of a generated WAV file.
 #[derive(Clone, Copy)]
@@ -321,30 +311,11 @@ proptest! {
 // ------------------------------------------------- independent cross-check
 
 /// Decodes `wav` with ffmpeg to raw bytes in its own sample format.
-/// Returns `None` if ffmpeg is not installed, unless `LAC_REQUIRE_FFMPEG`
-/// is set (as in CI), in which case a missing ffmpeg fails the test.
 fn ffmpeg_raw(wav: &[u8], raw_format: &str) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("lac-wav-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join(format!("{raw_format}.wav"));
-    std::fs::write(&path, wav).expect("write temp file");
-    let result = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(&path)
-        .args(["-f", raw_format, "-"])
-        .output();
+    let path = common::temp_file(&format!("wav-{raw_format}.wav"), wav);
+    let out = common::ffmpeg_decode(&path, raw_format);
     let _ = std::fs::remove_file(&path);
-    match result {
-        Ok(o) if o.status.success() => Some(o.stdout),
-        Ok(o) => panic!("ffmpeg failed: {}", String::from_utf8_lossy(&o.stderr)),
-        Err(_) if std::env::var_os("LAC_REQUIRE_FFMPEG").is_some() => {
-            panic!("ffmpeg is required (LAC_REQUIRE_FFMPEG is set) but not installed")
-        }
-        Err(_) => {
-            eprintln!("ffmpeg not installed, skipping cross-check");
-            None
-        }
-    }
+    out
 }
 
 #[test]

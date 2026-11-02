@@ -204,8 +204,8 @@ pub struct CutPlan {
 
 | Format | Demux | Mux | Best exactness | Notes |
 |---|---|---|---|---|
-| WAV | RIFF chunks | RIFF, rewrite `data` size | sample-exact, bit-exact | trivial; first milestone |
-| FLAC | frame sync + CRC, STREAMINFO | copy frames, re-encode boundary frames losslessly, fix STREAMINFO (total samples, MD5), rebuild SEEKTABLE, renumber frames | sample-exact, bit-exact | needs a small FLAC *encoder* for boundary frames (verbatim/fixed predictor subframes are enough) |
+| WAV | RIFF chunks | RIFF, rewrite `data` size | sample-exact, bit-exact *(implemented)* | trivial; first milestone |
+| FLAC | frame sync + CRC-16 chaining (no decoding), STREAMINFO | copy frames with rewritten variable-block-size headers, re-encode boundary frames losslessly (FIXED predictor + Rice), fix STREAMINFO (total samples, block/frame sizes, MD5), drop SEEKTABLE/CUESHEET | sample-exact, bit-exact *(implemented)* | the small FLAC decoder/encoder lives in `lac-container`, since boundary frames must be rewritten there |
 | MP3 | frame headers, Xing/LAME tag | copy frames incl. reservoir pre-roll, write new LAME tag with delay/padding | sample-exact on gapless-aware players, otherwise ±1 frame (26 ms) | `main_data_begin` tells exactly how many earlier frames are needed |
 | AAC (ADTS) | ADTS headers | copy frames + 1 pre-roll frame | 1 frame (21 ms at 48 kHz) | ADTS has no trimming metadata |
 | AAC (M4A) | `stsz`/`stco`/`stts` | new `moov` with edit list | sample-exact via `elst` | most phone recorders produce M4A |
