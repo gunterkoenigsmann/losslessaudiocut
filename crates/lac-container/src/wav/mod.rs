@@ -95,7 +95,7 @@ pub struct WavFile {
 impl WavFile {
     /// Parses the file structure. Reads only the chunk headers and the
     /// `fmt ` chunk, never the sample data.
-    pub fn open<R: Read + Seek>(r: &mut R) -> Result<Self> {
+    pub fn open<R: Read + Seek + ?Sized>(r: &mut R) -> Result<Self> {
         let file_len = r.seek(SeekFrom::End(0))?;
         r.seek(SeekFrom::Start(0))?;
 
@@ -235,7 +235,7 @@ impl WavFile {
     ///
     /// For PCM this *is* the decoded audio, which makes it the reference for
     /// equivalence tests.
-    pub fn read_frames<R: Read + Seek>(
+    pub fn read_frames<R: Read + Seek + ?Sized>(
         &self,
         r: &mut R,
         range: Range<SamplePos>,
@@ -253,7 +253,7 @@ impl WavFile {
     ///
     /// The `fmt ` chunk is copied unchanged; sample bytes are copied
     /// verbatim. Other chunks of the source are not copied yet.
-    pub fn write_cut<R: Read + Seek, W: Write>(
+    pub fn write_cut<R: Read + Seek + ?Sized, W: Write + ?Sized>(
         &self,
         r: &mut R,
         plans: &[CutPlan],
@@ -288,7 +288,7 @@ impl WavFile {
         w.write_all(&data_size.to_le_bytes())?;
         for b in byte_ranges {
             r.seek(SeekFrom::Start(b.start))?;
-            let n = io::copy(&mut r.by_ref().take(b.end - b.start), w)?;
+            let n = io::copy(&mut (&mut *r).take(b.end - b.start), w)?;
             if n != b.end - b.start {
                 return Err(malformed(b.start + n, "file shrank while copying"));
             }
@@ -408,7 +408,7 @@ fn build_index(
         .map_err(|e| ContainerError::InvalidPlan(format!("internal index error: {e}")))
 }
 
-fn read_exact_at<R: Read + Seek>(r: &mut R, buf: &mut [u8], pos: u64) -> Result<()> {
+fn read_exact_at<R: Read + Seek + ?Sized>(r: &mut R, buf: &mut [u8], pos: u64) -> Result<()> {
     r.seek(SeekFrom::Start(pos))?;
     r.read_exact(buf).map_err(|e| {
         if e.kind() == io::ErrorKind::UnexpectedEof {

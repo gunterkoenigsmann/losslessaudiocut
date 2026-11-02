@@ -33,16 +33,16 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # ffmpeg is the independent reference decoder for cross-checks. It is
-      # installed (and therefore required) on Linux; on macOS and Windows the
-      # cross-checks skip themselves to keep CI fast.
-      - name: Install ffmpeg
+      # ffmpeg and the reference flac tool are the independent decoders for
+      # cross-checks. They are installed (and therefore required) on Linux;
+      # on macOS and Windows the cross-checks skip themselves to keep CI fast.
+      - name: Install reference tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
-      - name: Require ffmpeg cross-checks
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg flac
+      - name: Require cross-checks
         if: runner.os == 'Linux'
         shell: bash
-        run: echo "LAC_REQUIRE_FFMPEG=1" >> "$GITHUB_ENV"
+        run: echo "LAC_REQUIRE_TOOLS=1" >> "$GITHUB_ENV"
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
       - name: Documentation

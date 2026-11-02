@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 lac-core.workspace = true
+md-5 = "0.11.0"
 thiserror.workspace = true
 
 [dev-dependencies]
