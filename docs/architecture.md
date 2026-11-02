@@ -209,9 +209,9 @@ pub struct CutPlan {
 | MP3 | frame headers, Xing/LAME tag | copy frames incl. reservoir pre-roll, write new LAME tag with delay/padding | sample-exact on gapless-aware players, otherwise ±1 frame (26 ms) | `main_data_begin` tells exactly how many earlier frames are needed |
 | AAC (ADTS) | ADTS headers | copy frames + 1 pre-roll frame | 1 frame (21 ms at 48 kHz) | ADTS has no trimming metadata |
 | AAC (M4A) | `stsz`/`stco`/`stts` | new `moov` with edit list | sample-exact via `elst` | most phone recorders produce M4A |
-| Ogg Vorbis | pages; timestamps from packet durations, granule pos only as hint | new pages, copy headers, new serial, CRC | sample-exact via granule positions | block size variable, pre-roll of one packet |
-| Ogg Opus | as above | as above, adjust `pre_skip` | sample-exact | |
-| Speex | Ogg pages, Speex header | as Vorbis | sample-exact via granule positions | |
+| Ogg Vorbis | pages; timestamps from packet durations, granule positions ignored | new pages, copy headers, new serial, CRC; one chained stream per kept part, led by its predecessor packet as pre-roll | packet-granular, bit-exact including joins *(implemented)*; sample-exact via granule positions later | block size variable (64..8192) |
+| Ogg Opus | as above; pre-skip from `OpusHead` | as Vorbis, with at least 80 ms pre-roll hidden by a rewritten `pre_skip` | packet-granular (2.5..120 ms) *(implemented)*; bit-exact after a short convergence window at joins | |
+| Speex | Ogg pages, Speex header | as Vorbis, but all kept parts of a link in one stream, no pre-roll | packet-granular (20 ms) *(implemented)*; bit-exact after convergence at joins | ffmpeg and speexdec do not handle chained Speex |
 
 ### Tags per container
 
@@ -226,7 +226,7 @@ Tags live outside the audio packets, so rewriting them never touches audio.
 | Ogg Vorbis / Opus / Speex | the comment header packet (`TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `TRACKNUMBER`, `TRACKTOTAL`, `DATE`, `GENRE`, `COMMENT`, `METADATA_BLOCK_PICTURE`) | the header is re-paged; audio packets stay verbatim |
 | WAV | `LIST/INFO` chunk plus an `id3 ` chunk | INFO has no album artist or cover |
 
-Milestone order *(proposed)*: WAV, FLAC, MP3, Ogg Vorbis, AAC/M4A, ADTS, Speex, Opus.
+Milestone order *(agreed)*: WAV, FLAC, Ogg (Vorbis, Opus, Speex), MP3, then the GUI, then AAC/M4A and ADTS.
 
 ### Ogg with unreliable granule positions
 
@@ -240,17 +240,19 @@ them, so we must too:
   flags of the current and previous packet (mode header), Opus from the TOC
   byte, Speex from frames-per-packet in the header. `first_sample` is the
   running sum of those durations.
-- Granule positions are read only as a hint and compared with the computed
-  timeline. Disagreement is not an error; the file is flagged "granule
-  positions unreliable" so that end trimming based on the last page's granule
-  is not trusted either.
+- Granule positions are not read at all *(implemented)*. Consequently the
+  end trimming a clean file announces through its last granule is not
+  applied either: the timeline may be up to one packet longer than what a
+  granule-trusting player outputs. (Using the last granule when it is
+  consistent with the computed timeline is a possible refinement.)
 - Export **always writes fresh, consistent granule positions** starting at
   zero, a new serial number and recomputed CRCs, so cut files are cleaner
   than the source.
 - Radio captures are often **chained** (a new logical stream, with new
   headers, per song or metadata change). Each chain link is indexed
-  separately; a link boundary with a new comment header is offered as a
-  track boundary and its title tag as the track's title.
+  separately *(implemented)*; a link boundary with a new comment header is
+  offered as a track boundary and its title tag as the track's title
+  *(planned)*. All links must share codec, rate and channel count.
 - Captures can start mid-stream or contain damaged pages from network
   dropouts. The demuxer resyncs on the next `OggS` capture pattern with a
   valid CRC, skips damaged pages and lists them in a load report instead of
@@ -266,8 +268,14 @@ codecs the decoder state at the join is wrong for one or two packets:
 | Codec | Effect at an internal join | Mitigation |
 |---|---|---|
 | MP3 | first frame after the join may reference bit-reservoir bytes that are no longer there | repack the reservoir: move the referenced main-data bytes into the frame before the join where there is room (no re-encoding); otherwise keep one pre-roll frame |
-| AAC, Vorbis, Opus | MDCT overlap-add mixes the tails of two unrelated frames: a transient of one frame (~20 ms) | Ogg: write each kept part as a **chained** logical stream with its own headers and granule trimming, which avoids the transient entirely; M4A: keep the frame and rely on the short crossfade-like overlap |
-| Speex | predictor state converges within one or two frames | none needed in practice |
+| AAC | MDCT overlap-add mixes the tails of two unrelated frames: a transient of one frame (~20 ms) | M4A: keep the frame and rely on the short crossfade-like overlap |
+| Vorbis | as AAC | each kept part becomes a **chained** logical stream that starts with its real predecessor packet, whose output a new stream discards: **no join window**, bit-exact *(implemented)*. Caveat: ffmpeg does not reset its Vorbis decoder at a chain boundary and plays one extra overlap (≤ 23 ms) per join; libvorbisfile-based players are exact |
+| Opus | CELT/SILK prediction state | each kept part becomes a chained stream with ≥ 80 ms pre-roll hidden by `pre_skip` (RFC 7845 4.3) *(implemented)*. The output is bit-exact again once the decoder has converged; the window depends on the content, typically < 100 ms |
+| Speex | CELP predictor and pitch memory | none: parts are joined within one stream *(implemented)*. The output is bit-exact again once the state is flushed, at the latest after the next pause; on steady tones this can take long |
+
+Tests use a speech-like fixture signal (syllables separated by 80 ms of
+silence) and require Opus and Speex output to be bit-exact from 250 ms after
+each join point on.
 
 On top of that, the editor **suggests join points in quiet packets** (it has
 the per-packet RMS from the waveform cache), because most deletions remove

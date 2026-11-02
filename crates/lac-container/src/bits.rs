@@ -1,6 +1,8 @@
-//! Big-endian bit-level reading and writing, as used by FLAC (and later MP3).
+//! Bit-level reading and writing.
 //!
-//! Both work MSB-first: the first bit of a byte is its most significant bit.
+//! [`BitReader`] and [`BitWriter`] work MSB-first (FLAC, MP3): the first bit
+//! of a byte is its most significant bit. [`LsbBitReader`] works LSB-first,
+//! as Vorbis packs its bitstream.
 
 /// Raised when a read runs past the end of the data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -130,6 +132,42 @@ impl BitWriter {
     }
 }
 
+/// Reads bits LSB-first (Vorbis I specification, section 2.1.4): the first
+/// bit of a byte is its least significant bit, and multi-bit values are
+/// assembled starting with their least significant bit.
+#[derive(Debug, Clone)]
+pub struct LsbBitReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> LsbBitReader<'a> {
+    /// Starts reading at the first bit of `data`.
+    pub fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    /// Reads `n` bits (0..=32).
+    pub fn read(&mut self, n: u32) -> Result<u32, EndOfData> {
+        debug_assert!(n <= 32);
+        if self.pos + n as usize > self.data.len() * 8 {
+            return Err(EndOfData);
+        }
+        let mut v: u64 = 0;
+        for i in 0..n {
+            let bit = (self.data[self.pos / 8] >> (self.pos % 8)) & 1;
+            v |= u64::from(bit) << i;
+            self.pos += 1;
+        }
+        Ok(v as u32)
+    }
+
+    /// Reads one bit as a flag.
+    pub fn flag(&mut self) -> Result<bool, EndOfData> {
+        self.read(1).map(|b| b == 1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +180,17 @@ mod tests {
         assert_eq!(r.read_u32(7), Ok(0b011_0001));
         assert_eq!(r.read_i64(6), Ok(0b01_0011));
         assert_eq!(r.read_u32(1), Err(EndOfData));
+    }
+
+    #[test]
+    fn lsb_first_reading() {
+        // 0b1011_0110: LSB-first the bits are 0,1,1,0,1,1,0,1.
+        let mut r = LsbBitReader::new(&[0b1011_0110, 0x01]);
+        assert_eq!(r.read(1), Ok(0));
+        assert_eq!(r.read(3), Ok(0b011));
+        assert_eq!(r.read(6), Ok(0b01_1011));
+        assert_eq!(r.read(6), Ok(0));
+        assert_eq!(r.read(1), Err(EndOfData));
     }
 
     #[test]

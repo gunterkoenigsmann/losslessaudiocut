@@ -6,7 +6,7 @@
 //! lac cut recording.wav -o out.wav --keep 0:10..3:45
 //! ```
 //!
-//! Supported formats: WAV and FLAC (detected from the content). Besides being useful for scripting, the CLI drives the end-to-end tests.
+//! Supported formats: WAV, FLAC and Ogg Vorbis/Opus/Speex (detected from the content). Besides being useful for scripting, the CLI drives the end-to-end tests.
 
 mod time;
 

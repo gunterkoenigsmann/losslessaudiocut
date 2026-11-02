@@ -7,13 +7,15 @@
 //! new files by copying packets verbatim according to
 //! [`lac_core::CutPlan`]s. Lossy audio is never decoded or re-encoded here.
 //!
-//! Supported so far: [`wav`] and [`flac`]. [`open`] detects the format
+//! Supported so far: [`wav`], [`flac`] and [`ogg`] (Vorbis, Opus, Speex). [`open`] detects the format
 //! from the file's content and returns it behind the common [`Container`]
 //! interface.
 
 mod bits;
 pub mod flac;
+pub mod ogg;
 pub mod wav;
+mod window;
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -100,6 +102,38 @@ impl Container for flac::FlacFile {
     }
 }
 
+impl Container for ogg::OggFile {
+    fn format_name(&self) -> &'static str {
+        "Ogg"
+    }
+    fn details(&self) -> String {
+        let n = self.links();
+        let chain = if n > 1 {
+            format!(", {n} chained streams")
+        } else {
+            String::new()
+        };
+        format!("{}{chain}", self.codec().name())
+    }
+    fn index(&self) -> &PacketIndex {
+        ogg::OggFile::index(self)
+    }
+    fn capabilities(&self) -> CutCapabilities {
+        ogg::OggFile::capabilities(self)
+    }
+    fn warnings(&self) -> &[String] {
+        ogg::OggFile::warnings(self)
+    }
+    fn write_cut(
+        &self,
+        r: &mut dyn ReadSeek,
+        plans: &[CutPlan],
+        w: &mut dyn WriteSeek,
+    ) -> Result<()> {
+        ogg::OggFile::write_cut(self, r, plans, w)
+    }
+}
+
 /// Detects the container format from the first bytes of `r` and opens it.
 pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
     let mut head = [0u8; 12];
@@ -114,8 +148,11 @@ pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
     if head.starts_with(b"fLaC") || head.starts_with(b"ID3") {
         return Ok(Box::new(flac::FlacFile::open(r)?));
     }
+    if head.starts_with(b"OggS") {
+        return Ok(Box::new(ogg::OggFile::open(r)?));
+    }
     Err(ContainerError::Unsupported(
-        "unknown file format (supported: WAV, FLAC)".into(),
+        "unknown file format (supported: WAV, FLAC, Ogg)".into(),
     ))
 }
 
