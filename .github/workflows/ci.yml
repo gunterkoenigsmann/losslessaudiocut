@@ -54,6 +54,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
+      # The prebuilt cargo-fuzz is a musl binary and would default to
+      # building for musl, which has no ASan runtime; name the target.
       # -max_len keeps inputs small so each run is fast; the seeds are
       # cut to that length, which still keeps their headers. -timeout
       # turns a hang (a parser loop that never advances) into a failure.
@@ -61,12 +63,12 @@ jobs:
         working-directory: fuzz
         run: |
           mkdir -p corpus/${{ matrix.target }}
-          cargo +nightly fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} \
+          cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target }} corpus/${{ matrix.target }} \
             ../crates/lac-container/tests/fixtures -- \
             -max_total_time=120 -max_len=8192 -timeout=10 -rss_limit_mb=2048
       - name: Upload crashing input
         if: failure()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: fuzz-${{ matrix.target }}-artifacts
           path: fuzz/artifacts/
