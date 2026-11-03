@@ -150,13 +150,19 @@ fn assert_decodes_like_source(
     );
     let mut out_pos = 0;
     let mut prev_end = None;
+    // Samples of the current join window not yet skipped. The window
+    // counts from the join in the output, so a range shorter than the
+    // window passes the rest on to the range after it, even when that one
+    // continues it seamlessly in the source.
+    let mut window_left = 0;
     for p in plans {
         let r = p.actual.start as usize..p.actual.end as usize;
-        // A range continuing the previous one is no join.
-        let skip = match prev_end {
-            Some(e) if e != p.actual.start => JOIN_WINDOW.min(r.len()),
-            _ => 0,
-        };
+        // A range continuing the previous one is no new join.
+        if matches!(prev_end, Some(e) if e != p.actual.start) {
+            window_left = JOIN_WINDOW;
+        }
+        let skip = window_left.min(r.len());
+        window_left -= skip;
         // Hidden encoder delay played in front of a join: not in the source.
         out_pos += p.padding_before as usize;
         let want = &s[(r.start + skip) * frame..r.end * frame];
@@ -400,6 +406,20 @@ fn encoder_delay_at_a_join_is_reported() {
     let first = f.index().packets()[0];
     assert!(first.hidden_before > 0, "fixture has an encoder delay");
     assert_eq!(p[1].padding_before, u64::from(first.hidden_before));
+    let out = write(&src, &f, &p);
+    check(name, &src, &out, &p);
+}
+
+/// Regression (found by `random_deletes`): the join transient of MPEG-2.5
+/// lasts two 576-sample frames. When the range after a join is a single
+/// frame, the window continues into the next range, even though that one
+/// continues the previous range seamlessly in the source.
+#[test]
+fn join_window_spans_short_ranges() {
+    let name = FIXTURES[3].0;
+    let src = fixture(name);
+    let f = open(&src);
+    let p = plans(&f, &[0..1152, 2304..2880, 2880..9216]);
     let out = write(&src, &f, &p);
     check(name, &src, &out, &p);
 }
