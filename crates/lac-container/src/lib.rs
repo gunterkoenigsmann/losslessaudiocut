@@ -13,6 +13,7 @@
 //! interface.
 
 mod bits;
+pub mod decode;
 pub mod flac;
 pub mod mp3;
 pub mod ogg;
@@ -22,6 +23,8 @@ mod window;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use lac_core::{CutCapabilities, CutPlan, PacketIndex};
+
+pub use decode::{Codec, DecodeSection};
 
 /// Anything that can be read and seeked; used for trait objects.
 pub trait ReadSeek: Read + Seek {}
@@ -50,6 +53,16 @@ pub trait Container {
         plans: &[CutPlan],
         w: &mut dyn WriteSeek,
     ) -> Result<()>;
+    /// How to decode the source, see [`decode`]. Reads codec headers from
+    /// `r` where the format keeps them in the file.
+    fn decode_sections(&self, r: &mut dyn ReadSeek) -> Result<Vec<DecodeSection>>;
+    /// Packet `packet` of section `section`, as the decoder wants it.
+    fn read_decode_packet(
+        &self,
+        r: &mut dyn ReadSeek,
+        section: usize,
+        packet: usize,
+    ) -> Result<Vec<u8>>;
 }
 
 impl Container for wav::WavFile {
@@ -76,6 +89,17 @@ impl Container for wav::WavFile {
     ) -> Result<()> {
         wav::WavFile::write_cut(self, r, plans, w)
     }
+    fn decode_sections(&self, r: &mut dyn ReadSeek) -> Result<Vec<DecodeSection>> {
+        wav::WavFile::decode_sections(self, r)
+    }
+    fn read_decode_packet(
+        &self,
+        r: &mut dyn ReadSeek,
+        section: usize,
+        packet: usize,
+    ) -> Result<Vec<u8>> {
+        wav::WavFile::read_decode_packet(self, r, section, packet)
+    }
 }
 
 impl Container for flac::FlacFile {
@@ -101,6 +125,17 @@ impl Container for flac::FlacFile {
         w: &mut dyn WriteSeek,
     ) -> Result<()> {
         flac::FlacFile::write_cut(self, r, plans, w)
+    }
+    fn decode_sections(&self, r: &mut dyn ReadSeek) -> Result<Vec<DecodeSection>> {
+        flac::FlacFile::decode_sections(self, r)
+    }
+    fn read_decode_packet(
+        &self,
+        r: &mut dyn ReadSeek,
+        section: usize,
+        packet: usize,
+    ) -> Result<Vec<u8>> {
+        flac::FlacFile::read_decode_packet(self, r, section, packet)
     }
 }
 
@@ -134,6 +169,17 @@ impl Container for ogg::OggFile {
     ) -> Result<()> {
         ogg::OggFile::write_cut(self, r, plans, w)
     }
+    fn decode_sections(&self, r: &mut dyn ReadSeek) -> Result<Vec<DecodeSection>> {
+        ogg::OggFile::decode_sections(self, r)
+    }
+    fn read_decode_packet(
+        &self,
+        r: &mut dyn ReadSeek,
+        section: usize,
+        packet: usize,
+    ) -> Result<Vec<u8>> {
+        ogg::OggFile::read_decode_packet(self, r, section, packet)
+    }
 }
 
 impl Container for mp3::Mp3File {
@@ -159,6 +205,17 @@ impl Container for mp3::Mp3File {
         w: &mut dyn WriteSeek,
     ) -> Result<()> {
         mp3::Mp3File::write_cut(self, r, plans, w)
+    }
+    fn decode_sections(&self, r: &mut dyn ReadSeek) -> Result<Vec<DecodeSection>> {
+        mp3::Mp3File::decode_sections(self, r)
+    }
+    fn read_decode_packet(
+        &self,
+        r: &mut dyn ReadSeek,
+        section: usize,
+        packet: usize,
+    ) -> Result<Vec<u8>> {
+        mp3::Mp3File::read_decode_packet(self, r, section, packet)
     }
 }
 

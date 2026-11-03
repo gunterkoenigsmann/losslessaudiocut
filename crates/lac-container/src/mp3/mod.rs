@@ -105,6 +105,9 @@ pub struct Mp3File {
     /// only for an entry partly inside the encoder delay).
     entry_offset: Vec<u32>,
     vbr: bool,
+    /// Decoder output (from the first frame on) that forms the timeline:
+    /// encoder delay plus decoder delay skipped, end padding dropped.
+    decode_keep: Range<u64>,
     index: PacketIndex,
     warnings: Vec<String>,
 }
@@ -219,6 +222,7 @@ impl Mp3File {
             entry_frame,
             entry_offset,
             vbr,
+            decode_keep: skip..stop,
             index,
             warnings,
         })
@@ -264,6 +268,47 @@ impl Mp3File {
             lossless_reencode: false,
             trims_at_file_ends_only: true,
         }
+    }
+
+    /// A single section of all frames in file order (also those inside the
+    /// encoder delay, which build up the bit reservoir).
+    pub fn decode_sections<R: Read + Seek + ?Sized>(
+        &self,
+        _r: &mut R,
+    ) -> Result<Vec<crate::DecodeSection>> {
+        Ok(vec![crate::DecodeSection {
+            codec: crate::Codec::Mp3,
+            sample_rate: self.first.sample_rate(),
+            channels: self.index.info().channels,
+            extradata: Vec::new(),
+            packets: self.frames.len(),
+            keep: self.decode_keep.clone(),
+        }])
+    }
+
+    /// The bytes of frame `packet` exactly as in the file. Its main data
+    /// may lie in earlier frames; the decoder has seen those before.
+    pub fn read_decode_packet<R: Read + Seek + ?Sized>(
+        &self,
+        r: &mut R,
+        section: usize,
+        packet: usize,
+    ) -> Result<Vec<u8>> {
+        if section != 0 {
+            return Err(crate::decode::no_section(section));
+        }
+        let f = self
+            .frames
+            .get(packet)
+            .ok_or_else(|| ContainerError::InvalidPlan(format!("no frame {packet}")))?;
+        r.seek(SeekFrom::Start(f.offset))?;
+        let mut out = Vec::with_capacity(f.header.frame_len());
+        // The last frame of a truncated file may be cut short: hand the
+        // decoder what exists, padded with zeros (silence in the reservoir
+        // model, like `main_data`).
+        r.take(f.header.frame_len() as u64).read_to_end(&mut out)?;
+        out.resize(f.header.frame_len(), 0);
+        Ok(out)
     }
 
     /// What the decoder reads for index entry `entry` apart from the

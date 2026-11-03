@@ -258,6 +258,65 @@ impl OggFile {
         }
     }
 
+    /// One section per chained stream (link) that holds audio. Its
+    /// packets are all audio packets of the link, also those that are not
+    /// audible (Vorbis's first packet, Opus pre-skip), so the decoder state
+    /// builds up as in any player; `keep` is the link's audible part. The
+    /// extradata is the identification header for Opus and Speex, and all
+    /// three headers in Xiph lacing for Vorbis.
+    pub fn decode_sections<R: Read + Seek + ?Sized>(
+        &self,
+        r: &mut R,
+    ) -> Result<Vec<crate::DecodeSection>> {
+        self.decode_links()
+            .map(|l| {
+                let headers = l
+                    .headers
+                    .iter()
+                    .map(|h| read_pieces(r, h))
+                    .collect::<Result<Vec<_>>>()?;
+                let (codec, extradata) = match l.info.kind {
+                    CodecKind::Vorbis => (crate::Codec::Vorbis, crate::decode::xiph_lace(&headers)),
+                    CodecKind::Opus => (crate::Codec::Opus, first_header(headers)),
+                    CodecKind::Speex => (crate::Codec::Speex, first_header(headers)),
+                };
+                Ok(crate::DecodeSection {
+                    codec,
+                    sample_rate: l.info.sample_rate,
+                    channels: l.info.channels,
+                    extradata,
+                    packets: l.raw.len(),
+                    keep: l.audible.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Links that hold audio packets, in order: the sections of
+    /// [`OggFile::decode_sections`].
+    fn decode_links(&self) -> impl Iterator<Item = &Link> {
+        self.links.iter().filter(|l| !l.raw.is_empty())
+    }
+
+    /// Audio packet `packet` of section `section`.
+    pub fn read_decode_packet<R: Read + Seek + ?Sized>(
+        &self,
+        r: &mut R,
+        section: usize,
+        packet: usize,
+    ) -> Result<Vec<u8>> {
+        let link = self
+            .decode_links()
+            .nth(section)
+            .ok_or_else(|| crate::decode::no_section(section))?;
+        let raw = link
+            .raw
+            .clone()
+            .nth(packet)
+            .ok_or_else(|| ContainerError::InvalidPlan(format!("no packet {packet}")))?;
+        read_pieces(r, &self.raw[raw].pieces)
+    }
+
     /// Writes the kept packets of `plans` as a chained Ogg file.
     pub fn write_cut<R, W>(&self, r: &mut R, plans: &[CutPlan], w: &mut W) -> Result<()>
     where
@@ -454,6 +513,11 @@ struct Run {
 }
 
 /// Reads a packet from its pieces.
+/// The identification header, the first of a link's headers.
+fn first_header(headers: Vec<Vec<u8>>) -> Vec<u8> {
+    headers.into_iter().next().unwrap_or_default()
+}
+
 fn read_pieces<R: Read + Seek + ?Sized>(r: &mut R, pieces: &[(u64, u32)]) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(pieces.iter().map(|&(_, l)| l as usize).sum());
     for &(off, len) in pieces {

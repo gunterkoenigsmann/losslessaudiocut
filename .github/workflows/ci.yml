@@ -39,6 +39,27 @@ jobs:
       - name: Install reference tools
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg flac vorbis-tools mpg123
+      # lac-decode links FFmpeg's libraries (decoders only, see AGENTS.md);
+      # ffmpeg-sys-next generates its bindings with bindgen (libclang).
+      - name: Install FFmpeg development files (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev libavfilter-dev libavdevice-dev pkg-config clang
+      - name: Install FFmpeg development files (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg pkg-config
+      # Windows: a prebuilt shared FFmpeg (headers, import libraries, DLLs).
+      # The DLLs go on PATH so that the test binaries find them.
+      - name: Install FFmpeg development files (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip"
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath "$env:RUNNER_TEMP"
+          $dir = (Get-ChildItem "$env:RUNNER_TEMP" -Directory -Filter "ffmpeg-n7.1*").FullName
+          "FFMPEG_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$dir\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
       - name: Require cross-checks
         if: runner.os == 'Linux'
         shell: bash
