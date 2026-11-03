@@ -1,0 +1,18 @@
+[package]
+name = "lac-analysis"
+description = "Silence, noise and track-boundary detection of losslessaudiocut: per-frame level and spectral features, and the suggestions derived from them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+lac-core.workspace = true
+rustfft = "6.4.1"
+
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

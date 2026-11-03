@@ -235,6 +235,22 @@ impl Editor {
         self.commit(next)
     }
 
+    /// Starts new tracks at all of `positions` in one undoable step, e.g.
+    /// the track starts suggested by `lac_analysis::detect`. Positions at
+    /// the start or end of the recording, beyond it, or already split at
+    /// are skipped. Returns how many splits were added.
+    pub fn split_at_all(&mut self, positions: impl IntoIterator<Item = SamplePos>) -> usize {
+        let mut next = self.edits.clone();
+        let before = next.splits.len();
+        next.splits
+            .extend(positions.into_iter().filter(|&p| p > 0 && p < self.total));
+        next.splits.sort_unstable();
+        next.splits.dedup();
+        let added = next.splits.len() - before;
+        self.commit(next);
+        added
+    }
+
     /// Joins track `index` (0-based) with the one before it: removes the
     /// split point it starts at, and its name. Returns false for the first
     /// track or an index out of range.
@@ -481,6 +497,18 @@ pub fn describe_export(kept: &[KeptRange], rate: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_at_all_is_one_undo_step_and_skips_invalid_positions() {
+        let mut e = Editor::new(1000);
+        assert!(e.split_at(300));
+        assert_eq!(e.split_at_all([0, 700, 300, 100, 1000, 5000, 700]), 2);
+        assert_eq!(e.splits(), &[100, 300, 700]);
+        assert!(e.undo());
+        assert_eq!(e.splits(), &[300]);
+        assert_eq!(e.split_at_all([300, 0]), 0);
+        assert!(e.can_redo(), "a no-op leaves the redo history alone");
+    }
 
     #[test]
     fn dragging_selects_in_either_direction() {

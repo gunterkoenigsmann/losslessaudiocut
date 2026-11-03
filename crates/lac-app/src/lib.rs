@@ -19,11 +19,14 @@
 //! - [`export_job`]: writing a cut in a background thread.
 //! - [`playback`]: playing the kept parts through the audio device.
 //! - [`peak_cache`]: the on-disk cache of waveform summaries.
+//! - [`analysis_job`]: suggesting deletable pauses and track starts
+//!   (`lac-analysis`) in a background thread.
 //! - [`detail`]: decoded samples for a zoomed-in waveform, loaded in the
 //!   background with random access.
 //!
 //! See `docs/architecture.md` in the repository for how this crate fits in.
 
+pub mod analysis_job;
 pub mod detail;
 pub mod editor;
 pub mod export_job;
@@ -35,5 +38,7 @@ pub mod session;
 pub mod time;
 pub mod waveform;
 
+/// Returned by progress callbacks such as [`Source::analyze`] to go on or stop.
+pub use lac_decode::Flow;
 pub use session::{AppError, CutRequest, KeptRange, Source};
 pub use time::{TimeError, TimeRange, TimeSpec, format_samples};
