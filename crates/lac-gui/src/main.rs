@@ -13,10 +13,11 @@
 //! - [`lac_app::waveform::WaveformView`] maps pixels to samples, zooms and
 //!   scrolls, and says what each pixel column shows;
 //! - [`lac_app::editor::Editor`] holds the selection, the deleted parts,
-//!   the track split points and names, and//!   the undo history;
+//!   the track split points and names, and the undo history;
 //! - [`lac_app::export_job::ExportJob`] writes the cut in the background;
 //! - [`lac_playback::Player`] plays the kept parts (`lac_app::playback`
-//!   connects it to the decoder);
+//!   connects it to the decoder), and [`lac_playback::scrub::Scrubber`]
+//!   decides where it restarts while the user scrubs;
 //! - [`lanes`] (here, also tested) turns that into pixel rows.
 //!
 //! What remains here is wiring: menus, events, a timer that polls the
@@ -34,7 +35,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lac_app::detail::{Detail, DetailLoader};
 use lac_app::editor::{Editor, Edits};
@@ -45,6 +46,7 @@ use lac_app::peak_job::{JobStatus, PeakJob};
 use lac_app::waveform::{DrawMode, WaveformView};
 use lac_core::SamplePos;
 use lac_peaks::PeakSummary;
+use lac_playback::scrub::Scrubber;
 use lac_playback::{Player, Timeline};
 use wxdragon::prelude::*;
 
@@ -83,7 +85,8 @@ const ZOOM_STEP: f64 = 1.25;
 const SCROLL_STEP: f64 = 40.0;
 
 /// File types offered by the open dialog.
-const WILDCARD: &str = "Audio files|*.mp3;*.ogg;*.oga;*.opus;*.spx;*.flac;*.wav|All files|*";
+const WILDCARD: &str =
+    "Audio files|*.mp3;*.ogg;*.oga;*.opus;*.spx;*.webm;*.mka;*.mkv;*.flac;*.wav|All files|*";
 
 /// Background of the waveform area.
 const BACKGROUND: Colour = Colour::rgb(0x1e, 0x22, 0x28);
@@ -155,6 +158,18 @@ struct State {
     /// The timeline `player` plays: the kept parts when it was last
     /// synchronised with the editor.
     timeline: Timeline,
+    /// The scrub in progress while the right button is held.
+    scrub: Option<Scrub>,
+}
+
+/// A scrub: dragging with the right button plays short pieces of audio
+/// at the pointer (see [`lac_playback::scrub`]).
+struct Scrub {
+    /// Decides when to restart playback at the pointer.
+    scrubber: Scrubber,
+    /// Whether playback was running before; if so it goes on from where
+    /// the scrub ended, else it stops there and the cursor goes there.
+    was_playing: bool,
 }
 
 impl State {
@@ -172,6 +187,7 @@ impl State {
         self.rate = None;
         self.player = None;
         self.timeline = Timeline::default();
+        self.scrub = None;
     }
 
     /// The source position being played, while playing.
@@ -188,16 +204,25 @@ impl State {
             p.engine().pause();
             return None;
         }
+        let from = self.editor.as_ref()?.play_from();
+        self.play_at(from, true).err()
+    }
+
+    /// Plays the kept parts from source position `src`, opening the player
+    /// on first use and bringing its timeline up to date with the edits.
+    /// A position at (or after) the end of the kept parts plays from the
+    /// beginning if `wrap`, else from the last frame.
+    fn play_at(&mut self, src: SamplePos, wrap: bool) -> Result<(), String> {
         let (Some(path), Some(editor)) = (&self.path, &self.editor) else {
-            return Some("open a file first".to_string());
+            return Err("open a file first".to_string());
         };
         let tl = lac_app::playback::timeline(editor);
         if tl.is_empty() {
-            return Some("everything is deleted; nothing to play".to_string());
+            return Err("everything is deleted; nothing to play".to_string());
         }
-        let start = match tl.from_source(editor.play_from()) {
-            t if t >= tl.len() => 0,
-            t => t,
+        let start = match tl.from_source(src) {
+            t if t >= tl.len() && wrap => 0,
+            t => t.min(tl.len() - 1),
         };
         match &mut self.player {
             Some(p) => p.engine_mut().set_timeline(tl.clone(), start),
@@ -206,14 +231,88 @@ impl State {
                     p.engine_mut().seek(start);
                     self.player = Some(p);
                 }
-                Err(e) => return Some(format!("cannot play: {e}")),
+                Err(e) => return Err(format!("cannot play: {e}")),
             },
         }
         self.timeline = tl;
         if let Some(p) = &self.player {
             p.engine().play();
         }
+        Ok(())
+    }
+
+    /// The playback position for a pointer at source position `src`:
+    /// within the timeline, so scrubbing over the end plays its last bit.
+    fn scrub_target(&self, src: SamplePos) -> SamplePos {
+        self.timeline
+            .from_source(src)
+            .min(self.timeline.len().saturating_sub(1))
+    }
+
+    /// Right button down at source position `src`: starts playing there
+    /// and starts following the pointer. Returns an error message.
+    fn begin_scrub(&mut self, src: SamplePos) -> Option<String> {
+        let was_playing = self
+            .player
+            .as_ref()
+            .is_some_and(|p| p.engine().is_playing());
+        if let Err(e) = self.play_at(src, false) {
+            return Some(e);
+        }
+        let mut scrubber = Scrubber::default();
+        // `play_at` already started there; this only starts the clock.
+        scrubber.move_to(self.scrub_target(src), Instant::now());
+        self.scrub = Some(Scrub {
+            scrubber,
+            was_playing,
+        });
         None
+    }
+
+    /// The pointer moved to source position `src` while scrubbing.
+    fn scrub_to(&mut self, src: SamplePos) {
+        let target = self.scrub_target(src);
+        let (Some(s), Some(p)) = (&mut self.scrub, &mut self.player) else {
+            return;
+        };
+        if let Some(pos) = s.scrubber.move_to(target, Instant::now()) {
+            p.engine_mut().seek(pos);
+            // Playback stops at the end of the timeline; scrubbing back
+            // must start it again.
+            p.engine().play();
+        }
+    }
+
+    /// Timer while scrubbing: catches up with a pointer that moved too
+    /// soon after the last restart.
+    fn poll_scrub(&mut self) {
+        let (Some(s), Some(p)) = (&mut self.scrub, &mut self.player) else {
+            return;
+        };
+        if let Some(pos) = s.scrubber.tick(Instant::now()) {
+            p.engine_mut().seek(pos);
+            p.engine().play();
+        }
+    }
+
+    /// Right button up: playback goes on if it was running before the
+    /// scrub; else it stops and the cursor moves to where the scrub ended.
+    fn end_scrub(&mut self) {
+        let Some(s) = self.scrub.take() else { return };
+        let end = s.scrubber.position();
+        let Some(p) = &mut self.player else { return };
+        if s.was_playing {
+            // Go on from the pointer's last position, if the last move
+            // came too soon to be played yet.
+            if let Some(pos) = s.scrubber.finish() {
+                p.engine_mut().seek(pos);
+            }
+            return;
+        }
+        p.engine().pause();
+        if let (Some(pos), Some(ed)) = (end, &mut self.editor) {
+            ed.set_cursor(self.timeline.to_source(pos));
+        }
     }
 
     /// After an edit: lets playback continue on the new timeline at the
@@ -246,6 +345,7 @@ impl State {
     /// Timer: stops at the end and keeps the playhead in view. Returns
     /// whether to redraw.
     fn poll_player(&mut self) -> bool {
+        self.poll_scrub();
         let Some(p) = &self.player else { return false };
         if !p.engine().is_playing() {
             return false;
@@ -254,7 +354,9 @@ impl State {
             p.engine().pause();
             return true;
         }
-        if let (Some(pos), Some(v)) = (self.playhead(), &mut self.view)
+        // While scrubbing the pointer leads; paging would pull the
+        // waveform away under it.
+        if let (None, Some(pos), Some(v)) = (&self.scrub, self.playhead(), &mut self.view)
             && !v.visible().contains(&pos)
         {
             // Page along, playhead at the left edge.
@@ -964,6 +1066,14 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
             {
                 let mut guard = state.borrow_mut();
                 let st = &mut *guard;
+                if st.scrub.is_some() {
+                    // Right button held: the waveform does not change, the
+                    // playhead follows on the next timer tick.
+                    if let Some(pos) = scrub_source_at(st, x) {
+                        st.scrub_to(pos);
+                    }
+                    return;
+                }
                 let (Some(v), Some(ed)) = (&mut st.view, &mut st.editor) else {
                     return;
                 };
@@ -1005,6 +1115,53 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
                 st.seek_to_cursor();
             }
             show(&state);
+        });
+    }
+    bind_scrub(panel, frame, state);
+}
+
+/// The source position under a scrubbing pointer at `x`, clamped to the
+/// window (the mouse is captured, so `x` can lie outside).
+fn scrub_source_at(st: &State, x: f64) -> Option<SamplePos> {
+    let v = st.view.as_ref()?;
+    Some(v.x_to_sample(x.clamp(0.0, f64::from(v.width()))))
+}
+
+/// Right button: scrub. While it is held, playback follows the pointer
+/// in short pieces (the motion is handled in [`bind_select`]); see
+/// [`State::begin_scrub`] and [`State::end_scrub`].
+fn bind_scrub(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
+    let (p, f) = (*panel, *frame);
+    {
+        let state = Rc::clone(state);
+        panel.on_mouse_right_down(move |e| {
+            let Some((_, x)) = mouse_event(&e) else {
+                return;
+            };
+            let error = {
+                let mut st = state.borrow_mut();
+                let Some(pos) = scrub_source_at(&st, x) else {
+                    return;
+                };
+                st.begin_scrub(pos)
+            };
+            match error {
+                Some(msg) => f.set_status_text(&msg, FIELD_FILE),
+                None => p.capture_mouse(),
+            }
+            update_chrome(&f, &state.borrow());
+            p.refresh(false, None);
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        panel.on_mouse_right_up(move |_| {
+            if p.has_capture() {
+                p.release_mouse();
+            }
+            state.borrow_mut().end_scrub();
+            update_chrome(&f, &state.borrow());
+            p.refresh(false, None);
         });
     }
 }

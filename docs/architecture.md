@@ -103,7 +103,7 @@ graph TD
 | `lac-container` | One demuxer and one muxer per container: WAV, FLAC native, MP3 elementary stream, ADTS, MP4/M4A, Ogg. Builds the packet index, copies packets, writes trimming metadata and per-track tags, recomputes CRCs, seek tables and headers. **This is the lossless heart and is written by us.** | `crc`, maybe `mp4-atom` for box parsing |
 | `lac-decode` | Turns packets into interleaved `f32` PCM for playback, the waveform cache and analysis. Wraps FFmpeg's decoders (libavcodec only, not its demuxers): it is fed packets from *our* demuxer, so the packet index stays the single source of truth and waveform positions match cut positions exactly. Each container describes its stream as `DecodeSection`s (codec, extradata, packets, and the part of the decoder output that is timeline: encoder delay, pre-skip and padding removed); the tests check the result bit for bit against the `ffmpeg` tool *(implemented: whole-file decoding, and random access via `decode_range`: a fresh decoder starts a codec-specific pre-roll before the range and its output is placed by `DecodeSection::packet_ends`; bit-exact against the whole-file decode on all fixtures)*. `ffmpeg-next` links libavformat too, but its demuxers are never called. | `ffmpeg-next` |
 | `lac-peaks` | Per-packet min/max/RMS summary, multi-level pyramid, optional on-disk cache. Built progressively from decoded samples and queryable while it grows (`PeakBuilder`, `PeakSummary::columns`) *(implemented; stored and loaded as versioned bytes by `PeakSummary::to_bytes`/`from_bytes`, the cache directory itself is `lac_app::peak_cache`)*. | none |
-| `lac-playback` | Audio output, transport (play/pause/seek), scrubbing, position reporting for the cursor *(implemented: `Timeline` of kept ranges, `Engine` with decoder thread, `rtrb` ring buffer and generation-checked flushes, linear-interpolation rate and channel conversion, `Player` on the default `cpal` device; the decoder is supplied by `lac_app::playback` as a `PcmSource`, so this crate does not depend on FFmpeg. Scrubbing and speed are not implemented yet)*. | `cpal` (directly, `rodio` is not needed), `rtrb`; later `rubato` for varispeed |
+| `lac-playback` | Audio output, transport (play/pause/seek), scrubbing, position reporting for the cursor *(implemented: `Timeline` of kept ranges, `Engine` with decoder thread, `rtrb` ring buffer and generation-checked flushes, linear-interpolation rate and channel conversion, `Player` on the default `cpal` device; the decoder is supplied by `lac_app::playback` as a `PcmSource`, so this crate does not depend on FFmpeg. Grain-restart scrubbing: `scrub::Scrubber` plus 5 ms fades at every seek; speed is not implemented yet)*. | `cpal` (directly, `rodio` is not needed), `rtrb`; later `rubato` for varispeed |
 | `lac-analysis` | Suggestions where to cut: deletable pauses (quiet or only noise) and track starts, from per-frame level, spectral flatness and band spectrum (section 8). Fed decoded PCM like `lac-peaks`, so it does not depend on `lac-decode` and is tested on synthetic signals *(implemented: `FeatureExtractor`, `detect`; run from `lac_app::analysis_job::AnalysisJob` and `lac detect`)*. | `rustfft`; later: `webrtc-vad` or an ONNX model via `ort` |
 | `lac-app` | Use cases (open, select, cut, split, edit track tags, undo, export, analyse) and view models. Knows nothing about wxWidgets, so all UI logic is unit-testable *(implemented so far: `Source` open/export, `waveform`, `detail`, `peak_job`, `peak_cache`, `editor` (selection, cursor, and `Edits` = deleted ranges, split points and track names on the source timeline, undone by snapshots), `export_job` (one file, or one per track, from one opened source) and `playback`. The editor keeps split points on the source timeline rather than an `EditList` of tracks: deleting across a split then shortens both tracks without moving the split, and a track is derived as its span minus the deletions. Per-track tags (section 4) are not written yet; each track file keeps the source's tags)*. | none |
 | `lac-gui` | wxWidgets windows, waveform widget, menus, key bindings. Renders view models, forwards user events *(implemented: waveform window with zoom and scroll, fed by `lac_app::peak_job::PeakJob` and `lac_app::waveform::WaveformView`; below one packet per pixel column it draws from samples decoded in the background by `lac_app::detail::DetailLoader`, as exact per-pixel min/max and, below one sample per pixel, as a polyline; mouse selection, delete/restore with undo and export through `lac_app::editor::Editor` and `lac_app::export_job::ExportJob`; deleted parts stay on the source timeline, shaded)*. | `wxdragon` |
@@ -211,6 +211,7 @@ pub struct CutPlan {
 | Ogg Vorbis | pages; timestamps from packet durations, granule positions ignored | new pages, copy headers, new serial, CRC; one chained stream per kept part, led by its predecessor packet as pre-roll | packet-granular, bit-exact including joins *(implemented)*; sample-exact via granule positions later | block size variable (64..8192) |
 | Ogg Opus | as above; pre-skip from `OpusHead`; end trim from the final granule when the granules before it are consistent | as Vorbis, with at least 80 ms pre-roll hidden by a rewritten `pre_skip`; the start trim is added to `pre_skip`, the end trim lowers the final granule (RFC 7845 4.4) | **sample-exact at every cut**, including joins, since each kept part is its own chained stream *(implemented)*; bit-exact after a short convergence window at joins | ffmpeg plays a kept part that starts and ends inside the same packet too long (see below) |
 | Speex | Ogg pages, Speex header | as Vorbis, but all kept parts of a link in one stream, no pre-roll | packet-granular (20 ms) *(implemented)*; bit-exact after convergence at joins | ffmpeg and speexdec do not handle chained Speex |
+| Matroska / WebM Opus | EBML elements, `SimpleBlock`/`BlockGroup` frames (all lacing modes), unknown-size Segments and Clusters of live recordings; timeline from packet durations, codec delay from `CodecDelay` (or the `OpusHead` pre-skip), end trim from `DiscardPadding` on the last block; only the first audio track | one Opus track in a fresh file of the same `DocType`: SeekHead, Info, Tracks, Clusters of verbatim packets, Cues; ≥ 80 ms pre-roll plus the start trim hidden by `CodecDelay` and `OpusHead` pre-skip, end trim by `DiscardPadding` | sample-exact at the file's start and end, packet-granular at joins (`trims_at_file_ends_only`) *(implemented)*; bit-exact after a convergence window at joins | Matroska cannot drop leading samples in the middle of a track (ffmpeg ignores negative `DiscardPadding`), so joins have neither pre-roll nor chaining; video and other tracks are dropped with a warning; tags not copied yet |
 
 ### Tags per container
 
@@ -223,9 +224,11 @@ Tags live outside the audio packets, so rewriting them never touches audio.
 | AAC (M4A) | `moov/udta/meta/ilst` (`©nam`, `©ART`, `©alb`, `aART`, `trkn`, `©day`, `©gen`, `©cmt`, `covr`, `----` for extras) | |
 | FLAC | `VORBIS_COMMENT` and `PICTURE` metadata blocks | |
 | Ogg Vorbis / Opus / Speex | the comment header packet (`TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `TRACKNUMBER`, `TRACKTOTAL`, `DATE`, `GENRE`, `COMMENT`, `METADATA_BLOCK_PICTURE`) | the header is re-paged; audio packets stay verbatim |
+| Matroska / WebM | `Tags` element with `SimpleTag`s (`TITLE`, `ARTIST`, `ALBUM`, `PART_NUMBER`, `DATE_RELEASED`, `GENRE`, `COMMENT`) *(planned; source tags are not copied yet)* | |
 | WAV | `LIST/INFO` chunk plus an `id3 ` chunk | INFO has no album artist or cover |
 
 Milestone order *(agreed)*: WAV, FLAC, Ogg (Vorbis, Opus, Speex), MP3, then the GUI, then AAC/M4A and ADTS.
+Matroska/WebM with Opus was added after the GUI on request (Opus as recorded by browsers, OBS and conferencing tools).
 
 ### Ogg with unreliable granule positions
 
@@ -273,6 +276,7 @@ codecs the decoder state at the join is wrong for one or two packets:
 | AAC | MDCT overlap-add mixes the tails of two unrelated frames: a transient of one frame (~20 ms) | M4A: keep the frame and rely on the short crossfade-like overlap |
 | Vorbis | as AAC | each kept part becomes a **chained** logical stream that starts with its real predecessor packet, whose output a new stream discards: **no join window**, bit-exact *(implemented)*. Caveat: ffmpeg does not reset its Vorbis decoder at a chain boundary and plays one extra overlap (≤ 23 ms) per join; libvorbisfile-based players are exact |
 | Opus | CELT/SILK prediction state | each kept part becomes a chained stream with ≥ 80 ms pre-roll hidden by `pre_skip` (RFC 7845 4.3) and both ends trimmed to the sample *(implemented)*. The output is bit-exact again once the decoder has converged; the window depends on the content, typically < 100 ms. Caveat: when a kept part starts and ends inside the same packet (a sliver shorter than one packet, ≤ 120 ms), ffmpeg drops the rest of the pre-skip as soon as the end-trimmed packet arrives and plays up to one packet too much. That includes a part that starts inside the source's own end-trimmed last packet. The file itself is correct per RFC 7845 |
+| Opus in Matroska / WebM | as Ogg Opus | none: kept parts are joined in one stream without pre-roll, since Matroska has no way to hide samples at the start of an inner block *(implemented)*. On the speech-like fixtures the decoder becomes bit-identical again within 330 ms (worst of 36 measured joins, 10 ms SILK frames converge slowest); tests allow 400 ms. The same ffmpeg caveat as for Ogg Opus applies when the whole output is one packet trimmed at both ends |
 | Speex | CELP predictor, pitch memory and the float synthesis-filter state | none: parts are joined within one stream *(implemented)*. The audible transient lasts about 200 ms; after that the float decoder state only decays geometrically (below 1e-6 after about 200 ms). It becomes *bit*-identical only when the content lets it, which on continuous signals may never happen, so bit-exact convergence is no fixed-time property for Speex (issue #17). *Decided*: within 400 ms after a join anything goes; from then on the difference stays below one 16-bit LSB (2^-15, Speex's native output resolution), and before the first join the output is bit-exact |
 
 Tests use a speech-like fixture signal (syllables separated by 80 ms of
@@ -436,6 +440,15 @@ Grain restart comes first because it is the simplest and proven. Varispeed
 and pitch preservation reuse the same command and render structure and only
 add a render step, so they can follow without changing the engine.
 
+**Implemented so far:** grain restart. The GUI scrubs while the *right*
+mouse button is held (the left one selects). `lac_playback::scrub::Scrubber`
+turns pointer moves into seeks, at most one per 40 ms, and catches up with a
+pointer that moved too soon from the GUI timer. Instead of a crossfade, the
+engine fades the old audio out over 5 ms while a seek is pending and fades
+the new audio in over 5 ms after it, at every seek; that removes the clicks
+just as well and needs no second decoder. The first chunk after a seek is
+50 ms long, so a grain starts sounding about as fast as the pointer moves.
+
 ### Playback speed
 
 Normal playback has an adjustable speed, e.g. 0.5x to 3x in steps
@@ -573,7 +586,7 @@ packets in the same state. This gives:
 |---|---|
 | Decoding | FFmpeg libavcodec, for playback, waveform and analysis only |
 | Cutting | own demuxers, cut planners, muxers and tag writers |
-| Containers | all of them: WAV, FLAC, MP3, ADTS `.aac`, MP4/M4A, Ogg Vorbis, Ogg Opus, Speex |
+| Containers | all of them: WAV, FLAC, MP3, ADTS `.aac`, MP4/M4A, Ogg Vorbis, Ogg Opus, Speex, Matroska/WebM Opus |
 | Tags | per-track tags when splitting |
 | Platforms | Linux, macOS, Windows |
 | GUI binding | `wxdragon` |

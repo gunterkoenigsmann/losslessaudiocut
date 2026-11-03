@@ -50,6 +50,20 @@ python3 ogg_mangle.py granules ogg_vorbis_stereo_44k.ogg ogg_vorbis_badgranule.o
 python3 ogg_mangle.py granules ogg_opus_stereo.opus ogg_opus_badgranule.opus
 python3 ogg_mangle.py damage ogg_vorbis_stereo_44k.ogg ogg_vorbis_damaged.ogg 5
 
+# Matroska/WebM with Opus, encoded by ffmpeg's libopus. 200 ms clusters
+# give the tests many cluster boundaries; "-live 1" writes an unknown
+# Segment size like a streaming recorder.
+mo="-fflags +bitexact -cluster_time_limit 200"
+$og -i "$tmp/o.wav" $mo -c:a libopus -b:a 64k mkv_opus_stereo.webm
+$synth "$tmp/n.wav" 48000 1 16 1.0 0 speech
+$og -i "$tmp/n.wav" $mo -c:a libopus -b:a 32k -frame_duration 10 mkv_opus_mono_10ms.mka
+$og -i "$tmp/o.wav" $mo -live 1 -c:a libopus -b:a 64k "$tmp/live.webm"
+python3 mkv_mangle.py unknown-clusters "$tmp/live.webm" mkv_opus_live.webm
+python3 mkv_mangle.py damage mkv_opus_stereo.webm mkv_opus_damaged.webm 3
+# A video track in front of the audio, as OBS or a phone camera writes it.
+$og -f lavfi -i "color=c=gray:s=16x16:r=5:d=1" -i "$tmp/n.wav" $mo \
+    -c:v mjpeg -c:a libopus -b:a 32k mkv_opus_with_video.mkv
+
 # MP3, encoded by LAME (reference encoder) and by ffmpeg's libmp3lame.
 $synth "$tmp/p.wav" 44100 2 16 1.5
 lame --quiet -b 128 "$tmp/p.wav" mp3_cbr128_44k.mp3            # Info + LAME tag

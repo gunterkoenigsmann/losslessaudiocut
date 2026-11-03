@@ -81,6 +81,7 @@ mod tests {
             "mp3_cbr128_44k.mp3",
             "ogg_opus_stereo.opus",
             "ogg_vorbis_stereo_44k.ogg",
+            "mkv_opus_stereo.webm",
         ] {
             plays_bit_for_bit(name);
         }

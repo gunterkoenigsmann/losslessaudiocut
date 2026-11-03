@@ -59,7 +59,7 @@ fn ffmpeg(name: &str) -> Option<Vec<f32>> {
 }
 
 /// Fixtures whose timeline ffmpeg reproduces exactly.
-const EXACT: [&str; 15] = [
+const EXACT: [&str; 18] = [
     "flac_stereo16_44k.flac",
     "flac_mono8_8k_fixed.flac",
     "flac_quad24_48k.flac",
@@ -75,6 +75,9 @@ const EXACT: [&str; 15] = [
     "mp3_mpeg2_mono_22k.mp3",
     "mp3_mpeg25_8k.mp3",
     "mp3_ffmpeg_id3v2.mp3",
+    "mkv_opus_stereo.webm",
+    "mkv_opus_mono_10ms.mka",
+    "mkv_opus_live.webm",
 ];
 
 #[test]
@@ -187,7 +190,7 @@ fn sink_can_stop_decoding() {
 }
 
 /// Every fixture with its chained and damaged variants.
-const ALL: [&str; 22] = [
+const ALL: [&str; 27] = [
     "flac_stereo16_44k.flac",
     "flac_mono8_8k_fixed.flac",
     "flac_quad24_48k.flac",
@@ -210,6 +213,11 @@ const ALL: [&str; 22] = [
     "ogg_vorbis_damaged.ogg",
     "mp3_notag_crc.mp3",
     "mp3_junk.mp3",
+    "mkv_opus_stereo.webm",
+    "mkv_opus_mono_10ms.mka",
+    "mkv_opus_live.webm",
+    "mkv_opus_damaged.webm",
+    "mkv_opus_with_video.mkv",
 ];
 
 /// Ranges at the start, the end, around section boundaries and spread over
