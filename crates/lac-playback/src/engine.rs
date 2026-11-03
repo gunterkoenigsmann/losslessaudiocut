@@ -602,11 +602,19 @@ mod tests {
             self.ramp.rate
         }
         fn read(&mut self, r: Range<SamplePos>) -> Result<Vec<f32>, String> {
-            while self
-                .allowed
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
-                .is_err()
-            {
+            // Take one permit. A plain compare-exchange loop: the
+            // `fetch_update` helper is deprecated on newer toolchains and
+            // its replacement does not exist on older ones.
+            loop {
+                let n = self.allowed.load(Ordering::Acquire);
+                if n > 0
+                    && self
+                        .allowed
+                        .compare_exchange(n, n - 1, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    break;
+                }
                 std::thread::sleep(Duration::from_millis(1));
             }
             self.ramp.read(r)
