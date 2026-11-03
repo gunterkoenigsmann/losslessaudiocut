@@ -1,41 +1,77 @@
 //! The editing state of one opened recording: what is selected, what is
-//! deleted, and the undo history. The view model behind the GUI's Edit
-//! menu and mouse selection, testable without a display.
+//! deleted, where it is split into tracks, and the undo history. The view
+//! model behind the GUI's Edit menu and mouse selection, testable without a
+//! display.
 //!
-//! Edits are the "delete parts, join the rest" model of
+//! Edits are the "delete parts, join the rest, split into tracks" model of
 //! `docs/architecture.md`: the source is never changed, the editor only
-//! keeps the list of deleted ranges (in source sample frames). The waveform
-//! keeps showing the source timeline with the deleted parts marked, so
-//! that a deletion can be seen, selected again and restored. Export turns
-//! the list into a [`CutRequest::Delete`].
+//! keeps [`Edits`] in source sample frames. The waveform keeps showing the
+//! source timeline with the deleted parts and track boundaries marked, so
+//! that a deletion can be seen, selected again and restored. Export writes
+//! one file per [`Track`] that keeps anything.
 //!
-//! Undo and redo keep whole snapshots of the deleted list; it is small
-//! (one range per deletion), so this is simpler and safer than inverse
+//! Split points live on the source timeline, not on the kept audio, so
+//! deleting or restoring around them never moves them. A track is the
+//! source span between two split points, minus what is deleted in it.
+//!
+//! Undo and redo keep whole snapshots of the [`Edits`]; they are small (one
+//! entry per deletion or split), so this is simpler and safer than inverse
 //! operations.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use lac_core::SamplePos;
 
 use crate::{CutRequest, KeptRange, format_samples, ranges};
 
+/// Everything the user changed, as one undoable value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Edits {
+    /// Deleted ranges, normalised (sorted, disjoint, non-adjacent).
+    pub deleted: Vec<Range<SamplePos>>,
+    /// Where new tracks start, sorted, strictly inside the recording.
+    pub splits: Vec<SamplePos>,
+    /// Track names, keyed by where the track starts (0 for the first).
+    pub names: BTreeMap<SamplePos, String>,
+}
+
+/// One track: a stretch of the source between split points.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Track {
+    /// 1-based position among all tracks.
+    pub number: usize,
+    /// The source span from its split point to the next one.
+    pub span: Range<SamplePos>,
+    /// What the track's file will contain: the span minus deletions.
+    pub kept: Vec<Range<SamplePos>>,
+    /// The name the user gave it.
+    pub name: Option<String>,
+}
+
+impl Track {
+    /// Sample frames the track's file will contain.
+    pub fn kept_len(&self) -> SamplePos {
+        self.kept.iter().map(|r| r.end - r.start).sum()
+    }
+}
+
 /// Editing state of one recording of `total` sample frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Editor {
     total: SamplePos,
-    /// Deleted ranges, normalised (sorted, disjoint, non-adjacent).
-    deleted: Vec<Range<SamplePos>>,
+    edits: Edits,
     selection: Option<Range<SamplePos>>,
     /// Where a click without dragging put the cursor; playback starts
     /// here when nothing is selected.
     cursor: SamplePos,
     /// Where the current mouse drag started.
     anchor: Option<SamplePos>,
-    undo: Vec<Vec<Range<SamplePos>>>,
-    redo: Vec<Vec<Range<SamplePos>>>,
-    /// The deleted list at the last export, to tell whether the edits are
-    /// saved anywhere.
-    exported: Option<Vec<Range<SamplePos>>>,
+    undo: Vec<Edits>,
+    redo: Vec<Edits>,
+    /// The edits at the last export, to tell whether they are saved
+    /// anywhere.
+    exported: Option<Edits>,
 }
 
 impl Editor {
@@ -43,7 +79,7 @@ impl Editor {
     pub fn new(total: SamplePos) -> Self {
         Editor {
             total,
-            deleted: Vec::new(),
+            edits: Edits::default(),
             selection: None,
             cursor: 0,
             anchor: None,
@@ -143,7 +179,87 @@ impl Editor {
 
     /// The deleted ranges, sorted and disjoint.
     pub fn deleted(&self) -> &[Range<SamplePos>] {
-        &self.deleted
+        &self.edits.deleted
+    }
+
+    /// All edits, e.g. to remember what an export contained.
+    pub fn edits(&self) -> &Edits {
+        &self.edits
+    }
+
+    /// Where tracks start, besides 0.
+    pub fn splits(&self) -> &[SamplePos] {
+        &self.edits.splits
+    }
+
+    /// The tracks, in order; one if there are no splits. Tracks whose span
+    /// is deleted entirely are included (with nothing kept), so numbers
+    /// stay stable while editing.
+    pub fn tracks(&self) -> Vec<Track> {
+        let kept = self.kept();
+        let starts = std::iter::once(0).chain(self.edits.splits.iter().copied());
+        let ends = self.edits.splits.iter().copied().chain([self.total]);
+        starts
+            .zip(ends)
+            .enumerate()
+            .map(|(i, (a, b))| Track {
+                number: i + 1,
+                span: a..b,
+                kept: kept
+                    .iter()
+                    .map(|k| k.start.max(a)..k.end.min(b))
+                    .filter(|k| k.start < k.end)
+                    .collect(),
+                name: self.edits.names.get(&a).cloned(),
+            })
+            .collect()
+    }
+
+    /// Index (0-based) of the track containing source frame `pos`.
+    pub fn track_at(&self, pos: SamplePos) -> usize {
+        self.edits.splits.partition_point(|&s| s <= pos)
+    }
+
+    /// Starts a new track at `pos`. Returns false if `pos` is the start or
+    /// end of the recording or already a split point.
+    pub fn split_at(&mut self, pos: SamplePos) -> bool {
+        if pos == 0 || pos >= self.total {
+            return false;
+        }
+        let i = self.edits.splits.partition_point(|&s| s < pos);
+        if self.edits.splits.get(i) == Some(&pos) {
+            return false;
+        }
+        let mut next = self.edits.clone();
+        next.splits.insert(i, pos);
+        self.commit(next)
+    }
+
+    /// Joins track `index` (0-based) with the one before it: removes the
+    /// split point it starts at, and its name. Returns false for the first
+    /// track or an index out of range.
+    pub fn join_with_previous(&mut self, index: usize) -> bool {
+        if index == 0 || index > self.edits.splits.len() {
+            return false;
+        }
+        let mut next = self.edits.clone();
+        let at = next.splits.remove(index - 1);
+        next.names.remove(&at);
+        self.commit(next)
+    }
+
+    /// Names track `index` (0-based); an empty or blank name removes it.
+    /// Returns false if nothing changed.
+    pub fn rename_track(&mut self, index: usize, name: &str) -> bool {
+        let Some(track) = self.tracks().into_iter().nth(index) else {
+            return false;
+        };
+        let mut next = self.edits.clone();
+        match name.trim() {
+            "" => next.names.remove(&track.span.start),
+            n => next.names.insert(track.span.start, n.to_string()),
+        };
+        self.commit(next)
     }
 
     /// The parts that will be exported, in order (the complement of
@@ -151,7 +267,7 @@ impl Editor {
     pub fn kept(&self) -> Vec<Range<SamplePos>> {
         let mut out = Vec::new();
         let mut pos = 0;
-        for d in &self.deleted {
+        for d in &self.edits.deleted {
             if d.start > pos {
                 out.push(pos..d.start);
             }
@@ -167,6 +283,7 @@ impl Editor {
     pub fn kept_len(&self) -> SamplePos {
         self.total
             - self
+                .edits
                 .deleted
                 .iter()
                 .map(|d| d.end - d.start)
@@ -175,8 +292,9 @@ impl Editor {
 
     /// Whether `pos` lies in a deleted range.
     pub fn is_deleted(&self, pos: SamplePos) -> bool {
-        let i = self.deleted.partition_point(|d| d.end <= pos);
-        self.deleted.get(i).is_some_and(|d| d.start <= pos)
+        let deleted = &self.edits.deleted;
+        let i = deleted.partition_point(|d| d.end <= pos);
+        deleted.get(i).is_some_and(|d| d.start <= pos)
     }
 
     /// Deletes the selection. Returns false (and changes nothing) if there
@@ -185,9 +303,9 @@ impl Editor {
         let Some(sel) = self.selection.clone() else {
             return false;
         };
-        let mut next = self.deleted.clone();
-        next.push(sel);
-        ranges::normalize(&mut next);
+        let mut next = self.edits.clone();
+        next.deleted.push(sel);
+        ranges::normalize(&mut next.deleted);
         self.commit(next)
     }
 
@@ -197,17 +315,21 @@ impl Editor {
         let Some(sel) = self.selection.clone() else {
             return false;
         };
-        let mut next = Vec::new();
-        for d in &self.deleted {
+        let mut deleted = Vec::new();
+        for d in &self.edits.deleted {
             // Keep the parts of `d` outside the selection.
             if d.start < sel.start {
-                next.push(d.start..d.end.min(sel.start));
+                deleted.push(d.start..d.end.min(sel.start));
             }
             if d.end > sel.end {
-                next.push(d.start.max(sel.end)..d.end);
+                deleted.push(d.start.max(sel.end)..d.end);
             }
         }
-        ranges::normalize(&mut next);
+        ranges::normalize(&mut deleted);
+        let next = Edits {
+            deleted,
+            ..self.edits.clone()
+        };
         self.commit(next)
     }
 
@@ -221,12 +343,12 @@ impl Editor {
         !self.redo.is_empty()
     }
 
-    /// Undoes the last delete or restore.
+    /// Undoes the last change (delete, restore, split, join, rename).
     pub fn undo(&mut self) -> bool {
         let Some(prev) = self.undo.pop() else {
             return false;
         };
-        self.redo.push(std::mem::replace(&mut self.deleted, prev));
+        self.redo.push(std::mem::replace(&mut self.edits, prev));
         true
     }
 
@@ -235,41 +357,42 @@ impl Editor {
         let Some(next) = self.redo.pop() else {
             return false;
         };
-        self.undo.push(std::mem::replace(&mut self.deleted, next));
+        self.undo.push(std::mem::replace(&mut self.edits, next));
         true
     }
 
-    /// Whether anything is deleted, i.e. an export would differ from the
+    /// Whether anything is edited, i.e. an export would differ from the
     /// source.
     pub fn is_modified(&self) -> bool {
-        !self.deleted.is_empty()
+        self.edits != Edits::default()
     }
 
-    /// Remembers `deleted` as exported: the [`Editor::deleted`] list taken
-    /// when an export started, so edits made while it ran still count as
+    /// Remembers `edits` as exported: the [`Editor::edits`] taken when an
+    /// export started, so edits made while it ran still count as
     /// unexported.
-    pub fn mark_exported(&mut self, deleted: Vec<Range<SamplePos>>) {
-        self.exported = Some(deleted);
+    pub fn mark_exported(&mut self, edits: Edits) {
+        self.exported = Some(edits);
     }
 
     /// Whether there are edits that no export contains, i.e. closing the
     /// file would lose work. Undoing back to the exported state, or to no
     /// edits at all, counts as nothing to lose.
     pub fn has_unexported_changes(&self) -> bool {
-        self.is_modified() && self.exported.as_ref() != Some(&self.deleted)
+        self.is_modified() && self.exported.as_ref() != Some(&self.edits)
     }
 
-    /// What to hand to [`crate::Source::export`].
+    /// What to hand to [`crate::Source::export`] for a single output file
+    /// (all tracks joined).
     pub fn cut_request(&self) -> CutRequest {
-        CutRequest::Delete(self.deleted.clone())
+        CutRequest::Delete(self.edits.deleted.clone())
     }
 
-    /// Makes `next` the deleted list if it differs, with an undo step.
-    fn commit(&mut self, next: Vec<Range<SamplePos>>) -> bool {
-        if next == self.deleted {
+    /// Makes `next` the edits if they differ, with an undo step.
+    fn commit(&mut self, next: Edits) -> bool {
+        if next == self.edits {
             return false;
         }
-        self.undo.push(std::mem::replace(&mut self.deleted, next));
+        self.undo.push(std::mem::replace(&mut self.edits, next));
         self.redo.clear();
         true
     }
@@ -284,7 +407,14 @@ impl Editor {
         if let Some(sel) = &self.selection {
             parts.push(describe_selection(sel, rate));
         }
-        if self.is_modified() {
+        if !self.edits.splits.is_empty() {
+            parts.push(format!(
+                "track {} of {}",
+                self.track_at(self.play_from()) + 1,
+                self.edits.splits.len() + 1
+            ));
+        }
+        if !self.edits.deleted.is_empty() {
             parts.push(format!(
                 "keeping {} of {}",
                 format_samples(self.kept_len(), rate),
@@ -442,7 +572,7 @@ mod tests {
         e.select(0, 10);
         e.delete_selection();
         assert!(e.has_unexported_changes());
-        e.mark_exported(e.deleted().to_vec());
+        e.mark_exported(e.edits().clone());
         assert!(!e.has_unexported_changes());
         e.select(20, 30);
         e.delete_selection();
@@ -460,7 +590,7 @@ mod tests {
         let mut e = Editor::new(1000);
         e.select(0, 10);
         e.delete_selection();
-        let started = e.deleted().to_vec();
+        let started = e.edits().clone();
         e.select(20, 30);
         e.delete_selection();
         e.mark_exported(started);
@@ -507,6 +637,71 @@ mod tests {
     }
 
     #[test]
+    fn splitting_makes_tracks_that_survive_deletions() {
+        let mut e = Editor::new(1000);
+        assert_eq!(e.tracks().len(), 1);
+        assert!(e.split_at(600));
+        assert!(e.split_at(300));
+        assert!(!e.split_at(300), "already a split");
+        assert!(!e.split_at(0) && !e.split_at(1000), "not at the ends");
+        assert_eq!(e.splits(), &[300, 600]);
+        // A deletion across a split shortens both tracks; the split stays.
+        e.select(250, 350);
+        e.delete_selection();
+        let t = e.tracks();
+        assert_eq!(
+            t.iter().map(|t| t.span.clone()).collect::<Vec<_>>(),
+            vec![0..300, 300..600, 600..1000]
+        );
+        assert_eq!(t[0].kept, std::slice::from_ref(&(0..250)));
+        assert_eq!(t[1].kept, std::slice::from_ref(&(350..600)));
+        assert_eq!(t[2].kept_len(), 400);
+        assert_eq!(t.iter().map(|t| t.number).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(
+            (
+                e.track_at(0),
+                e.track_at(299),
+                e.track_at(300),
+                e.track_at(999)
+            ),
+            (0, 0, 1, 2)
+        );
+        // A track deleted entirely is still listed, with nothing kept.
+        e.select(600, 1000);
+        e.delete_selection();
+        assert!(e.tracks()[2].kept.is_empty());
+    }
+
+    #[test]
+    fn names_follow_their_track_and_everything_undoes() {
+        let mut e = Editor::new(1000);
+        assert!(e.rename_track(0, "  Intro "));
+        assert_eq!(e.tracks()[0].name.as_deref(), Some("Intro"));
+        assert!(!e.rename_track(0, "Intro"), "no change");
+        assert!(!e.rename_track(5, "x"), "no such track");
+        e.split_at(500);
+        assert!(e.rename_track(1, "Talk"));
+        let names: Vec<_> = e.tracks().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, [Some("Intro".to_string()), Some("Talk".to_string())]);
+        // Splitting a named track: the first part keeps the name.
+        e.split_at(200);
+        let names: Vec<_> = e.tracks().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, [Some("Intro".into()), None, Some("Talk".into())]);
+        // Joining drops the joined track's name.
+        assert!(e.join_with_previous(2));
+        assert_eq!(e.splits(), &[200]);
+        assert_eq!(e.tracks()[1].name, None);
+        assert!(!e.join_with_previous(0) && !e.join_with_previous(9));
+        // Blank names remove the name.
+        assert!(e.rename_track(0, " "));
+        assert_eq!(e.tracks()[0].name, None);
+        assert!(e.has_unexported_changes());
+        while e.undo() {}
+        assert!(!e.is_modified());
+        assert_eq!(e.tracks().len(), 1);
+    }
+
+    #[test]
     fn status_line() {
         let mut e = Editor::new(60_000);
         assert_eq!(e.describe(1000), "");
@@ -519,6 +714,12 @@ mod tests {
         assert_eq!(
             e.describe(1000),
             "selected 0:00.000 .. 0:01.000 (0:01.000) · keeping 0:59.500 of 1:00.000"
+        );
+        e.split_at(30_000);
+        e.select(40_000, 41_000);
+        assert_eq!(
+            e.describe(1000),
+            "selected 0:40.000 .. 0:41.000 (0:01.000) · track 2 of 2 · keeping 0:59.500 of 1:00.000"
         );
     }
 

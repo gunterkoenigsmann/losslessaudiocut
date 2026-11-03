@@ -12,8 +12,8 @@
 //!   thread and publishes the growing waveform summary;
 //! - [`lac_app::waveform::WaveformView`] maps pixels to samples, zooms and
 //!   scrolls, and says what each pixel column shows;
-//! - [`lac_app::editor::Editor`] holds the selection, the deleted parts and
-//!   the undo history;
+//! - [`lac_app::editor::Editor`] holds the selection, the deleted parts,
+//!   the track split points and names, and//!   the undo history;
 //! - [`lac_app::export_job::ExportJob`] writes the cut in the background;
 //! - [`lac_playback::Player`] plays the kept parts (`lac_app::playback`
 //!   connects it to the decoder);
@@ -37,8 +37,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lac_app::detail::{Detail, DetailLoader};
-use lac_app::editor::{Editor, describe_export};
-use lac_app::export_job::{ExportJob, default_output};
+use lac_app::editor::{Editor, Edits};
+use lac_app::export_job::{ExportJob, default_output, describe_outcomes, track_tasks};
 use lac_app::format_samples;
 use lac_app::peak_cache::PeakCache;
 use lac_app::peak_job::{JobStatus, PeakJob};
@@ -63,6 +63,9 @@ const ID_SELECT_ALL: Id = ID_HIGHEST + 11;
 const ID_SELECT_NONE: Id = ID_HIGHEST + 12;
 const ID_PLAY: Id = ID_HIGHEST + 13;
 const ID_TO_START: Id = ID_HIGHEST + 14;
+const ID_SPLIT: Id = ID_HIGHEST + 15;
+const ID_JOIN: Id = ID_HIGHEST + 16;
+const ID_RENAME: Id = ID_HIGHEST + 17;
 
 /// Status bar fields: file and messages, then selection and edits.
 const FIELD_FILE: i32 = 0;
@@ -102,6 +105,8 @@ const SELECTION: Colour = Colour::rgb(0x34, 0x40, 0x52);
 const SELECTION_EDGE: Colour = Colour::rgb(0xe8, 0xc0, 0x50);
 /// The cursor where playback starts.
 const CURSOR: Colour = Colour::rgb(0xc8, 0xcc, 0xd0);
+/// Track boundaries and track labels.
+const TRACK: Colour = Colour::rgb(0xd0, 0x8c, 0xe8);
 /// The position being played.
 const PLAYHEAD: Colour = Colour::rgb(0x6c, 0xe0, 0x7c);
 
@@ -110,9 +115,8 @@ struct RunningExport {
     job: ExportJob,
     /// The file being cut; another one may be open by the time it ends.
     source: PathBuf,
-    /// The deleted list that is being exported (see
-    /// [`Editor::mark_exported`]).
-    deleted: Vec<Range<SamplePos>>,
+    /// The edits being exported (see [`Editor::mark_exported`]).
+    edits: Edits,
 }
 
 /// What the window currently shows.
@@ -311,27 +315,16 @@ impl State {
 
     /// Takes the result of a finished export. Returns the message to show.
     fn poll_export(&mut self) -> Option<String> {
-        let result = self.export.as_ref()?.job.poll()?;
+        let outcomes = self.export.as_ref()?.job.poll()?;
         let done = self.export.take()?;
-        let name = done
-            .job
-            .output()
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        Some(match result {
-            Ok(kept) => {
-                // Only the file that was exported has its edits saved.
-                if self.path.as_deref() == Some(done.source.as_path())
-                    && let Some(e) = &mut self.editor
-                {
-                    e.mark_exported(done.deleted);
-                }
-                let rate = self.rate.unwrap_or(1);
-                format!("{name}: {}", describe_export(&kept, rate))
-            }
-            Err(msg) => format!("export to {name} failed: {msg}"),
-        })
+        // Only a complete export of the file that is open saves its edits.
+        if outcomes.iter().all(|o| o.result.is_ok())
+            && self.path.as_deref() == Some(done.source.as_path())
+            && let Some(e) = &mut self.editor
+        {
+            e.mark_exported(done.edits);
+        }
+        Some(describe_outcomes(&outcomes, self.rate.unwrap_or(1)))
     }
 
     /// Average packet length: what the summary resolves (see
@@ -548,6 +541,22 @@ fn menu_bar() -> MenuBar {
         )
         .append_separator()
         .append_item(
+            ID_SPLIT,
+            "S&plit track here\tCtrl+K",
+            "Start a new track at the cursor or the selection start",
+        )
+        .append_item(
+            ID_JOIN,
+            "&Join with previous track\tCtrl+J",
+            "Remove the split at the start of the track under the cursor",
+        )
+        .append_item(
+            ID_RENAME,
+            "Re&name track…\tF2",
+            "Name the track under the cursor",
+        )
+        .append_separator()
+        .append_item(
             ID_SELECT_ALL,
             "Select &all\tCtrl+A",
             "Select the whole file",
@@ -606,6 +615,8 @@ fn bind_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
             }
         } else if id == ID_EXPORT {
             export(&f, &state);
+        } else if id == ID_RENAME {
+            rename_track(&f, &state);
         } else if id == ID_CLEAR_CACHE {
             let cache = state.borrow().cache.clone();
             let msg = match cache.map(|c| c.clear()) {
@@ -665,7 +676,14 @@ fn bind_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
 fn is_edit(id: Id) -> bool {
     matches!(
         id,
-        ID_UNDO | ID_REDO | ID_DELETE | ID_RESTORE | ID_SELECT_ALL | ID_SELECT_NONE
+        ID_UNDO
+            | ID_REDO
+            | ID_DELETE
+            | ID_RESTORE
+            | ID_SELECT_ALL
+            | ID_SELECT_NONE
+            | ID_SPLIT
+            | ID_JOIN
     )
 }
 
@@ -692,6 +710,12 @@ fn edit(st: &mut State, id: Id) -> Option<&'static str> {
         ID_SELECT_NONE => {
             e.clear_selection();
             ""
+        }
+        // Tracks are split at, or joined around, where playback would
+        // start: the selection start or the cursor.
+        ID_SPLIT if !e.split_at(e.play_from()) => "click where the new track should start",
+        ID_JOIN if !e.join_with_previous(e.track_at(e.play_from())) => {
+            "the first track has no track before it"
         }
         _ => "",
     })
@@ -731,53 +755,129 @@ fn confirm_discard(frame: &Frame, state: &Rc<RefCell<State>>) -> bool {
 
 /// File > Export: asks for the output file and starts writing it.
 fn export(frame: &Frame, state: &Rc<RefCell<State>>) {
-    let (source, deleted) = {
+    let (source, editor) = {
         let st = state.borrow();
         if st.export.is_some() {
             frame.set_status_text("an export is still running", FIELD_FILE);
             return;
         }
         match (&st.path, &st.editor) {
-            (Some(p), Some(e)) => (p.clone(), e.deleted().to_vec()),
+            (Some(p), Some(e)) => (p.clone(), e.clone()),
             _ => {
                 frame.set_status_text("open a file first", FIELD_FILE);
                 return;
             }
         }
     };
-    let suggestion = default_output(&source);
     let file_name = |p: &Path| {
         p.file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default()
     };
-    let dir = suggestion
+    let source_dir = source
         .parent()
         .map(|d| d.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let dialog = FileDialog::builder(frame)
-        .with_message("Export the kept parts")
-        .with_default_dir(&dir)
-        .with_default_file(&file_name(&suggestion))
-        .with_style(FileDialogStyle::Save | FileDialogStyle::OverwritePrompt)
-        .build();
-    if dialog.show_modal() != ID_OK {
+    let (tasks, skipped) = if editor.splits().is_empty() {
+        // One file: ask for its name.
+        let dialog = FileDialog::builder(frame)
+            .with_message("Export the kept parts")
+            .with_default_dir(&source_dir)
+            .with_default_file(&file_name(&default_output(&source)))
+            .with_style(FileDialogStyle::Save | FileDialogStyle::OverwritePrompt)
+            .build();
+        if dialog.show_modal() != ID_OK {
+            return;
+        }
+        let Some(output) = dialog.get_path().map(PathBuf::from) else {
+            return;
+        };
+        let task = lac_app::export_job::ExportTask {
+            request: editor.cut_request(),
+            output,
+        };
+        (vec![task], Vec::new())
+    } else {
+        // One file per track: ask for the folder, the names follow from
+        // the track numbers and names.
+        let dialog =
+            DirDialog::builder(frame, "Export the tracks into this folder", &source_dir).build();
+        if dialog.show_modal() != ID_OK {
+            return;
+        }
+        let Some(dir) = dialog.get_path().map(PathBuf::from) else {
+            return;
+        };
+        let (tasks, skipped) = track_tasks(&editor, &source, &dir);
+        let existing = tasks.iter().filter(|t| t.output.exists()).count();
+        if existing > 0 {
+            let ask = MessageDialog::builder(
+                frame,
+                &format!(
+                    "{existing} of the {} track files exist already in {}. Replace them?",
+                    tasks.len(),
+                    dir.display()
+                ),
+                "Replace files?",
+            )
+            .with_style(
+                MessageDialogStyle::YesNo
+                    | MessageDialogStyle::NoDefault
+                    | MessageDialogStyle::IconWarning,
+            )
+            .build();
+            if ask.show_modal() != ID_YES {
+                return;
+            }
+        }
+        (tasks, skipped)
+    };
+    if tasks.is_empty() {
+        frame.set_status_text("everything is deleted; nothing to export", FIELD_FILE);
         return;
     }
-    let Some(output) = dialog.get_path().map(PathBuf::from) else {
-        return;
+    let mut msg = match tasks.as_slice() {
+        [one] => format!("exporting to {}…", file_name(&one.output)),
+        many => format!("exporting {} tracks…", many.len()),
     };
-    frame.set_status_text(&format!("exporting to {}…", file_name(&output)), FIELD_FILE);
-    let job = ExportJob::start(
-        &source,
-        lac_app::CutRequest::Delete(deleted.clone()),
-        output,
-    );
+    if !skipped.is_empty() {
+        let list: Vec<String> = skipped.iter().map(ToString::to_string).collect();
+        msg += &format!(" (track {} deleted entirely, no file)", list.join(", "));
+    }
+    frame.set_status_text(&msg, FIELD_FILE);
+    let job = ExportJob::start_all(&source, tasks);
     state.borrow_mut().export = Some(RunningExport {
         job,
         source,
-        deleted,
+        edits: editor.edits().clone(),
     });
+}
+
+/// Edit > Rename track: asks for the name of the track under the cursor.
+fn rename_track(frame: &Frame, state: &Rc<RefCell<State>>) {
+    let Some((index, current)) = state.borrow().editor.as_ref().map(|e| {
+        let i = e.track_at(e.play_from());
+        let name = e.tracks().get(i).and_then(|t| t.name.clone());
+        (i, name.unwrap_or_default())
+    }) else {
+        frame.set_status_text("open a file first", FIELD_FILE);
+        return;
+    };
+    // No borrow while the dialog runs the event loop.
+    let dialog = TextEntryDialog::builder(
+        frame,
+        &format!("Name of track {} (also used in its file name):", index + 1),
+        "Rename track",
+    )
+    .with_default_value(&current)
+    .build();
+    if dialog.show_modal() != ID_OK {
+        return;
+    }
+    let name = dialog.get_value().unwrap_or_default();
+    if let Some(e) = &mut state.borrow_mut().editor {
+        e.rename_track(index, &name);
+    }
 }
 
 /// Closing the window: offers to keep unexported edits, and lets a running
@@ -1014,6 +1114,30 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
                 }
             }
         }
+        // Track boundaries (dashed) and labels at the top of each track.
+        if let Some(e) = editor.filter(|e| !e.splits().is_empty()) {
+            let width = f64::from(view.width());
+            dc.set_pen(TRACK, 1, PenStyle::ShortDash);
+            dc.set_text_foreground(TRACK);
+            dc.set_background_mode(BackgroundMode::Transparent);
+            for t in e.tracks() {
+                let x0 = view.sample_to_x(t.span.start).round();
+                let x1 = view.sample_to_x(t.span.end).round();
+                if x1 < 0.0 || x0 >= width {
+                    continue;
+                }
+                if t.span.start > 0 && x0 >= 0.0 {
+                    dc.draw_line(x0 as i32, 0, x0 as i32, size.height);
+                }
+                let label = match &t.name {
+                    Some(n) => format!("{} {n}", t.number),
+                    None => t.number.to_string(),
+                };
+                // Keep the label of a track that starts left of the window
+                // visible at the left edge.
+                dc.draw_text(&label, x0.max(0.0) as i32 + 4, 2);
+            }
+        }
         // Vertical markers on top: selection edges (or the cursor), then
         // the playhead.
         let mut marks = Vec::new();
@@ -1068,6 +1192,33 @@ mod tests {
         assert!(!st.unexported());
         assert_eq!(edit(&mut st, ID_SELECT_NONE), Some(""));
         assert_eq!(st.editor.as_ref().and_then(Editor::selection), None);
+    }
+
+    #[test]
+    fn split_and_join_at_the_cursor() {
+        let mut st = State {
+            editor: Some(Editor::new(1000)),
+            ..State::default()
+        };
+        assert_eq!(
+            edit(&mut st, ID_SPLIT),
+            Some("click where the new track should start"),
+            "not at the very start"
+        );
+        assert_eq!(
+            edit(&mut st, ID_JOIN),
+            Some("the first track has no track before it")
+        );
+        if let Some(e) = &mut st.editor {
+            e.set_cursor(400);
+        }
+        assert_eq!(edit(&mut st, ID_SPLIT), Some(""));
+        assert_eq!(
+            st.editor.as_ref().map(|e| e.splits().to_vec()),
+            Some(vec![400])
+        );
+        assert_eq!(edit(&mut st, ID_JOIN), Some(""));
+        assert_eq!(st.editor.as_ref().map(|e| e.splits().len()), Some(0));
     }
 
     #[test]
