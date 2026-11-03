@@ -131,6 +131,25 @@ impl WaveformView {
         (pos as f64 - self.start as f64) / self.spp
     }
 
+    /// The pixel columns that show any part of `r`, clipped to the window:
+    /// at least one column even if `r` is narrower than a pixel, so a
+    /// short selection or deletion stays visible. `None` if `r` is empty
+    /// or not in view.
+    pub fn pixel_span(&self, r: &Range<SamplePos>) -> Option<Range<u32>> {
+        if r.start >= r.end {
+            return None;
+        }
+        let width = f64::from(self.width);
+        let x0 = self.sample_to_x(r.start).floor().max(0.0);
+        let x1 = self.sample_to_x(r.end).ceil().min(width);
+        // Off screen to the left (x1 <= 0) or right (x0 >= width).
+        if x1 <= 0.0 || x0 >= width {
+            return None;
+        }
+        let (x0, x1) = (x0 as u32, x1 as u32);
+        Some(x0..x1.max(x0 + 1))
+    }
+
     /// How to draw at the current zoom, given the length of the packets in
     /// view (use the shortest one for a conservative choice).
     pub fn draw_mode(&self, packet_len: SamplePos) -> DrawMode {
@@ -237,6 +256,28 @@ mod tests {
     use super::*;
     use lac_core::{AudioStreamInfo, PacketFlags, PacketIndex, PacketInfo};
     use lac_peaks::PeakBuilder;
+
+    #[test]
+    fn pixel_spans_are_clipped_and_never_vanish() {
+        // 10 samples per pixel, 100 pixels.
+        let mut v = WaveformView::new(10_000, 100);
+        assert_eq!(v.samples_per_pixel(), 100.0);
+        v.zoom_at(0.0, 10.0);
+        assert_eq!(v.samples_per_pixel(), 10.0);
+        assert_eq!(v.pixel_span(&(100..200)), Some(10..20));
+        // Partly covered columns count.
+        assert_eq!(v.pixel_span(&(105..201)), Some(10..21));
+        // Narrower than a pixel: still one column.
+        assert_eq!(v.pixel_span(&(503..504)), Some(50..51));
+        // Clipped at the right edge, off screen, empty.
+        assert_eq!(v.pixel_span(&(900..5000)), Some(90..100));
+        assert_eq!(v.pixel_span(&(1000..5000)), None);
+        assert_eq!(v.pixel_span(&(300..300)), None);
+        // Clipped at the left edge after scrolling.
+        v.scroll_to(500);
+        assert_eq!(v.pixel_span(&(0..600)), Some(0..10));
+        assert_eq!(v.pixel_span(&(0..500)), None);
+    }
 
     #[test]
     fn starts_showing_everything() {

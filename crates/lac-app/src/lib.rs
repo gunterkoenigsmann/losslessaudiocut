@@ -15,6 +15,8 @@
 //! - [`waveform`]: the waveform display's view model (zoom, scroll,
 //!   pixel columns).
 //! - [`peak_job`]: building the waveform summary in a background thread.
+//! - [`editor`]: selection, deletions and undo of one recording.
+//! - [`export_job`]: writing a cut in a background thread.
 //! - [`peak_cache`]: the on-disk cache of waveform summaries.
 //! - [`detail`]: decoded samples for a zoomed-in waveform, loaded in the
 //!   background with random access.
@@ -22,6 +24,8 @@
 //! See `docs/architecture.md` in the repository for how this crate fits in.
 
 pub mod detail;
+pub mod editor;
+pub mod export_job;
 pub mod peak_cache;
 pub mod peak_job;
 pub mod ranges;
