@@ -869,6 +869,7 @@ name = "lac-gui"
 version = "0.1.0"
 dependencies = [
  "lac-app",
+ "lac-core",
  "lac-peaks",
  "wxdragon",
 ]

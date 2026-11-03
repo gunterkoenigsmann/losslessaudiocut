@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 lac-app.workspace = true
+lac-core.workspace = true
 lac-peaks.workspace = true
 # Without default features: they pull in the Linux tray icon library
 # (appindicator) and image formats we do not use.

@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use lac_core::AudioStreamInfo;
 use lac_decode::{DecodeError, DecodeReport, Flow};
 use lac_peaks::PeakSummary;
 
@@ -47,6 +48,8 @@ pub struct JobUpdate {
     /// Whether the summary came from the [`PeakCache`] instead of being
     /// decoded.
     pub cached: bool,
+    /// Sample rate and channels, `None` until the file is open.
+    pub info: Option<AudioStreamInfo>,
 }
 
 /// A background thread building the waveform summary of one file.
@@ -75,6 +78,7 @@ impl PeakJob {
             peaks: None,
             status: JobStatus::Running,
             cached: false,
+            info: None,
         }));
         let cancel = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -146,6 +150,8 @@ fn run(
         Ok(s) => s,
         Err(e) => return publish(shared, None, JobStatus::Failed(e.to_string())),
     };
+    // Becomes visible with the first publication below.
+    lock(shared).info = Some(source.info());
     if let Some((peaks, warnings)) = cache.and_then(|c| c.load(&source)) {
         let report = DecodeReport {
             frames: peaks.total_samples(),
@@ -207,6 +213,8 @@ mod tests {
         assert_eq!(peaks.packets_done(), peaks.packets());
         assert_eq!(report.frames, peaks.total_samples());
         assert_eq!(peaks.channels(), 2);
+        let info = u.info.expect("info");
+        assert_eq!((info.sample_rate, info.channels), (44_100, 2));
     }
 
     #[test]
