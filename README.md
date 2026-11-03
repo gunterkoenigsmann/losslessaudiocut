@@ -3,8 +3,8 @@
 A lossless audio cutter in Rust: delete parts of a recording, join the rest
 or split it into tracks, without ever re-encoding lossy audio.
 
-Status: early development. WAV, FLAC and Ogg (Vorbis, Opus, Speex) cutting
-work from the command line; MP3, AAC and the wxWidgets GUI follow. See
+Status: early development. WAV, FLAC, Ogg (Vorbis, Opus, Speex) and MP3
+cutting work from the command line; the wxWidgets GUI and AAC follow. See
 [`docs/architecture.md`](docs/architecture.md) for the design.
 
 ## Command line
@@ -26,8 +26,8 @@ cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
-Some tests cross-check results with `ffmpeg`, `flac` and `oggdec`
-(vorbis-tools) if they are installed; set `LAC_REQUIRE_TOOLS=1` to make missing tools an error.
+Some tests cross-check results with `ffmpeg`, `flac`, `oggdec`
+(vorbis-tools) and `mpg123` if they are installed; set `LAC_REQUIRE_TOOLS=1` to make missing tools an error.
 Test fixtures are regenerated with `crates/lac-container/tests/fixtures/generate.sh`. See
 [`AGENTS.md`](AGENTS.md) for conventions.
 

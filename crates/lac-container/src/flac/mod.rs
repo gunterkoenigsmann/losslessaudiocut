@@ -536,7 +536,7 @@ fn write_block_header<W: Write + ?Sized>(
 }
 
 /// Returns the offset after an ID3v2 tag at the start of the file, or 0.
-fn skip_id3v2<R: Read + Seek + ?Sized>(r: &mut R, len: u64) -> Result<u64> {
+pub(crate) fn skip_id3v2<R: Read + Seek + ?Sized>(r: &mut R, len: u64) -> Result<u64> {
     if len < 10 {
         return Ok(0);
     }

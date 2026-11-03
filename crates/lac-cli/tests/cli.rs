@@ -182,3 +182,30 @@ fn ogg_is_detected_and_cut() {
     assert!(text.contains("0:00.600"), "{text}");
     assert!(!text.contains("warning"), "{text}");
 }
+
+#[test]
+fn mp3_is_detected_and_cut_sample_exactly() {
+    let d = temp_dir("mp3");
+    let input = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../lac-container/tests/fixtures/mp3_ffmpeg_id3v2.mp3");
+    let output = d.join("out.mp3");
+    let out = lac()
+        .arg("cut")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .args(["--keep", "0.1..0.6"])
+        .output()
+        .expect("run lac");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("(exact)"));
+    let info = lac().arg("info").arg(&output).output().expect("run lac");
+    let text = String::from_utf8_lossy(&info.stdout);
+    assert!(text.contains("MP3"), "{text}");
+    assert!(text.contains("0:00.500"), "{text}");
+    assert!(!text.contains("warning"), "{text}");
+}

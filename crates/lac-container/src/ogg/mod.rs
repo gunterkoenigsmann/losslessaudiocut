@@ -231,6 +231,7 @@ impl OggFile {
             can_trim_start: false,
             can_trim_end: false,
             lossless_reencode: false,
+            trims_at_file_ends_only: false,
         }
     }
 

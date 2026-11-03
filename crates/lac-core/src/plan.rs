@@ -32,6 +32,11 @@ pub struct CutCapabilities {
     /// Boundary packets may be rewritten without any loss (PCM, FLAC), which
     /// makes both cut points sample-exact.
     pub lossless_reencode: bool,
+    /// Trimming is only possible at the very start and end of the output
+    /// file, not at joins inside it (MP3: the LAME tag holds one encoder
+    /// delay and one padding value). [`plan_cuts`] then widens the inner
+    /// ends of the ranges to packet boundaries.
+    pub trims_at_file_ends_only: bool,
 }
 
 impl CutCapabilities {
@@ -41,6 +46,7 @@ impl CutCapabilities {
         can_trim_start: false,
         can_trim_end: false,
         lossless_reencode: true,
+        trims_at_file_ends_only: false,
     };
 
     fn exact_start(&self) -> bool {
@@ -142,6 +148,32 @@ pub fn plan_cut(
     })
 }
 
+/// Plans the ranges that are joined into one output file, in order.
+///
+/// Like calling [`plan_cut`] for each range, except that for formats with
+/// [`CutCapabilities::trims_at_file_ends_only`] only the start of the first
+/// and the end of the last range are trimmed; the ends meeting at a join
+/// are widened to packet boundaries.
+pub fn plan_cuts(
+    index: &PacketIndex,
+    caps: CutCapabilities,
+    ranges: &[Range<SamplePos>],
+) -> Result<Vec<CutPlan>, PlanError> {
+    let last = ranges.len().saturating_sub(1);
+    ranges
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let mut c = caps;
+            if caps.trims_at_file_ends_only {
+                c.can_trim_start &= i == 0;
+                c.can_trim_end &= i == last;
+            }
+            plan_cut(index, c, r.clone())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,7 +211,30 @@ mod tests {
         can_trim_start: false,
         can_trim_end: false,
         lossless_reencode: false,
+        trims_at_file_ends_only: false,
     };
+
+    #[test]
+    fn trims_only_at_file_ends() {
+        let idx = index(&[1000; 10]);
+        let caps = CutCapabilities {
+            preroll_packets: 0,
+            can_trim_start: true,
+            can_trim_end: true,
+            lossless_reencode: false,
+            trims_at_file_ends_only: true,
+        };
+        let plans = plan_cuts(&idx, caps, &[1500..2500, 5500..6500, 8500..9500]).expect("ok");
+        let actual: Vec<_> = plans.iter().map(|p| p.actual.clone()).collect();
+        assert_eq!(actual, [1500..3000, 5000..7000, 8000..9500]);
+        // Without the restriction every range is exact.
+        let free = CutCapabilities {
+            trims_at_file_ends_only: false,
+            ..caps
+        };
+        let plans = plan_cuts(&idx, free, &[1500..2500, 5500..6500]).expect("ok");
+        assert_eq!(plans[1].actual, 5500..6500);
+    }
 
     #[test]
     fn packet_granular_cut_widens_outwards() {
@@ -213,6 +268,7 @@ mod tests {
                 can_trim_start: s,
                 can_trim_end: e,
                 lossless_reencode: r,
+                trims_at_file_ends_only: false,
             }
         })
     }

@@ -33,12 +33,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # ffmpeg, the reference flac tool and oggdec (libvorbisfile) are the
-      # independent decoders for cross-checks. They are installed (and therefore required) on Linux;
+      # ffmpeg, the reference flac tool, oggdec (libvorbisfile) and mpg123
+      # are the independent decoders for cross-checks. They are installed (and therefore required) on Linux;
       # on macOS and Windows the cross-checks skip themselves to keep CI fast.
       - name: Install reference tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg flac vorbis-tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg flac vorbis-tools mpg123
       - name: Require cross-checks
         if: runner.os == 'Linux'
         shell: bash
