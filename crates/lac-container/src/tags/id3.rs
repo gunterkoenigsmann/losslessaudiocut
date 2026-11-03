@@ -105,11 +105,11 @@ fn decode(enc: u8, b: &[u8]) -> String {
                 // is mandatory, so big-endian is as good a guess as any.
                 _ => (true, b),
             };
-            let units = b.chunks_exact(2).map(|c| {
+            let units = b.as_chunks::<2>().0.iter().map(|&c| {
                 if be {
-                    u16::from_be_bytes([c[0], c[1]])
+                    u16::from_be_bytes(c)
                 } else {
-                    u16::from_le_bytes([c[0], c[1]])
+                    u16::from_le_bytes(c)
                 }
             });
             char::decode_utf16(units)
