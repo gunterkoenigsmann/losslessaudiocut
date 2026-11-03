@@ -22,6 +22,16 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # Security advisories (RustSec), licenses and crate sources of all
+  # dependencies, configured in deny.toml.
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
   test:
     name: test (${{ matrix.os }})
     strategy:
