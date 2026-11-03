@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lac_app::detail::{Detail, DetailLoader};
+use lac_app::peak_cache::PeakCache;
 use lac_app::peak_job::{JobStatus, PeakJob};
 use lac_app::waveform::{DrawMode, WaveformView};
 use lac_peaks::PeakSummary;
@@ -37,6 +38,7 @@ const ID_OPEN: Id = ID_HIGHEST + 1;
 const ID_ZOOM_IN: Id = ID_HIGHEST + 2;
 const ID_ZOOM_OUT: Id = ID_HIGHEST + 3;
 const ID_ZOOM_FIT: Id = ID_HIGHEST + 4;
+const ID_CLEAR_CACHE: Id = ID_HIGHEST + 5;
 
 /// How often the timer looks for new waveform data, in milliseconds.
 const POLL_MS: i32 = 50;
@@ -80,12 +82,15 @@ struct State {
     detail_seen: Option<u64>,
     /// The latest decoded samples.
     detail: Option<Arc<Detail>>,
+    /// Where waveform summaries are kept between runs (`None` if the
+    /// system has no per-user cache directory).
+    cache: Option<PeakCache>,
 }
 
 impl State {
     /// Starts showing `path`, dropping (and so cancelling) any previous job.
     fn open(&mut self, path: PathBuf) {
-        self.job = Some(PeakJob::start(&path, PUBLISH_INTERVAL));
+        self.job = Some(PeakJob::start(&path, PUBLISH_INTERVAL, self.cache.clone()));
         self.detail_loader = Some(DetailLoader::start(&path));
         self.path = Some(path);
         self.seen = None;
@@ -158,7 +163,11 @@ impl State {
             }
             JobStatus::Done(report) if report.warnings.is_empty() => {
                 self.job = None;
-                name
+                if u.cached {
+                    format!("{name} (waveform from cache)")
+                } else {
+                    name
+                }
             }
             JobStatus::Done(report) => {
                 self.job = None;
@@ -189,8 +198,17 @@ fn main() {
         sizer.add(&panel, 1, SizerFlag::Expand, 0);
         frame.set_sizer(sizer, true);
 
+        let cache = PeakCache::default_dir().map(PeakCache::new);
+        if let Some(c) = cache.clone() {
+            // Startup eviction (orphans, old and excess entries) off the
+            // GUI thread; its result only matters for disk space.
+            std::thread::spawn(move || {
+                let _ = c.evict();
+            });
+        }
         let state = Rc::new(RefCell::new(State {
             width: 1,
+            cache,
             ..State::default()
         }));
         bind_paint(&panel, &state);
@@ -250,6 +268,12 @@ fn menu_bar() -> MenuBar {
     let file = Menu::builder()
         .append_item(ID_OPEN, "&Open…\tCtrl+O", "Open an audio file")
         .append_separator()
+        .append_item(
+            ID_CLEAR_CACHE,
+            "&Clear waveform cache",
+            "Delete the stored waveforms; files are decoded again when opened",
+        )
+        .append_separator()
         .append_item(ID_EXIT, "&Quit\tCtrl+Q", "Quit losslessaudiocut")
         .build();
     let view = Menu::builder()
@@ -285,6 +309,15 @@ fn bind_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
                 state.borrow_mut().open(PathBuf::from(path));
                 f.set_status_text("reading…", 0);
             }
+        } else if id == ID_CLEAR_CACHE {
+            let cache = state.borrow().cache.clone();
+            let msg = match cache.map(|c| c.clear()) {
+                Some(Ok(n)) => format!("waveform cache cleared ({n} entries)"),
+                Some(Err(e)) => format!("could not clear the waveform cache: {e}"),
+                None => "there is no waveform cache on this system".to_string(),
+            };
+            f.set_status_text(&msg, 0);
+            return;
         } else if id == ID_EXIT {
             f.close(false);
             return;
