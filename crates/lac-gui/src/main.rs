@@ -29,6 +29,7 @@
 //! Usage: `losslessaudiocut [FILE]`.
 
 mod lanes;
+mod options;
 
 use std::cell::RefCell;
 use std::ops::Range;
@@ -47,7 +48,8 @@ use lac_app::waveform::{DrawMode, WaveformView};
 use lac_core::SamplePos;
 use lac_peaks::PeakSummary;
 use lac_playback::scrub::Scrubber;
-use lac_playback::{Player, Timeline};
+use lac_playback::{Player, Speed, Timeline};
+use options::Options;
 use wxdragon::prelude::*;
 
 /// Menu command ids (above wxWidgets' reserved range).
@@ -68,6 +70,11 @@ const ID_TO_START: Id = ID_HIGHEST + 14;
 const ID_SPLIT: Id = ID_HIGHEST + 15;
 const ID_JOIN: Id = ID_HIGHEST + 16;
 const ID_RENAME: Id = ID_HIGHEST + 17;
+const ID_FASTER: Id = ID_HIGHEST + 18;
+const ID_SLOWER: Id = ID_HIGHEST + 19;
+const ID_NORMAL_SPEED: Id = ID_HIGHEST + 20;
+const ID_KEEP_PITCH: Id = ID_HIGHEST + 21;
+const ID_SCRUB_SELECTING: Id = ID_HIGHEST + 22;
 
 /// Status bar fields: file and messages, then selection and edits.
 const FIELD_FILE: i32 = 0;
@@ -160,6 +167,13 @@ struct State {
     timeline: Timeline,
     /// The scrub in progress while the right button is held.
     scrub: Option<Scrub>,
+    /// Playback speed; kept when another file is opened.
+    speed: Speed,
+    /// Menu options, remembered between runs.
+    options: Options,
+    /// Whether the current left-button drag has tried to start a scrub
+    /// (at most once per drag, so a failing audio device is reported once).
+    drag_scrub_tried: bool,
 }
 
 /// A scrub: dragging with the right button plays short pieces of audio
@@ -168,8 +182,12 @@ struct Scrub {
     /// Decides when to restart playback at the pointer.
     scrubber: Scrubber,
     /// Whether playback was running before; if so it goes on from where
-    /// the scrub ended, else it stops there and the cursor goes there.
+    /// the scrub ended, else it stops there (and with the right button the
+    /// cursor goes there).
     was_playing: bool,
+    /// Started by dragging a selection with the left button, rather than
+    /// with the right button.
+    selecting: bool,
 }
 
 impl State {
@@ -228,6 +246,7 @@ impl State {
             Some(p) => p.engine_mut().set_timeline(tl.clone(), start),
             None => match lac_app::playback::open_player(path, tl.clone()) {
                 Ok(mut p) => {
+                    p.engine_mut().set_speed(self.speed);
                     p.engine_mut().seek(start);
                     self.player = Some(p);
                 }
@@ -241,6 +260,21 @@ impl State {
         Ok(())
     }
 
+    /// Changes the playback speed, also while playing. Returns a message
+    /// for the status bar.
+    fn set_speed(&mut self, speed: Speed) -> String {
+        self.speed = speed;
+        if let Some(p) = &mut self.player {
+            p.engine_mut().set_speed(speed);
+        }
+        let how = match (speed.is_normal(), speed.keep_pitch) {
+            (true, _) => "",
+            (false, true) => " (pitch kept)",
+            (false, false) => " (pitch follows the speed)",
+        };
+        format!("speed {}{how}", speed.label())
+    }
+
     /// The playback position for a pointer at source position `src`:
     /// within the timeline, so scrubbing over the end plays its last bit.
     fn scrub_target(&self, src: SamplePos) -> SamplePos {
@@ -249,9 +283,10 @@ impl State {
             .min(self.timeline.len().saturating_sub(1))
     }
 
-    /// Right button down at source position `src`: starts playing there
-    /// and starts following the pointer. Returns an error message.
-    fn begin_scrub(&mut self, src: SamplePos) -> Option<String> {
+    /// Right button down, or a selection being dragged (`selecting`), at
+    /// source position `src`: starts playing there and starts following
+    /// the pointer. Returns an error message.
+    fn begin_scrub(&mut self, src: SamplePos, selecting: bool) -> Option<String> {
         let was_playing = self
             .player
             .as_ref()
@@ -265,6 +300,7 @@ impl State {
         self.scrub = Some(Scrub {
             scrubber,
             was_playing,
+            selecting,
         });
         None
     }
@@ -295,8 +331,9 @@ impl State {
         }
     }
 
-    /// Right button up: playback goes on if it was running before the
-    /// scrub; else it stops and the cursor moves to where the scrub ended.
+    /// Button up: playback goes on if it was running before the scrub;
+    /// else it stops, and after a right-button scrub the cursor moves to
+    /// where the scrub ended (a selection keeps its cursor).
     fn end_scrub(&mut self) {
         let Some(s) = self.scrub.take() else { return };
         let end = s.scrubber.position();
@@ -310,6 +347,9 @@ impl State {
             return;
         }
         p.engine().pause();
+        if s.selecting {
+            return;
+        }
         if let (Some(pos), Some(ed)) = (end, &mut self.editor) {
             ed.set_cursor(self.timeline.to_source(pos));
         }
@@ -371,13 +411,19 @@ impl State {
         let Some(rate) = self.rate else {
             return String::new();
         };
+        // The speed only when it is not normal.
+        let speed = if self.speed.is_normal() {
+            String::new()
+        } else {
+            format!("{} ", self.speed.label())
+        };
         match (&self.player, &self.editor) {
             (Some(p), _) if p.engine().is_playing() => format!(
-                "▶ {} / {}",
+                "▶ {speed}{} / {}",
                 format_samples(p.engine().position(), rate),
                 format_samples(self.timeline.len(), rate)
             ),
-            (_, Some(e)) => format!("cursor {}", format_samples(e.cursor(), rate)),
+            (_, Some(e)) => format!("{speed}cursor {}", format_samples(e.cursor(), rate)),
             _ => String::new(),
         }
     }
@@ -517,7 +563,8 @@ fn main() {
             .build();
         let status = frame.create_status_bar(3, 0, -1, "status");
         status.set_status_widths(&[-4, -4, -2]);
-        frame.set_menu_bar(menu_bar());
+        let options = Options::load();
+        frame.set_menu_bar(menu_bar(options));
 
         let panel = Panel::builder(&frame).build();
         // We paint every pixel ourselves; letting the system erase first
@@ -538,6 +585,8 @@ fn main() {
         let state = Rc::new(RefCell::new(State {
             width: 1,
             cache,
+            speed: Speed::new(100, options.keep_pitch),
+            options,
             ..State::default()
         }));
         bind_paint(&panel, &state);
@@ -610,7 +659,7 @@ fn main() {
 }
 
 /// File and View menus.
-fn menu_bar() -> MenuBar {
+fn menu_bar(options: Options) -> MenuBar {
     let file = Menu::builder()
         .append_item(ID_OPEN, "&Open…\tCtrl+O", "Open an audio file")
         .append_item(
@@ -676,6 +725,28 @@ fn menu_bar() -> MenuBar {
             "Cursor to &start\tHome",
             "Put the cursor at the beginning",
         )
+        .append_separator()
+        .append_item(ID_FASTER, "&Faster\tCtrl+Up", "Play faster (up to 3×)")
+        .append_item(
+            ID_SLOWER,
+            "S&lower\tCtrl+Down",
+            "Play slower (down to 0.5×)",
+        )
+        .append_item(
+            ID_NORMAL_SPEED,
+            "&Normal speed\tCtrl+1",
+            "Play at normal speed",
+        )
+        .append_check_item(
+            ID_KEEP_PITCH,
+            "&Keep pitch",
+            "At other speeds keep the pitch; else it changes like a tape played faster",
+        )
+        .append_check_item(
+            ID_SCRUB_SELECTING,
+            "S&crub while selecting",
+            "Play the edge of the selection while dragging it",
+        )
         .build();
     let view = Menu::builder()
         .append_item(
@@ -686,12 +757,15 @@ fn menu_bar() -> MenuBar {
         .append_item(ID_ZOOM_OUT, "Zoom &out\tCtrl+-", "Show more time")
         .append_item(ID_ZOOM_FIT, "Zoom to &fit\tCtrl+0", "Show the whole file")
         .build();
-    MenuBar::builder()
+    let bar = MenuBar::builder()
         .append(file, "&File")
         .append(edit, "&Edit")
         .append(play, "&Play")
         .append(view, "&View")
-        .build()
+        .build();
+    bar.check_item(ID_KEEP_PITCH, options.keep_pitch);
+    bar.check_item(ID_SCRUB_SELECTING, options.scrub_while_selecting);
+    bar
 }
 
 /// Menu commands.
@@ -736,6 +810,30 @@ fn bind_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
             if let Some(msg) = msg {
                 f.set_status_text(&msg, FIELD_FILE);
             }
+        } else if matches!(id, ID_FASTER | ID_SLOWER | ID_NORMAL_SPEED | ID_KEEP_PITCH) {
+            let msg = {
+                let mut st = state.borrow_mut();
+                let speed = match id {
+                    ID_FASTER => st.speed.faster(),
+                    ID_SLOWER => st.speed.slower(),
+                    ID_NORMAL_SPEED => Speed::new(100, st.speed.keep_pitch),
+                    // The menu has toggled the check mark already.
+                    _ => {
+                        let keep = e.is_checked().unwrap_or(!st.speed.keep_pitch);
+                        st.options.keep_pitch = keep;
+                        st.options.save();
+                        Speed::new(st.speed.percent(), keep)
+                    }
+                };
+                st.set_speed(speed)
+            };
+            f.set_status_text(&msg, FIELD_FILE);
+        } else if id == ID_SCRUB_SELECTING {
+            let mut st = state.borrow_mut();
+            let on = e.is_checked().unwrap_or(!st.options.scrub_while_selecting);
+            st.options.scrub_while_selecting = on;
+            st.options.save();
+            return;
         } else if id == ID_TO_START {
             let mut st = state.borrow_mut();
             if let Some(e) = &mut st.editor {
@@ -1047,6 +1145,7 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
                     return;
                 };
                 let pos = v.x_to_sample(x);
+                st.drag_scrub_tried = false;
                 if ev.shift_down() {
                     ed.begin_extend(pos);
                 } else {
@@ -1063,10 +1162,10 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
             let Some((_, x)) = mouse_event(&e) else {
                 return;
             };
-            {
+            let error = {
                 let mut guard = state.borrow_mut();
                 let st = &mut *guard;
-                if st.scrub.is_some() {
+                if st.scrub.as_ref().is_some_and(|s| !s.selecting) {
                     // Right button held: the waveform does not change, the
                     // playhead follows on the next timer tick.
                     if let Some(pos) = scrub_source_at(st, x) {
@@ -1086,7 +1185,23 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
                 } else if x > width {
                     v.scroll_by(x - width);
                 }
-                ed.drag_to(v.x_to_sample(x.clamp(0.0, width)));
+                let pos = v.x_to_sample(x.clamp(0.0, width));
+                ed.drag_to(pos);
+                let moved = ed.selection().is_some();
+                // Scrub the dragged edge, once the pointer has moved: a
+                // plain click stays silent.
+                if st.scrub.is_some() {
+                    st.scrub_to(pos);
+                    None
+                } else if st.options.scrub_while_selecting && moved && !st.drag_scrub_tried {
+                    st.drag_scrub_tried = true;
+                    st.begin_scrub(pos, true)
+                } else {
+                    None
+                }
+            };
+            if let Some(msg) = error {
+                f.set_status_text(&msg, FIELD_FILE);
             }
             show(&state);
         });
@@ -1111,6 +1226,9 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
                     // i.e. no selection.
                     ed.drag_to(v.x_to_sample(x.clamp(0.0, f64::from(v.width()))));
                     ed.end_drag();
+                }
+                if st.scrub.as_ref().is_some_and(|s| s.selecting) {
+                    st.end_scrub();
                 }
                 st.seek_to_cursor();
             }
@@ -1140,10 +1258,14 @@ fn bind_scrub(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
             };
             let error = {
                 let mut st = state.borrow_mut();
+                if st.scrub.is_some() {
+                    // Already scrubbing a selection being dragged.
+                    return;
+                }
                 let Some(pos) = scrub_source_at(&st, x) else {
                     return;
                 };
-                st.begin_scrub(pos)
+                st.begin_scrub(pos, false)
             };
             match error {
                 Some(msg) => f.set_status_text(&msg, FIELD_FILE),
@@ -1156,6 +1278,11 @@ fn bind_scrub(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
     {
         let state = Rc::clone(state);
         panel.on_mouse_right_up(move |_| {
+            if !state.borrow().scrub.as_ref().is_some_and(|s| !s.selecting) {
+                // No right-button scrub (perhaps a selection being dragged,
+                // which keeps the mouse).
+                return;
+            }
             if p.has_capture() {
                 p.release_mouse();
             }

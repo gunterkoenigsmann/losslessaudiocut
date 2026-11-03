@@ -1,0 +1,9 @@
+# README.md is edited by many parallel feature branches, which mostly add
+# lines next to each other. The built-in "union" merge driver keeps the
+# lines of both sides instead of reporting a conflict. Check the merged
+# README for duplicates or wrong order afterwards: union never fails, so
+# it never warns either.
+#
+# Only local git (git merge, git rebase, git pull) honours this. GitHub's
+# "Merge pull request" button and its conflict check ignore merge drivers.
+README.md merge=union

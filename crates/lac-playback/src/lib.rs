@@ -13,19 +13,23 @@
 //! - [`convert`] adapts the sample rate and channel count to the device;
 //!   with equal formats the audio passes through bit for bit.
 //! - [`scrub`] decides when scrubbing restarts playback (grain restart).
+//! - [`Speed`] is the playback speed; [`stretch`] keeps the pitch at
+//!   speeds other than normal.
 //!
 //! The decoder is not part of this crate: the application provides it as a
 //! [`PcmSource`] (`lac_app` uses random-access decoding), which keeps this
 //! crate free of FFmpeg and testable with generated audio.
 //!
-//! Playback speed and the other scrub modes of the architecture doc
-//! (varispeed, pitch-preserving) come later; they add render stages
-//! between the decoder and the ring buffer.
+//! The other scrub modes of the architecture doc (varispeed and
+//! pitch-preserving scrubbing driven by the mouse) come later; like the
+//! speed, they are render stages between the decoder and the ring buffer.
 
 pub mod convert;
 mod device;
 mod engine;
 pub mod scrub;
+mod speed;
+pub mod stretch;
 mod timeline;
 
 use std::ops::Range;
@@ -33,6 +37,7 @@ use std::ops::Range;
 use lac_core::SamplePos;
 
 pub use engine::{Engine, FADE_SECONDS, Output, OutputFormat, PcmSource};
+pub use speed::{STEPS, Speed};
 pub use timeline::Timeline;
 
 /// Why playback could not start.
