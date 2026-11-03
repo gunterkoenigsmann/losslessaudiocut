@@ -16,6 +16,8 @@
 mod ffi;
 
 use lac_container::{Container, ContainerError, ReadSeek};
+use std::ops::Range;
+
 use lac_core::SamplePos;
 
 pub use ffi::FfmpegError;
@@ -83,7 +85,7 @@ pub fn decode_all(
             keep: section.keep.clone(),
             channels,
         };
-        for i in 0..section.packets {
+        for i in 0..section.packets() {
             let packet = source.read_decode_packet(r, s, i)?;
             if let Err(e) = dec.decode(&packet) {
                 report
@@ -128,6 +130,132 @@ pub fn decode_to_vec(
         Flow::Continue
     })?;
     Ok((out, report))
+}
+
+/// Decodes only the timeline sample frames in `range` (interleaved `f32`,
+/// exactly `range.end - range.start` frames), for drawing a zoomed-in
+/// waveform or playing from a position without decoding from the start.
+///
+/// A fresh decoder starts a codec-specific pre-roll before `range` and is
+/// fed up to the packet that completes `range`. Its output is placed by
+/// [`lac_container::DecodeSection::packet_ends`]: the last sample after
+/// packet *j* lies just before `packet_ends[j]`, for a fresh decoder as for
+/// one that decoded the whole section. PCM, FLAC, MP3 and Vorbis decode bit
+/// for bit like [`decode_all`] after their pre-roll; the IIR state of Opus
+/// and Speex converges only approximately (inaudible, invisible). Parts
+/// that cannot be decoded are silence, as in [`decode_all`].
+pub fn decode_range(
+    source: &dyn Container,
+    r: &mut dyn ReadSeek,
+    range: Range<SamplePos>,
+) -> Result<Vec<f32>, DecodeError> {
+    let channels = usize::from(source.index().info().channels);
+    let total = source.index().total_samples();
+    let range = range.start.min(total)..range.end.clamp(range.start.min(total), total);
+    let mut out = Vec::with_capacity((range.end - range.start) as usize * channels);
+    // Timeline position of the current section's first kept sample.
+    let mut timeline = 0u64;
+    for (s, section) in source.decode_sections(r)?.iter().enumerate() {
+        let len = section.keep.end - section.keep.start;
+        let ta = range.start.max(timeline);
+        let tb = range.end.min(timeline + len);
+        timeline += len;
+        if ta >= tb {
+            continue;
+        }
+        // The wanted part in section output coordinates.
+        let a = section.keep.start + (ta - (timeline - len));
+        let b = a + (tb - ta);
+        let got = decode_section_part(source, r, s, section, a..b, channels)?;
+        out.extend(got);
+    }
+    // Sections cover the timeline; anything missing is silence.
+    out.resize((range.end - range.start) as usize * channels, 0.0);
+    Ok(out)
+}
+
+/// How much to decode before the wanted part so that a fresh decoder has
+/// built up its state: (packets, sample frames), the larger one counts.
+fn preroll(codec: lac_container::Codec, sample_rate: u32) -> (usize, u64) {
+    use lac_container::Codec;
+    let ms = |m: u64| u64::from(sample_rate) * m / 1000;
+    match codec {
+        Codec::Pcm { .. } | Codec::Flac => (0, 0),
+        // The bit reservoir reaches up to 511 bytes back (ISO/IEC 11172-3
+        // 2.4.1.7: main_data_begin), five frames at 32 kbit/s; one more
+        // frame for the IMDCT overlap and the 512-tap synthesis filter.
+        Codec::Mp3 => (8, 0),
+        // A Vorbis packet's output needs the previous packet's window half
+        // (Vorbis I 1.3.2); the first packet of a decoder only primes it.
+        Codec::Vorbis => (2, 0),
+        // RFC 7845 4.6 recommends at least 80 ms of pre-roll; measured on
+        // the fixtures, the output is bit-exact again about 140 ms later.
+        // Decoding 250 ms more is cheap and leaves a margin.
+        Codec::Opus => (1, ms(250)),
+        // Speex's float state decays geometrically and need not become
+        // bit-exact at all (issue #17); after 400 ms it is far below one
+        // 16-bit LSB.
+        Codec::Speex => (1, ms(400)),
+    }
+}
+
+/// Decodes `want` (section output coordinates) of section `s` with a fresh
+/// decoder, see [`decode_range`]. Returns exactly `want.len()` frames.
+fn decode_section_part(
+    source: &dyn Container,
+    r: &mut dyn ReadSeek,
+    s: usize,
+    section: &lac_container::DecodeSection,
+    want: Range<u64>,
+    channels: usize,
+) -> Result<Vec<f32>, DecodeError> {
+    let ends = &section.packet_ends;
+    let n_frames = (want.end - want.start) as usize;
+    let mut result = vec![0f32; n_frames * channels];
+    if ends.is_empty() {
+        return Ok(result);
+    }
+    // Packet i outputs the frames ends[i - 1]..ends[i].
+    let start_of = |i: usize| if i == 0 { 0 } else { ends[i - 1] };
+    // The packet holding `want.start`, and the one completing `want`.
+    let first = ends
+        .partition_point(|&e| e <= want.start)
+        .min(ends.len() - 1);
+    let last = ends.partition_point(|&e| e < want.end).min(ends.len() - 1);
+    let (pre_packets, pre_frames) = preroll(section.codec, section.sample_rate);
+    let mut k = first;
+    while k > 0
+        && (first - k < pre_packets || want.start - start_of(k).min(want.start) < pre_frames)
+    {
+        k -= 1;
+    }
+    let mut dec = ffi::Decoder::new(section).map_err(|source| DecodeError::Setup {
+        codec: codec_name(section.codec),
+        source,
+    })?;
+    let mut decoded = Vec::new();
+    for i in k..=last {
+        let packet = source.read_decode_packet(r, s, i)?;
+        // A packet that does not decode leaves a gap that the end alignment
+        // below turns into silence, as decode_all's warning does.
+        let _ = dec.decode(&packet);
+        while let Some(samples) = dec.next_samples(channels) {
+            decoded.extend_from_slice(&samples);
+        }
+    }
+    // The decoded frames end at ends[last] (see DecodeSection::packet_ends).
+    let n = (decoded.len() / channels) as u64;
+    let out_start = ends[last].saturating_sub(n);
+    // Copy the overlap of out_start..ends[last] with `want`.
+    let a = want.start.max(out_start);
+    let b = want.end.min(ends[last]);
+    if a < b {
+        let src =
+            &decoded[(a - out_start) as usize * channels..(b - out_start) as usize * channels];
+        let dst = (a - want.start) as usize * channels;
+        result[dst..dst + src.len()].copy_from_slice(src);
+    }
+    Ok(result)
 }
 
 /// Cuts one section's decoder output down to its `keep` range.

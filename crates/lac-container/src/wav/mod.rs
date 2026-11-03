@@ -245,7 +245,9 @@ impl WavFile {
             sample_rate: self.info().sample_rate,
             channels: self.info().channels,
             extradata: Vec::new(),
-            packets: self.index.packets().len(),
+            packet_ends: crate::decode::running_ends(
+                self.index.packets().iter().map(|p| u64::from(p.n_samples)),
+            ),
             keep: 0..self.index.total_samples(),
         }])
     }

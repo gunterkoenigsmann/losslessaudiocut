@@ -251,7 +251,9 @@ impl FlacFile {
             sample_rate: self.stream_info.sample_rate,
             channels: u16::from(self.stream_info.channels),
             extradata: self.stream_info.to_bytes().to_vec(),
-            packets: self.index.packets().len(),
+            packet_ends: crate::decode::running_ends(
+                self.index.packets().iter().map(|p| u64::from(p.n_samples)),
+            ),
             keep: 0..self.index.total_samples(),
         }])
     }

@@ -177,6 +177,16 @@ impl Source {
         Ok((builder.finish(), report))
     }
 
+    /// Decodes the sample frames in `range` (clamped to the timeline) as
+    /// interleaved `f32`, without decoding from the start of the file; see
+    /// [`lac_decode::decode_range`].
+    pub fn decode_range(
+        &mut self,
+        range: Range<SamplePos>,
+    ) -> Result<Vec<f32>, lac_decode::DecodeError> {
+        lac_decode::decode_range(self.container.as_ref(), &mut self.reader, range)
+    }
+
     /// The ranges of the source that `request` keeps, in output order,
     /// without empty ones.
     pub fn kept_ranges(&self, request: &CutRequest) -> Result<Vec<Range<SamplePos>>, AppError> {
