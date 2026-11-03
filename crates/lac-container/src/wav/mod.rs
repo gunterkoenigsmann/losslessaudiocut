@@ -30,7 +30,13 @@
 //! Recorders that crash or stream to disk often leave a `data` size of 0 or
 //! `0xFFFF_FFFF`, or a size larger than the file. In all these cases the data
 //! is taken to extend to the end of the file and a warning is recorded
-//! instead of failing. A trailing partial frame is ignored with a warning.
+//! instead of failing. The same happens when the size is too *small*, i.e.
+//! the bytes after the data chunk are no chunk header (not four printable
+//! characters plus a size that fits the file): recorders that checkpoint
+//! the header leave a stale size there, and recorders that go beyond 4 GiB
+//! without RF64 keep only the low 32 bits of it. The duration is then the
+//! one of the audio actually present, not the one the header claims. A
+//! trailing partial frame is ignored with a warning.
 //!
 //! ## Tags
 //!
@@ -163,6 +169,15 @@ impl WavFile {
                             "data chunk claims {size} bytes but only {remaining} are present; file is truncated"
                         ));
                         remaining
+                    } else if !chunk_header_plausible(r, payload + padded(size), file_len)? {
+                        // The size is too small: what follows is no chunk,
+                        // so it is more audio. Recorders that checkpoint the
+                        // header leave a stale size, and those that write
+                        // more than 4 GiB keep only the low 32 bits of it.
+                        warnings.push(format!(
+                            "data chunk claims {size} bytes but {remaining} follow and no chunk comes after it; using the rest of the file"
+                        ));
+                        remaining
                     } else {
                         u64::from(size)
                     };
@@ -189,8 +204,7 @@ impl WavFile {
                 }
                 _ => {}
             }
-            // Chunks are padded to even length (RIFF spec, "chunk").
-            pos = payload + u64::from(size) + u64::from(size & 1);
+            pos = payload + padded(size);
         }
 
         let (fmt_pos, fmt_payload) = fmt.ok_or_else(|| malformed(12, "no fmt chunk"))?;
@@ -535,6 +549,32 @@ fn build_index(
         .collect();
     PacketIndex::new(info, packets)
         .map_err(|e| ContainerError::InvalidPlan(format!("internal index error: {e}")))
+}
+
+/// The bytes a chunk payload of `size` occupies: chunks are padded to
+/// even length (RIFF spec, "chunk").
+fn padded(size: u32) -> u64 {
+    u64::from(size) + u64::from(size & 1)
+}
+
+/// Whether the 8 bytes at `pos` can be a chunk header: an ID of printable
+/// ASCII characters (RIFF spec: FOURCC) and a size that fits into the
+/// file. Fewer than 8 bytes before the end are trailing garbage that the
+/// chunk walk ignores anyway, so they count as plausible; so does the end
+/// of the file itself.
+fn chunk_header_plausible<R: Read + Seek + ?Sized>(
+    r: &mut R,
+    pos: u64,
+    file_len: u64,
+) -> Result<bool> {
+    if pos + 8 > file_len {
+        return Ok(true);
+    }
+    let mut hdr = [0u8; 8];
+    read_exact_at(r, &mut hdr, pos)?;
+    let id_ok = hdr[..4].iter().all(|b| (0x20..=0x7E).contains(b));
+    let size = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+    Ok(id_ok && u64::from(size) <= file_len - pos - 8)
 }
 
 fn read_exact_at<R: Read + Seek + ?Sized>(r: &mut R, buf: &mut [u8], pos: u64) -> Result<()> {

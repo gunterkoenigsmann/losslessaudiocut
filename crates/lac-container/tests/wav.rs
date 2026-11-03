@@ -145,6 +145,41 @@ fn truncated_data_is_tolerated_with_warning() {
 }
 
 #[test]
+fn understated_data_size_is_corrected_to_the_audio_present() {
+    // A stale header checkpoint: 100 frames claimed, 250 present.
+    let w = open(&build_wav(PCM16_STEREO, &noise(1000, 8), &[], Some(400))).expect("valid");
+    assert_eq!(w.index().total_samples(), 250);
+    assert_eq!(w.data_len(), 1000);
+    assert_eq!(w.warnings().len(), 1, "{:?}", w.warnings());
+}
+
+#[test]
+fn wrapped_data_size_of_a_huge_file_is_corrected() {
+    // A writer that keeps the low 32 bits of a 4 GiB + 1000 byte data
+    // chunk declares 1000 bytes; the rest of the file starts with samples,
+    // not with a chunk header. Simulated with a small file: the 400 bytes
+    // after the declared 1000 are noise whose first four bytes are made
+    // non-printable.
+    let mut data = noise(1400, 9);
+    data[1000] = 0x01;
+    let w = open(&build_wav(PCM16_STEREO, &data, &[], Some(1000))).expect("valid");
+    assert_eq!(w.index().total_samples(), 350);
+}
+
+#[test]
+fn a_real_chunk_after_the_data_keeps_the_declared_size() {
+    let mut f = build_wav(PCM16_STEREO, &noise(400, 10), &[], None);
+    f.extend(chunk(b"LIST", b"INFOjunk", None));
+    let w = open(&f).expect("valid");
+    assert_eq!(w.index().total_samples(), 100);
+    assert!(w.warnings().is_empty(), "{:?}", w.warnings());
+    // A few bytes of trailing garbage are no reason to doubt the size.
+    let mut f = build_wav(PCM16_STEREO, &noise(400, 11), &[], None);
+    f.extend([0, 0, 0]);
+    assert_eq!(open(&f).expect("valid").index().total_samples(), 100);
+}
+
+#[test]
 fn trailing_partial_frame_is_ignored() {
     let w = open(&build_wav(PCM16_STEREO, &noise(402, 6), &[], None)).expect("valid");
     assert_eq!(w.index().total_samples(), 100);
