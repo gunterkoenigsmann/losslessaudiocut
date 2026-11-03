@@ -88,7 +88,7 @@ fn open(bytes: &[u8]) -> OggFile {
 
 fn write(src: &[u8], f: &OggFile, plans: &[CutPlan]) -> Vec<u8> {
     let mut out = Cursor::new(Vec::new());
-    f.write_cut(&mut Cursor::new(src), plans, &mut out)
+    f.write_cut(&mut Cursor::new(src), plans, None, &mut out)
         .expect("write");
     out.into_inner()
 }

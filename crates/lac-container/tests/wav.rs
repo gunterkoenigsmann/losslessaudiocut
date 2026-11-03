@@ -206,7 +206,7 @@ fn cut(src: &[u8], deletes: &[(u64, u64)]) -> (WavFile, Vec<u8>) {
         .map(|s| plan_cut(w.index(), w.capabilities(), s.range.clone()).expect("plan"))
         .collect();
     let mut out = Vec::new();
-    w.write_cut(&mut Cursor::new(src), &plans, &mut out)
+    w.write_cut(&mut Cursor::new(src), &plans, None, &mut out)
         .expect("write");
     (w, out)
 }

@@ -63,7 +63,7 @@ fn open(bytes: &[u8]) -> Mp3File {
 
 fn write(src: &[u8], f: &Mp3File, plans: &[CutPlan]) -> Vec<u8> {
     let mut out = Cursor::new(Vec::new());
-    f.write_cut(&mut Cursor::new(src), plans, &mut out)
+    f.write_cut(&mut Cursor::new(src), plans, None, &mut out)
         .expect("write");
     out.into_inner()
 }
@@ -375,7 +375,10 @@ fn inner_trims_are_rejected() {
         .map(|r| lac_core::plan_cut(f.index(), f.capabilities(), r).expect("plan"))
         .collect();
     let mut out = Cursor::new(Vec::new());
-    assert!(f.write_cut(&mut Cursor::new(&src), &bad, &mut out).is_err());
+    assert!(
+        f.write_cut(&mut Cursor::new(&src), &bad, None, &mut out)
+            .is_err()
+    );
 }
 
 /// Regression (found by `random_deletes`): a delete inside the last frame

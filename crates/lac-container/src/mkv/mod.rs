@@ -27,8 +27,15 @@
 //!
 //! Only the first audio track is used. It must be Opus; other tracks
 //! (video, subtitles, further audio) are ignored with a warning and do not
-//! appear in exports. Tags, chapters, cues and attachments of the source
-//! are not copied.
+//! appear in exports. Chapters, cues and attachments of the source are
+//! not copied.
+//!
+//! ## Tags
+//!
+//! The source's tags are its file-wide `Tags` (see [`tags`]), with the
+//! `Info` element's `Title` as the title if they have none. An export
+//! writes the source's tags, or new ones, as a `Tags` element after
+//! `Tracks`, and the title also as the `Info` title.
 //!
 //! ## Writing
 //!
@@ -51,11 +58,14 @@
 
 pub mod block;
 pub mod ebml;
+pub mod tags;
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
-use lac_core::{AudioStreamInfo, CutCapabilities, CutPlan, PacketFlags, PacketIndex, PacketInfo};
+use lac_core::{
+    AudioStreamInfo, CutCapabilities, CutPlan, PacketFlags, PacketIndex, PacketInfo, Tags,
+};
 
 use crate::ogg::codec::{CodecInfo, CodecKind, opus_packet_samples};
 use crate::window::Window;
@@ -81,6 +91,7 @@ mod id {
     pub const TIMESTAMP_SCALE: u32 = 0x2A_D7B1;
     pub const DURATION: u32 = 0x4489;
     pub const MUXING_APP: u32 = 0x4D80;
+    pub const TITLE: u32 = 0x7BA9;
     pub const WRITING_APP: u32 = 0x5741;
     pub const TRACKS: u32 = 0x1654_AE6B;
     pub const TRACK_ENTRY: u32 = 0xAE;
@@ -185,6 +196,8 @@ pub struct MkvFile {
     entry_raw: Vec<usize>,
     index: PacketIndex,
     other_tracks: usize,
+    /// The source's file-wide tags.
+    tags: Tags,
     warnings: Vec<String>,
 }
 
@@ -202,9 +215,14 @@ impl MkvFile {
             other_tracks,
             raw,
             discard,
+            mut tags,
+            title,
             mut warnings,
             ..
         } = s;
+        if tags.title.is_none() {
+            tags.title = title.as_deref().and_then(crate::tags::non_empty);
+        }
         let track = track.ok_or_else(|| {
             ContainerError::Unsupported("no Opus audio track found in the Matroska file".into())
         })?;
@@ -255,8 +273,14 @@ impl MkvFile {
             entry_raw,
             index,
             other_tracks,
+            tags,
             warnings,
         })
+    }
+
+    /// The source's tags (see the module documentation).
+    pub fn tags(&self) -> &Tags {
+        &self.tags
     }
 
     /// The EBML `DocType`: `"webm"` or `"matroska"`.
@@ -344,7 +368,14 @@ impl MkvFile {
     /// Writes the kept packets of `plans`, joined, as a new file of the
     /// same `DocType`. Only the start of the first and the end of the last
     /// non-empty plan may be trimmed (see [`MkvFile::capabilities`]).
-    pub fn write_cut<R, W>(&self, r: &mut R, plans: &[CutPlan], w: &mut W) -> Result<()>
+    /// `tags`, or else the source's tags, are written as the file's tags.
+    pub fn write_cut<R, W>(
+        &self,
+        r: &mut R,
+        plans: &[CutPlan],
+        tags: Option<&Tags>,
+        w: &mut W,
+    ) -> Result<()>
     where
         R: Read + Seek + ?Sized,
         W: Write + Seek + ?Sized,
@@ -405,6 +436,7 @@ impl MkvFile {
             head: &head,
             pre_skip,
             duration,
+            tags: tags.unwrap_or(&self.tags),
         };
         let mut mx = Muxer::start(w, &self.doc_type, &out)?;
         let mut pos = 0u64;
@@ -453,6 +485,10 @@ struct Scanner {
     discard: u64,
     /// A non-final block had discard padding (warned about once).
     inner_discard: bool,
+    /// File-wide tags.
+    tags: Tags,
+    /// The `Info` element's title.
+    title: Option<String>,
     warnings: Vec<String>,
 }
 
@@ -472,6 +508,25 @@ fn header_at<R: Read + Seek + ?Sized>(w: &mut Window<R>, pos: u64) -> io::Result
         Err(HeaderError::Truncated) => Next::Truncated,
         Err(HeaderError::Invalid) => Next::Invalid,
     })
+}
+
+/// Adds the fields of `more` that `t` lacks, and all its extras.
+fn merge_into(t: &mut Tags, more: Tags) {
+    let fill = |a: &mut Option<String>, b: Option<String>| {
+        if a.is_none() {
+            *a = b;
+        }
+    };
+    fill(&mut t.title, more.title);
+    fill(&mut t.artist, more.artist);
+    fill(&mut t.album, more.album);
+    fill(&mut t.album_artist, more.album_artist);
+    fill(&mut t.date, more.date);
+    fill(&mut t.genre, more.genre);
+    fill(&mut t.comment, more.comment);
+    t.track_number = t.track_number.or(more.track_number);
+    t.track_total = t.track_total.or(more.track_total);
+    t.extra.extend(more.extra);
 }
 
 /// Reads a whole element body into memory.
@@ -576,6 +631,18 @@ impl Scanner {
                     } else {
                         let b = body_at(w, body, size)?;
                         self.tracks(&b, body)?;
+                    }
+                }
+                id::TAGS if size <= MAX_ELEMENT && end <= seg_end => {
+                    let b = body_at(w, body, size)?;
+                    let t = tags::parse(&b);
+                    // Several Tags elements: the first value of a field wins.
+                    merge_into(&mut self.tags, t);
+                }
+                id::INFO if size <= MAX_ELEMENT && end <= seg_end => {
+                    let b = body_at(w, body, size)?;
+                    if let Some((_, t)) = children(&b).find(|&(i, _)| i == id::TITLE) {
+                        self.title = Some(tags::string(t));
                     }
                 }
                 // A second segment (concatenated files) is not supported.
@@ -862,6 +929,8 @@ struct OutputTrack<'t> {
     pre_skip: u64,
     /// Output length in samples (after pre-skip and discard padding).
     duration: u64,
+    /// The file's tags.
+    tags: &'t Tags,
 }
 
 impl<'a, W: Write + Seek + ?Sized> Muxer<'a, W> {
@@ -893,6 +962,9 @@ impl<'a, W: Write + Seek + ?Sized> Muxer<'a, W> {
         ebml::put_element(&mut info, id::MUXING_APP, b"losslessaudiocut");
         ebml::put_element(&mut info, id::WRITING_APP, b"losslessaudiocut");
         ebml::put_float(&mut info, id::DURATION, t.duration as f64 / 48.0);
+        if let Some(title) = &t.tags.title {
+            ebml::put_element(&mut info, id::TITLE, title.as_bytes());
+        }
         let mut info_el = Vec::new();
         ebml::put_element(&mut info_el, id::INFO, &info);
 
@@ -916,11 +988,20 @@ impl<'a, W: Write + Seek + ?Sized> Muxer<'a, W> {
         let mut tracks_el = Vec::new();
         ebml::put_element(&mut tracks_el, id::TRACKS, &tracks);
 
+        let tags_el = tags::element(t.tags);
+
         // SeekHead. Its size does not depend on the (8-byte) positions, so
-        // Info and Tracks, which follow it, are placed by a first pass.
-        let seek_head = |positions: [u64; 3]| {
+        // Info, Tracks and Tags, which follow it, are placed by a first
+        // pass. Cues come last, so their position is the SeekHead's last
+        // value.
+        let mut targets = vec![id::INFO, id::TRACKS];
+        if !tags_el.is_empty() {
+            targets.push(id::TAGS);
+        }
+        targets.push(id::CUES);
+        let seek_head = |positions: &[u64]| {
             let mut seeks = Vec::new();
-            for (target, at) in [id::INFO, id::TRACKS, id::CUES].into_iter().zip(positions) {
+            for (&target, &at) in targets.iter().zip(positions) {
                 let mut tid = Vec::new();
                 ebml::put_id(&mut tid, target);
                 let mut s = Vec::new();
@@ -932,15 +1013,21 @@ impl<'a, W: Write + Seek + ?Sized> Muxer<'a, W> {
             ebml::put_element(&mut el, id::SEEK_HEAD, &seeks);
             el
         };
-        let head_len = seek_head([0; 3]).len() as u64;
+        let head_len = seek_head(&[0; 4]).len() as u64;
         let info_pos = head_len;
         let tracks_pos = info_pos + info_el.len() as u64;
-        let head = seek_head([info_pos, tracks_pos, 0]);
+        let tags_pos = tracks_pos + tracks_el.len() as u64;
+        let head = if tags_el.is_empty() {
+            seek_head(&[info_pos, tracks_pos, 0])
+        } else {
+            seek_head(&[info_pos, tracks_pos, tags_pos, 0])
+        };
         // The Cues position is the last value in the SeekHead.
         let cues_seek_at = segment_start + head.len() as u64 - 8;
         out.extend_from_slice(&head);
         out.extend_from_slice(&info_el);
         out.extend_from_slice(&tracks_el);
+        out.extend_from_slice(&tags_el);
         w.write_all(&out)?;
         Ok(Self {
             w,

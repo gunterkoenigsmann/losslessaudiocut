@@ -32,18 +32,29 @@
 //! is taken to extend to the end of the file and a warning is recorded
 //! instead of failing. A trailing partial frame is ignored with a warning.
 //!
+//! ## Tags
+//!
+//! The source's tags come from a `LIST/INFO` chunk ([`crate::tags::riff`])
+//! and an `id3 ` chunk holding an ID3v2 tag ([`crate::tags::id3`]); INFO
+//! wins where both have a field. An export writes the tags (the source's,
+//! or new ones) as both chunks in front of the data: INFO for the
+//! software that reads only that, ID3v2 for the fields INFO cannot hold
+//! (album artist, track total) and for the ID3 frames of the source.
+//! Other chunks (`bext`, `cue `, ...) are not copied.
+//!
 //! ## Not yet supported
 //!
-//! RF64/BW64 (files above 4 GiB) and copying `LIST/INFO` tags; both are
-//! planned for later pull requests.
+//! RF64/BW64 (files above 4 GiB).
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
 use lac_core::{
     AudioStreamInfo, CutCapabilities, CutPlan, PacketFlags, PacketIndex, PacketInfo, SamplePos,
+    Tags,
 };
 
+use crate::tags::{id3, riff};
 use crate::{ContainerError, Result};
 
 /// Number of sample frames grouped into one index entry.
@@ -51,6 +62,10 @@ pub const BLOCK_FRAMES: u32 = 4096;
 
 /// Upper bound for the `fmt ` chunk payload; real ones are 16..40 bytes.
 const MAX_FMT_LEN: u32 = 1024;
+
+/// Upper bound for a tag chunk that is read; larger ones (huge cover
+/// images) are ignored with a warning.
+const MAX_TAG_CHUNK: u32 = 64 << 20;
 
 const FORMAT_PCM: u16 = 0x0001;
 const FORMAT_IEEE_FLOAT: u16 = 0x0003;
@@ -88,6 +103,10 @@ pub struct WavFile {
     fmt_payload: Vec<u8>,
     data_offset: u64,
     data_len: u64,
+    /// The source's tags (see the module documentation).
+    tags: Tags,
+    /// Frames of the `id3 ` chunk that [`Tags`] does not hold.
+    id3_other: Vec<id3::RawFrame>,
     index: PacketIndex,
     warnings: Vec<String>,
 }
@@ -108,6 +127,8 @@ impl WavFile {
         let mut warnings = Vec::new();
         let mut fmt: Option<(u64, Vec<u8>)> = None;
         let mut data: Option<(u64, u64)> = None;
+        let mut info = Tags::default();
+        let mut id3_tag = id3::Id3v2::default();
         let mut pos: u64 = 12;
 
         // Walk the chunk list. A chunk header needs 8 bytes; anything
@@ -150,11 +171,23 @@ impl WavFile {
                         break;
                     }
                 }
+                b"LIST" | b"id3 " | b"ID3 " if u64::from(size) <= remaining => {
+                    if size > MAX_TAG_CHUNK {
+                        warnings.push(format!("ignoring a {size}-byte tag chunk"));
+                    } else {
+                        let mut buf = vec![0u8; size as usize];
+                        read_exact_at(r, &mut buf, payload)?;
+                        if &id == b"LIST" {
+                            if let Some(items) = buf.strip_prefix(b"INFO") {
+                                info = riff::parse_info(items);
+                            }
+                        } else {
+                            id3_tag = id3::parse(&buf);
+                            warnings.append(&mut id3_tag.warnings);
+                        }
+                    }
+                }
                 _ => {}
-            }
-            if data.is_some() && fmt.is_some() && &id == b"data" {
-                // Chunks after the data (LIST, id3, ...) are not needed yet.
-                break;
             }
             // Chunks are padded to even length (RIFF spec, "chunk").
             pos = payload + u64::from(size) + u64::from(size & 1);
@@ -174,6 +207,7 @@ impl WavFile {
 
         let frames = data_len / u64::from(f.block_align);
         let index = build_index(f.info, frames, f.block_align, data_offset)?;
+        let tags = merge_tags(info, id3_tag.tags);
         Ok(Self {
             encoding: f.encoding,
             bits_per_sample: f.bits_per_sample,
@@ -181,6 +215,8 @@ impl WavFile {
             fmt_payload,
             data_offset,
             data_len,
+            tags,
+            id3_other: id3_tag.other,
             index,
             warnings,
         })
@@ -189,6 +225,11 @@ impl WavFile {
     /// The packet index (blocks of [`BLOCK_FRAMES`] frames).
     pub fn index(&self) -> &PacketIndex {
         &self.index
+    }
+
+    /// The source's tags (see the module documentation).
+    pub fn tags(&self) -> &Tags {
+        &self.tags
     }
 
     /// Sample rate and channel count.
@@ -286,13 +327,29 @@ impl WavFile {
     /// after the other.
     ///
     /// The `fmt ` chunk is copied unchanged; sample bytes are copied
-    /// verbatim. Other chunks of the source are not copied yet.
+    /// verbatim. `tags`, or else the source's tags, are written as
+    /// `LIST/INFO` and `id3 ` chunks (see the module documentation).
     pub fn write_cut<R: Read + Seek + ?Sized, W: Write + ?Sized>(
         &self,
         r: &mut R,
         plans: &[CutPlan],
+        tags: Option<&Tags>,
         w: &mut W,
     ) -> Result<()> {
+        let tags = tags.unwrap_or(&self.tags);
+        let info = riff::write_info(tags);
+        let mut id3_tag =
+            id3::write(&id3_only(tags), &self.id3_other).map_err(ContainerError::TooLarge)?;
+        if !id3_tag.is_empty() {
+            let mut chunk = b"id3 ".to_vec();
+            chunk.extend((id3_tag.len() as u32).to_le_bytes());
+            if id3_tag.len() & 1 == 1 {
+                id3_tag.push(0);
+            }
+            chunk.extend(id3_tag);
+            id3_tag = chunk;
+        }
+        let tag_len = (info.len() + id3_tag.len()) as u64;
         let mut byte_ranges = Vec::with_capacity(plans.len());
         for p in plans {
             byte_ranges.push(self.byte_range(&p.actual)?);
@@ -301,7 +358,8 @@ impl WavFile {
         let fmt_len = self.fmt_payload.len() as u64;
         // RIFF size counts everything after itself: "WAVE" + both chunks,
         // each with header and pad byte.
-        let riff_size = 4 + (8 + fmt_len + (fmt_len & 1)) + (8 + data_len + (data_len & 1));
+        let riff_size =
+            4 + (8 + fmt_len + (fmt_len & 1)) + tag_len + (8 + data_len + (data_len & 1));
         let riff_size = u32::try_from(riff_size).map_err(|_| {
             ContainerError::TooLarge(format!(
                 "{data_len} bytes of audio exceed the 4 GiB WAV limit (RF64 is not supported yet)"
@@ -318,6 +376,8 @@ impl WavFile {
         if fmt_len & 1 == 1 {
             w.write_all(&[0])?;
         }
+        w.write_all(&info)?;
+        w.write_all(&id3_tag)?;
         w.write_all(b"data")?;
         w.write_all(&data_size.to_le_bytes())?;
         for b in byte_ranges {
@@ -357,6 +417,39 @@ struct Fmt {
 
 /// Parses `WAVEFORMATEX` / `WAVEFORMATEXTENSIBLE`; `pos` is the chunk's file
 /// offset for error messages.
+/// The tags of INFO, with the fields it lacks taken from ID3; extras of
+/// both.
+fn merge_tags(info: Tags, id3: Tags) -> Tags {
+    let or = |a: Option<String>, b: Option<String>| a.or(b);
+    let mut extra = info.extra;
+    extra.extend(id3.extra);
+    Tags {
+        title: or(info.title, id3.title),
+        artist: or(info.artist, id3.artist),
+        album: or(info.album, id3.album),
+        album_artist: or(info.album_artist, id3.album_artist),
+        track_number: info.track_number.or(id3.track_number),
+        track_total: info.track_total.or(id3.track_total),
+        date: or(info.date, id3.date),
+        genre: or(info.genre, id3.genre),
+        comment: or(info.comment, id3.comment),
+        extra,
+    }
+}
+
+/// `tags` without the extras that go to the INFO chunk only.
+fn id3_only(tags: &Tags) -> Tags {
+    Tags {
+        extra: tags
+            .extra
+            .iter()
+            .filter(|(k, _)| !riff::is_info_id(k))
+            .cloned()
+            .collect(),
+        ..tags.clone()
+    }
+}
+
 fn parse_fmt(p: &[u8], pos: u64) -> Result<Fmt> {
     if p.len() < 16 {
         return Err(malformed(pos, "fmt chunk shorter than 16 bytes"));
