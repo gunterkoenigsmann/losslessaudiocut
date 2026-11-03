@@ -442,7 +442,9 @@ and pitch preservation reuse the same command and render structure and only
 add a render step, so they can follow without changing the engine.
 
 **Implemented so far:** grain restart. The GUI scrubs while the *right*
-mouse button is held (the left one selects). `lac_playback::scrub::Scrubber`
+mouse button is held, and, unless *Play > Scrub while selecting* is off,
+while a selection is dragged with the left one (its moving edge; a plain
+click stays silent, and the option is kept in wxWidgets' config store). `lac_playback::scrub::Scrubber`
 turns pointer moves into seeks, at most one per 40 ms, and catches up with a
 pointer that moved too soon from the GUI timer. Instead of a crossfade, the
 engine fades the old audio out over 5 ms while a seek is pending and fades
