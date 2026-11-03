@@ -12,12 +12,15 @@
 //! - [`ranges`]: helpers on sample ranges.
 //! - [`session`]: opening a source file, building its waveform summary
 //!   and exporting a cut of it.
+//! - [`waveform`]: the waveform display's view model (zoom, scroll,
+//!   pixel columns).
 //!
 //! See `docs/architecture.md` in the repository for how this crate fits in.
 
 pub mod ranges;
 pub mod session;
 pub mod time;
+pub mod waveform;
 
 pub use session::{AppError, CutRequest, KeptRange, Source};
 pub use time::{TimeError, TimeRange, TimeSpec, format_samples};
