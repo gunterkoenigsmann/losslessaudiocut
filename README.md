@@ -3,10 +3,10 @@
 A lossless audio cutter in Rust: delete parts of a recording, join the rest
 or split it into tracks, without ever re-encoding lossy audio.
 
-Status: early development. WAV, FLAC, Ogg (Vorbis, Opus, Speex) and MP3
-cutting work from the command line and in the wxWidgets GUI (waveform, zoom,
-select, delete, split into tracks, undo, export, playback of the result,
-scrubbing); per-track tags, playback speed and AAC follow. See
+Status: early development. WAV, FLAC, Ogg (Vorbis, Opus, Speex), MP3 and
+Matroska/WebM (Opus) cutting work from the command line and in the
+wxWidgets GUI (waveform, zoom, select, delete, split into tracks, undo,
+export, playback of the result, scrubbing); per-track tags, playback speed and AAC follow. See
 [`docs/architecture.md`](docs/architecture.md) for the design.
 
 ## GUI
