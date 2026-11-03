@@ -12,9 +12,11 @@
 //!    decoder `oggdec` (libvorbisfile) for Vorbis, ffmpeg for Opus and
 //!    Speex. Vorbis must match bit for bit, also across join points (every
 //!    run of kept packets becomes a chained stream that starts with its
-//!    predecessor packet as pre-roll). Opus and Speex must match bit for bit
-//!    except within [`OPUS_JOIN_WINDOW`] / [`SPEEX_JOIN_WINDOW`] after a join point, where their
-//!    predictive decoders converge.
+//!    predecessor packet as pre-roll). Opus must match bit for bit except
+//!    within [`OPUS_JOIN_WINDOW`] after a join point, where its predictive
+//!    decoder converges. Speex must match bit for bit up to the first join;
+//!    after a join anything goes for [`SPEEX_JOIN_WINDOW`], and from then on
+//!    the difference must stay below [`SPEEX_JOIN_TOLERANCE`] (issue #17).
 //! 3. That decoder's output length equals the planned length, so an
 //!    independent demuxer agrees with our granule positions.
 
@@ -70,6 +72,15 @@ const OPUS_JOIN_WINDOW: f64 = 0.25;
 /// Measured worst case over 60 joins: 320 ms (see `docs/architecture.md`,
 /// "Join points inside a file").
 const SPEEX_JOIN_WINDOW: f64 = 0.4;
+
+/// Largest difference allowed after [`SPEEX_JOIN_WINDOW`]: one 16-bit LSB
+/// (2^-15), Speex's native output resolution. Bit-exact equality is not a
+/// fixed-time property for Speex: the float decoder state decays
+/// geometrically after a join (below 1e-6 after about 200 ms on the
+/// fixture) and becomes bit-identical only when the audio lets it, which on
+/// continuous signals may never happen (issue #17). Wrong packets or offsets
+/// produce differences many orders of magnitude larger.
+const SPEEX_JOIN_TOLERANCE: f32 = 1.0 / 32768.0;
 
 fn open(bytes: &[u8]) -> OggFile {
     OggFile::open(&mut Cursor::new(bytes)).expect("valid Ogg")
@@ -164,16 +175,21 @@ fn granule_length(out: &[u8]) -> u64 {
 /// Whether ffmpeg decodes the stream written for `plan` too long (see the
 /// `ogg` module docs): an Opus range that starts and ends inside the same
 /// packet. ffmpeg forgets the rest of the pre-skip when the end-trimmed
-/// last packet arrives. [`opus_sliver_inside_one_packet`] covers it.
-fn ffmpeg_mistrims(plan: &CutPlan) -> bool {
-    plan.packets.len() == 1 && plan.trim_start > 0 && plan.trim_end > 0
+/// last packet arrives. The end trim is either the plan's own or, for a
+/// range reaching the end of the file, the source's final end trim (the
+/// demuxer shortens that packet, so a plan ending there has `trim_end` 0;
+/// counting every such plan is conservative). [`opus_sliver_inside_one_packet`]
+/// and [`opus_sliver_in_the_end_trimmed_last_packet`] cover it.
+fn ffmpeg_mistrims(f: &OggFile, plan: &CutPlan) -> bool {
+    let end_trimmed = plan.trim_end > 0 || plan.actual.end == f.index().total_samples();
+    plan.packets.len() == 1 && plan.trim_start > 0 && end_trimmed
 }
 
 /// Checks oracles 2 and 3 for a single-link source: ffmpeg's decode of
 /// `out` is the source's decode restricted to the plans' actual ranges.
 fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPlan]) {
     let f = open(src);
-    if f.codec() == CodecKind::Opus && plans.iter().any(ffmpeg_mistrims) {
+    if f.codec() == CodecKind::Opus && plans.iter().any(|p| ffmpeg_mistrims(&f, p)) {
         return;
     }
     let info = f.index().info();
@@ -195,14 +211,26 @@ fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPl
     let src_len = s.len() / frame;
     let mut out_pos = 0usize;
     let mut prev_end = 0u64;
+    // Speex keeps every part in one stream, so the decoder state of a
+    // join carries into all later parts, even contiguous ones.
+    let mut after_join = false;
+    // Source position where the window of the latest join ends. A part
+    // shorter than the window does not end it: the next part continues in
+    // the same decoder state, so its window is what is left over.
+    let mut window_end = 0usize;
     for p in plans {
         let r = p.actual.start as usize..p.actual.end as usize;
         // A range continuing where the previous one ended, or starting at
-        // the very beginning, decodes exactly like the source.
-        let skip = if r.start as u64 == prev_end {
-            0
+        // the very beginning, is no join point.
+        if r.start as u64 != prev_end {
+            after_join = true;
+            window_end = r.start + window;
+        }
+        let skip = window_end.saturating_sub(r.start);
+        let tolerance = if f.codec() == CodecKind::Speex && after_join {
+            SPEEX_JOIN_TOLERANCE
         } else {
-            window
+            0.0
         };
         let a = (r.start + skip).min(r.end).min(src_len);
         let b = r.end.min(src_len);
@@ -210,9 +238,13 @@ fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPl
             let want = &s[a * frame..b * frame];
             let got_at = out_pos + (a - r.start);
             let got = &o[got_at * frame..(got_at + b - a) * frame];
-            if let Some(i) = (0..b - a)
-                .find(|&i| want[i * frame..(i + 1) * frame] != got[i * frame..(i + 1) * frame])
-            {
+            if let Some(i) = (0..b - a).find(|&i| {
+                !frames_match(
+                    &want[i * frame..(i + 1) * frame],
+                    &got[i * frame..(i + 1) * frame],
+                    tolerance,
+                )
+            }) {
                 panic!(
                     "{name}: range {r:?} differs at source sample {} ({} samples after the allowed window)",
                     a + i,
@@ -225,6 +257,26 @@ fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPl
     }
     let _ = std::fs::remove_file(src_path);
     let _ = std::fs::remove_file(out_path);
+}
+
+/// Whether two decoded frames agree: bit for bit when `tolerance` is 0,
+/// otherwise each f32 sample within `tolerance` (only used for Speex, whose
+/// decode is f32le).
+fn frames_match(want: &[u8], got: &[u8], tolerance: f32) -> bool {
+    if tolerance == 0.0 {
+        return want == got;
+    }
+    let f = |b: &[u8]| -> Vec<f32> {
+        b.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&x| f32::from_le_bytes(x))
+            .collect()
+    };
+    f(want)
+        .iter()
+        .zip(f(got))
+        .all(|(w, g)| (w - g).abs() <= tolerance)
 }
 
 /// Decodes with the independent decoder for `codec` (see oracle 2).
@@ -485,7 +537,7 @@ fn opus_sliver_inside_one_packet() {
     let f = open(&src);
     // Packet 1 holds source samples 648..1608.
     let p = plans(&f, &[1_000..1_001]);
-    assert!(ffmpeg_mistrims(&p[0]));
+    assert!(ffmpeg_mistrims(&f, &p[0]));
     let out = write(&src, &f, &p);
     assert_packets_copied(&src, &out, &p);
     let path = temp_file(&format!("sliver-{name}"), &out);
@@ -498,6 +550,27 @@ fn opus_sliver_inside_one_packet() {
             "{name}: {decoded} samples"
         );
     }
+}
+
+/// Found by `random_deletes_copy_packets`: keeping only the tail of the
+/// source's last packet, which the source itself end-trims (RFC 7845 4.4),
+/// is the same ffmpeg mistrim as [`opus_sliver_inside_one_packet`], although
+/// the plan has no end trim of its own. Our output has the planned length.
+#[test]
+fn opus_sliver_in_the_end_trimmed_last_packet() {
+    let name = "ogg_opus_stereo.opus";
+    let src = fixture(name);
+    let f = open(&src);
+    let len = f.index().total_samples();
+    // The fixture's last packet holds source samples 71_688..72_000, the
+    // rest of it is the encoder's end trim.
+    let p = plans(&f, &[0..67_497, 71_771..len]);
+    assert_eq!(p[1].packets.len(), 1);
+    assert_eq!(p[1].trim_end, 0);
+    assert!(ffmpeg_mistrims(&f, &p[1]));
+    let out = write(&src, &f, &p);
+    let o = assert_packets_copied(&src, &out, &p);
+    assert_eq!(o.index().total_samples(), 67_497 + (len - 71_771));
 }
 
 /// A delete inside a single Opus packet keeps that packet twice: once to
