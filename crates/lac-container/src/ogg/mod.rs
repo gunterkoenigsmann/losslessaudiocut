@@ -7,10 +7,16 @@
 //! Many recordings, radio captures in particular, store random or
 //! inconsistent values there. The demuxer therefore ignores granule
 //! positions completely and computes each packet's duration from the
-//! packet itself (see [`codec`]). The consequence is that a source's
-//! end trim (a final granule smaller than the decoded length) is not
-//! applied; the index may be up to one packet longer than what a player
-//! that trusts granules outputs.
+//! packet itself (see [`codec`]).
+//!
+//! The one exception is the Opus *end trim* (RFC 7845 4.4): the final page
+//! of a stream may carry a granule position smaller than the decoded
+//! length, telling the decoder to drop the excess samples. It is honoured
+//! only when the granule of the page before agrees exactly with the
+//! packet-derived timeline, so random granules can never shorten a stream.
+//! Vorbis and Speex end trims, and Opus ones in streams whose granules do
+//! not start at zero, are not applied; the index may then be up to one
+//! page longer than what a player that trusts granules outputs.
 //!
 //! ## Packets, links and the index
 //!
@@ -21,8 +27,8 @@
 //!
 //! - Vorbis: the first audio packet of a link only primes the MDCT overlap
 //!   and produces nothing, so it has no index entry.
-//! - Opus: packets entirely inside the link's pre-skip have no entry; the
-//!   one straddling it gets an entry for its audible part only.
+//! - Opus: packets entirely inside the link's pre-skip or end trim have no
+//!   entry; one straddling either gets an entry for its audible part only.
 //! - Speex: every audio packet has an entry.
 //!
 //! Other logical streams (Skeleton, video, unknown codecs) are ignored with
@@ -44,8 +50,20 @@
 //!   bit-exact; Vorbis keeps no decoder state beyond the overlap.
 //! - Opus: at least 80 ms (3840 samples) of preceding packets are written
 //!   as pre-roll, hidden by the stream's pre-skip (RFC 7845 4.3 recommends
-//!   80 ms for the decoder to converge). The output matches the source
-//!   except within a short convergence window at every cut point.
+//!   80 ms for the decoder to converge). Cuts are sample-exact: the
+//!   pre-skip also drops the head of the first kept packet, and the final
+//!   granule position of every stream drops the tail of its last packet
+//!   (RFC 7845 4.4), so every chained stream can trim both its ends. The
+//!   output matches the source except within a short convergence window
+//!   at every cut point.
+//!
+//!   ffmpeg (6.1) attaches the end trim to the last packet as side data
+//!   that also resets the pending pre-skip. A stream whose kept part
+//!   starts and ends inside its last packet therefore decodes too long
+//!   there, by the part of the pre-skip that lies in that packet. The file
+//!   is correct; opusfile decodes it exactly. ffmpeg also ignores the end
+//!   trim when a stream's first audio page is its last, so the last packet
+//!   gets a page of its own.
 //! - Speex: kept packets only, and all kept parts of a link go into one
 //!   stream, because ffmpeg and speexdec mishandle chained Speex and
 //!   chaining would not help: Speex has no pre-skip to hide pre-roll. The
@@ -83,6 +101,9 @@ struct Link {
     headers: Vec<Pieces>,
     /// Range of this link's audio packets in [`OggFile::raw`].
     raw: Range<usize>,
+    /// Samples of the link that are output, in the coordinates of
+    /// [`RawPacket::start_in_link`]: Opus pre-skip and end trim removed.
+    audible: Range<u64>,
 }
 
 /// An audio packet as found in the source.
@@ -155,14 +176,10 @@ impl OggFile {
         let mut pos = 0u64;
         for (i, p) in raw.iter().enumerate() {
             let link = &links[p.link];
-            let audible = match link.info.kind {
-                CodecKind::Opus => {
-                    let skip = u64::from(link.info.pre_skip);
-                    let end = p.start_in_link + u64::from(p.samples);
-                    end.saturating_sub(skip.max(p.start_in_link))
-                }
-                CodecKind::Vorbis | CodecKind::Speex => u64::from(p.samples),
-            };
+            let end = p.start_in_link + u64::from(p.samples);
+            let audible = end
+                .min(link.audible.end)
+                .saturating_sub(p.start_in_link.max(link.audible.start));
             if audible == 0 {
                 continue;
             }
@@ -225,13 +242,17 @@ impl OggFile {
         read_pieces(r, &self.raw[*raw].pieces)
     }
 
-    /// Packet-granular cuts without trimming; Vorbis and Opus pre-roll is
-    /// handled inside [`OggFile::write_cut`] and hidden from the listener.
+    /// Opus cuts are sample-exact at every cut point (pre-skip and end
+    /// trim of each chained stream); Vorbis and Speex cuts are
+    /// packet-granular. Vorbis and Opus pre-roll is handled inside
+    /// [`OggFile::write_cut`] and hidden from the listener, so no pre-roll
+    /// packets are planned.
     pub fn capabilities(&self) -> CutCapabilities {
+        let opus = self.codec() == CodecKind::Opus;
         CutCapabilities {
             preroll_packets: 0,
-            can_trim_start: false,
-            can_trim_end: false,
+            can_trim_start: opus,
+            can_trim_end: opus,
             lossless_reencode: false,
             trims_at_file_ends_only: false,
         }
@@ -258,14 +279,19 @@ impl OggFile {
     /// a new chained stream with clean decoder state. Speex has no pre-skip
     /// that could hide pre-roll, and common decoders mishandle chained
     /// Speex, so all kept parts of one link are joined in one stream.
-    fn runs(&self, plans: &[CutPlan]) -> Result<Vec<Vec<Range<usize>>>> {
+    ///
+    /// A plan's trims go to the run holding its first and last entry. A run
+    /// with a trimmed end, or a plan with a trimmed start, never merges with
+    /// its neighbour, because a stream can only trim at its two ends.
+    fn runs(&self, plans: &[CutPlan]) -> Result<Vec<Run>> {
         let n = self.entry_raw.len();
-        let mut runs: Vec<Vec<Range<usize>>> = Vec::new();
+        let mut runs: Vec<Run> = Vec::new();
         for p in plans {
-            if p.trim_start != 0 || p.trim_end != 0 {
-                return Err(ContainerError::InvalidPlan(
-                    "Ogg cuts cannot trim samples".into(),
-                ));
+            if (p.trim_start != 0 || p.trim_end != 0) && self.codec() != CodecKind::Opus {
+                return Err(ContainerError::InvalidPlan(format!(
+                    "{} cuts cannot trim samples",
+                    self.codec().name()
+                )));
             }
             if p.packets.start > p.packets.end || p.packets.end > n {
                 return Err(ContainerError::InvalidPlan(format!(
@@ -276,36 +302,56 @@ impl OggFile {
             for e in p.packets.clone() {
                 let link = self.raw[self.entry_raw[e]].link;
                 let joinable = self.links[link].info.kind == CodecKind::Speex;
-                let last = runs.last_mut().and_then(|run| {
-                    let same_link = self.raw[self.entry_raw[run[0].start]].link == link;
-                    same_link.then_some(run)
+                let trim_start = if e == p.packets.start {
+                    p.trim_start
+                } else {
+                    0
+                };
+                let last = runs.last_mut().filter(|run| {
+                    let same_link = self.raw[self.entry_raw[run.parts[0].start]].link == link;
+                    same_link && run.trim_end == 0 && trim_start == 0
                 });
+                let new = || Run {
+                    parts: std::iter::once(e..e + 1).collect(),
+                    trim_start,
+                    trim_end: 0,
+                };
                 match last {
-                    Some(run) => match run.last_mut() {
+                    Some(run) => match run.parts.last_mut() {
                         Some(part) if part.end == e => part.end = e + 1,
-                        _ if joinable => run.push(e..e + 1),
-                        _ => runs.push(std::iter::once(e..e + 1).collect()),
+                        _ if joinable => run.parts.push(e..e + 1),
+                        _ => runs.push(new()),
                     },
-                    None => runs.push(std::iter::once(e..e + 1).collect()),
+                    None => runs.push(new()),
                 }
+            }
+            if !p.packets.is_empty()
+                && let Some(run) = runs.last_mut()
+            {
+                run.trim_end = p.trim_end;
             }
         }
         Ok(runs)
     }
 
     /// Writes one logical stream holding the index entries of `run`.
-    fn write_run<R, W>(&self, r: &mut R, run: &[Range<usize>], serial: u32, w: &mut W) -> Result<()>
+    fn write_run<R, W>(&self, r: &mut R, run: &Run, serial: u32, w: &mut W) -> Result<()>
     where
         R: Read + Seek + ?Sized,
         W: Write + Seek + ?Sized,
     {
         // `runs` never creates empty runs or parts.
-        let r_start = self.entry_raw[run[0].start];
+        let parts = &run.parts;
+        let r_start = self.entry_raw[parts[0].start];
+        let r_last = self.entry_raw[parts[parts.len() - 1].end - 1];
         let link = &self.links[self.raw[r_start].link];
 
         // First packet to write, including pre-roll.
         let mut r0 = r_start;
         let mut opus_pre_skip = 0u64;
+        // Opus: granule position of the last page (RFC 7845 4.4), which
+        // trims the end of the last packet.
+        let mut opus_end = None;
         match link.info.kind {
             // Index entries never start a link (that packet has no output),
             // so the predecessor exists within the link.
@@ -316,20 +362,31 @@ impl OggFile {
                     r0 -= 1;
                     acc += u64::from(self.raw[r0].samples);
                 }
-                // Hide the pre-roll, plus whatever part of the first packet
-                // was inside the source's own pre-skip.
-                let s = self.raw[r_start].start_in_link;
-                opus_pre_skip = s - self.raw[r0].start_in_link
-                    + u64::from(link.info.pre_skip).saturating_sub(s);
+                // Wanted part in link coordinates: from the audible start of
+                // the first packet (later than its start if the packet
+                // straddles the source's pre-skip) plus the plan's trim, to
+                // the audible end of the last packet minus the plan's trim.
+                // The planner keeps both trims below the packets' audible
+                // lengths, so `start < end` and both lie inside packets.
+                let first = &self.raw[r_start];
+                let last = &self.raw[r_last];
+                let start = first.start_in_link.max(link.audible.start) + run.trim_start;
+                let end = (last.start_in_link + u64::from(last.samples)).min(link.audible.end)
+                    - run.trim_end;
+                // Hide the pre-roll and the head of the first packet.
+                let origin = self.raw[r0].start_in_link;
+                opus_pre_skip = start - origin;
+                opus_end = Some(end - origin);
             }
             CodecKind::Speex => {}
         }
         // Raw packets to write, in order.
         let mut packets: Vec<Range<usize>> =
-            std::iter::once(r0..self.entry_raw[run[0].end - 1] + 1).collect();
-        for part in &run[1..] {
+            std::iter::once(r0..self.entry_raw[parts[0].end - 1] + 1).collect();
+        for part in &parts[1..] {
             packets.push(self.entry_raw[part.start]..self.entry_raw[part.end - 1] + 1);
         }
+        let n_packets: usize = packets.iter().map(ExactSizeIterator::len).sum();
 
         let mut pg = Paginator::new(serial);
         for (i, h) in link.headers.iter().enumerate() {
@@ -355,6 +412,19 @@ impl OggFile {
             if !(link.info.kind == CodecKind::Vorbis && k == 0) {
                 granule += u64::from(p.samples);
             }
+            // The last packet always ends on the stream's last page, so its
+            // granule position is that page's.
+            if k + 1 == n_packets
+                && let Some(end) = opus_end
+            {
+                granule = end;
+                // ffmpeg ignores the end trim of a stream whose first audio
+                // page is also its last; a page of its own for the last
+                // packet avoids that for all but one-packet streams.
+                if k > 0 {
+                    pg.flush();
+                }
+            }
             pg.push(&bytes, granule as i64);
             if k == 1 && link.info.kind == CodecKind::Vorbis {
                 // ffmpeg mistimes a Vorbis stream whose first audio page is
@@ -369,6 +439,18 @@ impl OggFile {
         w.write_all(&pg.finish())?;
         Ok(())
     }
+}
+
+/// One output stream: entry ranges of one link (see [`OggFile::runs`]) and
+/// the samples to trim at its two ends (Opus only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Run {
+    /// Non-empty, increasing ranges of index entries.
+    parts: Vec<Range<usize>>,
+    /// Samples to drop from the audible start of the first entry.
+    trim_start: u64,
+    /// Samples to drop from the audible end of the last entry.
+    trim_end: u64,
 }
 
 /// Reads a packet from its pieces.
@@ -432,6 +514,36 @@ struct Current {
     samples: u64,
     /// The link ended with an EOS page.
     ended: bool,
+    /// The granule position of the last page that completed an audio
+    /// packet equals the packet-derived sample count up to it (true before
+    /// the first such page: header pages have granule 0).
+    granules_agree: bool,
+    /// Opus: samples to drop at the end, from the final page's granule
+    /// position (RFC 7845 4.4); see the module documentation.
+    end_trim: u64,
+}
+
+impl Current {
+    /// Updates the granule bookkeeping after a page whose completed audio
+    /// packets took the sample count from `before` to `self.samples`.
+    fn audio_page(&mut self, granule: i64, before: u64, eos: bool) {
+        if self.samples == before || granule == page::NO_GRANULE {
+            return;
+        }
+        let g = u64::try_from(granule).ok();
+        if eos
+            && self.info.kind == CodecKind::Opus
+            && self.granules_agree
+            && let Some(g) = g
+            // RFC 7845 4.4: the trim may only remove samples of this last
+            // page, and the stream may not end inside its pre-skip.
+            && g >= before.max(u64::from(self.info.pre_skip))
+            && g < self.samples
+        {
+            self.end_trim = self.samples - g;
+        }
+        self.granules_agree = g == Some(self.samples);
+    }
 }
 
 /// Page-by-page reader that assembles packets.
@@ -495,10 +607,13 @@ impl Scanner {
             for p in &mut self.raw[c.raw_start..] {
                 p.link = id;
             }
+            let total = c.samples;
+            let audible = u64::from(c.info.pre_skip).min(total)..total - c.end_trim;
             self.links.push(Link {
                 info: c.info,
                 headers: c.headers,
                 raw: c.raw_start..self.raw.len(),
+                audible,
             });
             if self.links[id].raw.is_empty() {
                 // Keep it out of the index; the warning is added by `open`.
@@ -568,12 +683,17 @@ impl Scanner {
                 c.have_start = true;
             }
         }
-        if h.flags & page::FLAG_EOS != 0 {
+        let eos = h.flags & page::FLAG_EOS != 0;
+        if eos {
             c.ended = true;
         }
+        let before = c.samples;
         self.warnings.extend(warnings);
         for pieces in done {
             self.packet(w, pieces)?;
+        }
+        if let Some(c) = &mut self.cur {
+            c.audio_page(h.granule, before, eos);
         }
         Ok(())
     }
@@ -630,6 +750,8 @@ impl Scanner {
             raw_start: self.raw.len(),
             samples: 0,
             ended: h.flags & page::FLAG_EOS != 0,
+            granules_agree: true,
+            end_trim: 0,
         });
         Ok(())
     }
@@ -831,6 +953,53 @@ mod tests {
         let f = open(&bytes);
         assert_eq!(f.index().packets().len(), 2);
         assert_eq!(f.warnings().len(), 1, "{:?}", f.warnings());
+    }
+
+    /// An Opus stream of four 20 ms packets (TOC config 31, one frame),
+    /// one per page, with pre-skip 312 and the given page granules.
+    fn opus_stream(granules: [i64; 4]) -> Vec<u8> {
+        let mut head = b"OpusHead".to_vec();
+        // RFC 7845 5.1: version 1, 2 channels, pre-skip, 48 kHz input,
+        // gain 0, mapping family 0.
+        head.extend([1, 2]);
+        head.extend(312u16.to_le_bytes());
+        head.extend(48_000u32.to_le_bytes());
+        head.extend([0, 0, 0]);
+        let mut p = Paginator::new(5);
+        p.push(&head, 0);
+        p.flush();
+        p.push(b"OpusTags\0\0\0\0\0\0\0\0", 0);
+        p.flush();
+        for g in granules {
+            p.push(&[31 << 3, 0xAB], g);
+            p.flush();
+        }
+        p.finish()
+    }
+
+    #[test]
+    fn opus_end_trim_is_honoured_when_granules_agree() {
+        let f = open(&opus_stream([960, 1920, 2880, 3740]));
+        // 3840 samples minus pre-skip and the 100 samples end trim.
+        assert_eq!(f.index().total_samples(), 3840 - 312 - 100);
+        assert_eq!(f.index().packets().last().map(|p| p.n_samples), Some(860));
+    }
+
+    #[test]
+    fn opus_end_trim_after_bad_granules_is_ignored() {
+        // Constant, offset and random granules: none agree with the
+        // packet-derived timeline, so the final granule is not trusted.
+        for granules in [
+            [0, 0, 0, 0],
+            [5_000, 5_960, 6_920, 6_000],
+            [77, 123_456, 9, 3_740],
+        ] {
+            let f = open(&opus_stream(granules));
+            assert_eq!(f.index().total_samples(), 3840 - 312, "{granules:?}");
+        }
+        // A final granule beyond the last page's samples is no trim either.
+        let f = open(&opus_stream([960, 1920, 2880, 2000]));
+        assert_eq!(f.index().total_samples(), 3840 - 312);
     }
 
     #[test]

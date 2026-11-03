@@ -210,7 +210,7 @@ pub struct CutPlan {
 | AAC (ADTS) | ADTS headers | copy frames + 1 pre-roll frame | 1 frame (21 ms at 48 kHz) | ADTS has no trimming metadata |
 | AAC (M4A) | `stsz`/`stco`/`stts` | new `moov` with edit list | sample-exact via `elst` | most phone recorders produce M4A |
 | Ogg Vorbis | pages; timestamps from packet durations, granule positions ignored | new pages, copy headers, new serial, CRC; one chained stream per kept part, led by its predecessor packet as pre-roll | packet-granular, bit-exact including joins *(implemented)*; sample-exact via granule positions later | block size variable (64..8192) |
-| Ogg Opus | as above; pre-skip from `OpusHead` | as Vorbis, with at least 80 ms pre-roll hidden by a rewritten `pre_skip` | packet-granular (2.5..120 ms) *(implemented)*; bit-exact after a short convergence window at joins | |
+| Ogg Opus | as above; pre-skip from `OpusHead`; end trim from the final granule when the granules before it are consistent | as Vorbis, with at least 80 ms pre-roll hidden by a rewritten `pre_skip`; the start trim is added to `pre_skip`, the end trim lowers the final granule (RFC 7845 4.4) | **sample-exact at every cut**, including joins, since each kept part is its own chained stream *(implemented)*; bit-exact after a short convergence window at joins | ffmpeg plays a kept part that starts and ends inside the same packet too long (see below) |
 | Speex | Ogg pages, Speex header | as Vorbis, but all kept parts of a link in one stream, no pre-roll | packet-granular (20 ms) *(implemented)*; bit-exact after convergence at joins | ffmpeg and speexdec do not handle chained Speex |
 
 ### Tags per container
@@ -240,11 +240,14 @@ them, so we must too:
   flags of the current and previous packet (mode header), Opus from the TOC
   byte, Speex from frames-per-packet in the header. `first_sample` is the
   running sum of those durations.
-- Granule positions are not read at all *(implemented)*. Consequently the
-  end trimming a clean file announces through its last granule is not
-  applied either: the timeline may be up to one packet longer than what a
-  granule-trusting player outputs. (Using the last granule when it is
-  consistent with the computed timeline is a possible refinement.)
+- Granule positions are not used for timing *(implemented)*. The one
+  exception is the **Opus end trim** (RFC 7845 4.4) *(implemented)*: the
+  final granule of a stream is honoured when the granule of the page
+  before it equals the packet-derived sample count there exactly, so
+  garbage granules can never shorten a stream. Vorbis and Speex end trims,
+  and Opus end trims after inconsistent granules, are not applied: the
+  timeline may then be up to one page longer than what a granule-trusting
+  player outputs.
 - Export **always writes fresh, consistent granule positions** starting at
   zero, a new serial number and recomputed CRCs, so cut files are cleaner
   than the source.
@@ -270,7 +273,7 @@ codecs the decoder state at the join is wrong for one or two packets:
 | MP3 | first frame after the join may reference bit-reservoir bytes that are no longer there; its first granule overlaps with a foreign predecessor granule | the reservoir is repacked, so every frame gets exactly its own main data *(implemented)*; the remaining overlap/synthesis-filter transient lasts at most 1152 samples (one MPEG-1 frame, two MPEG-2 frames), checked by the tests. The source's first and last frame hold encoder delay and padding that only the LAME tag hides; if such a frame lands at a join, that hidden part (< 1152 samples) is played. The packet index records it (`PacketInfo::hidden_before`/`hidden_after`), and the plan and the exactness report state it (`CutPlan::padding_before`/`padding_after`) |
 | AAC | MDCT overlap-add mixes the tails of two unrelated frames: a transient of one frame (~20 ms) | M4A: keep the frame and rely on the short crossfade-like overlap |
 | Vorbis | as AAC | each kept part becomes a **chained** logical stream that starts with its real predecessor packet, whose output a new stream discards: **no join window**, bit-exact *(implemented)*. Caveat: ffmpeg does not reset its Vorbis decoder at a chain boundary and plays one extra overlap (≤ 23 ms) per join; libvorbisfile-based players are exact |
-| Opus | CELT/SILK prediction state | each kept part becomes a chained stream with ≥ 80 ms pre-roll hidden by `pre_skip` (RFC 7845 4.3) *(implemented)*. The output is bit-exact again once the decoder has converged; the window depends on the content, typically < 100 ms |
+| Opus | CELT/SILK prediction state | each kept part becomes a chained stream with ≥ 80 ms pre-roll hidden by `pre_skip` (RFC 7845 4.3) and both ends trimmed to the sample *(implemented)*. The output is bit-exact again once the decoder has converged; the window depends on the content, typically < 100 ms. Caveat: when a kept part starts and ends inside the same packet (a sliver shorter than one packet, ≤ 120 ms), ffmpeg drops the rest of the pre-skip as soon as the end-trimmed packet arrives and plays up to one packet too much; the file itself is correct per RFC 7845 |
 | Speex | CELP predictor, pitch memory and the float synthesis-filter state | none: parts are joined within one stream *(implemented)*. The output is bit-exact again once the state has converged. A pause does **not** flush it: digital silence leaves the decoder state in place, so convergence happens during the following speech, measured at up to 320 ms on the speech-like fixture; on steady tones this can take longer. The deviations are float-rounding sized and inaudible |
 
 Tests use a speech-like fixture signal (syllables separated by 80 ms of

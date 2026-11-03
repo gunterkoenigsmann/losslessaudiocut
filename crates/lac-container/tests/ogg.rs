@@ -34,8 +34,10 @@ use proptest::prelude::*;
 
 /// Single-link fixtures: (name, codec, rate, channels, length in samples).
 ///
-/// Lengths are computed from packet contents, so they include the source's
-/// end padding that a granule-trusting player would cut off.
+/// Lengths are computed from packet contents, so for Vorbis and Speex they
+/// include the source's end padding that a granule-trusting player would
+/// cut off. Opus honours the end trim (RFC 7845 4.4), so its length is
+/// exactly the encoder's 1.5 s of input.
 const FIXTURES: [(&str, CodecKind, u32, u16, u64); 4] = [
     (
         "ogg_vorbis_stereo_44k.ogg",
@@ -51,7 +53,7 @@ const FIXTURES: [(&str, CodecKind, u32, u16, u64); 4] = [
         1,
         22_144,
     ),
-    ("ogg_opus_stereo.opus", CodecKind::Opus, 48_000, 2, 72_648),
+    ("ogg_opus_stereo.opus", CodecKind::Opus, 48_000, 2, 72_000),
     ("ogg_speex_16k.spx", CodecKind::Speex, 16_000, 1, 16_000),
 ];
 
@@ -159,10 +161,21 @@ fn granule_length(out: &[u8]) -> u64 {
     total + (last - pre_skip) as u64
 }
 
+/// Whether ffmpeg decodes the stream written for `plan` too long (see the
+/// `ogg` module docs): an Opus range that starts and ends inside the same
+/// packet. ffmpeg forgets the rest of the pre-skip when the end-trimmed
+/// last packet arrives. [`opus_sliver_inside_one_packet`] covers it.
+fn ffmpeg_mistrims(plan: &CutPlan) -> bool {
+    plan.packets.len() == 1 && plan.trim_start > 0 && plan.trim_end > 0
+}
+
 /// Checks oracles 2 and 3 for a single-link source: ffmpeg's decode of
 /// `out` is the source's decode restricted to the plans' actual ranges.
 fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPlan]) {
     let f = open(src);
+    if f.codec() == CodecKind::Opus && plans.iter().any(ffmpeg_mistrims) {
+        return;
+    }
     let info = f.index().info();
     let frame = sample_bytes(f.codec()) * usize::from(info.channels);
     let src_path = temp_file(&format!("src-{name}"), src);
@@ -245,8 +258,9 @@ fn fixtures_open_cleanly() {
     }
 }
 
-/// Our packet-derived length agrees with an independent decoder, up to the
-/// end padding that it trims according to the last granule position.
+/// Our packet-derived length agrees with an independent decoder: exactly
+/// for Opus, whose end trim we honour, and otherwise up to the end padding
+/// that the decoder trims according to the last granule position.
 #[test]
 fn length_agrees_with_ffmpeg() {
     for (name, ..) in FIXTURES {
@@ -260,10 +274,14 @@ fn length_agrees_with_ffmpeg() {
             (d.len() / (sample_bytes(f.codec()) * usize::from(f.index().info().channels))) as u64;
         let ours = f.index().total_samples();
         let last = u64::from(f.index().packets().last().map_or(0, |p| p.n_samples));
-        assert!(
-            decoded <= ours && ours - decoded < last,
-            "{name}: decoder {decoded}, ours {ours}"
-        );
+        if f.codec() == CodecKind::Opus {
+            assert_eq!(decoded, ours, "{name}");
+        } else {
+            assert!(
+                decoded <= ours && ours - decoded < last,
+                "{name}: decoder {decoded}, ours {ours}"
+            );
+        }
     }
 }
 
@@ -285,7 +303,9 @@ fn chained_files_are_one_timeline() {
 
 /// Random granule positions, as some radio stations send them, change
 /// nothing: the timeline and the cut output are the same as for the clean
-/// file.
+/// file. The only difference is the clean Opus file's end trim, which is
+/// not trusted when the granules before it are garbage, so the damaged
+/// file's last packet is longer.
 #[test]
 fn granule_positions_are_ignored() {
     for (clean, bad) in [
@@ -296,8 +316,17 @@ fn granule_positions_are_ignored() {
         assert_ne!(c, b);
         let (fc, fb) = (open(&c), open(&b));
         assert!(fb.warnings().is_empty(), "{bad}: {:?}", fb.warnings());
-        assert_eq!(fc.index(), fb.index(), "{bad}");
-        let len = fc.index().total_samples();
+        let (pc, pb) = (fc.index().packets(), fb.index().packets());
+        let n = pc.len();
+        assert_eq!(pb.len(), n, "{bad}");
+        assert_eq!(pc[..n - 1], pb[..n - 1], "{bad}");
+        let trimmed = pb[n - 1].n_samples - pc[n - 1].n_samples;
+        match fc.codec() {
+            // ffmpeg's libopus wrapper pads the end to a whole packet.
+            CodecKind::Opus => assert_eq!(trimmed, 648, "{bad}"),
+            _ => assert_eq!(trimmed, 0, "{bad}"),
+        }
+        let len = pc[n - 1].first_sample;
         let p = plans(&fc, &[len / 5..len / 2, len * 3 / 4..len]);
         assert_eq!(write(&c, &fc, &p), write(&b, &fb, &p), "{bad}");
     }
@@ -399,6 +428,90 @@ fn opus_cut_near_start_respects_pre_skip() {
         assert_packets_copied(&src, &out, &p);
         assert_decodes_like_source(name, &src, &out, &p);
     }
+}
+
+/// Opus cuts are sample-exact at both ends of every kept range, including
+/// ranges that start and end in the middle of a packet, ranges within one
+/// packet, and cuts at the end of a chained source's links.
+#[test]
+fn opus_cuts_are_sample_exact() {
+    let name = "ogg_opus_stereo.opus";
+    let src = fixture(name);
+    let f = open(&src);
+    assert!(f.capabilities().can_trim_start && f.capabilities().can_trim_end);
+    let len = f.index().total_samples();
+    for ranges in [
+        vec![12_345..54_321],
+        vec![10_100..10_900],
+        vec![0..len - 1],
+        vec![7..20_007, 20_013..40_000, 50_001..len - 3],
+    ] {
+        let p = plans(&f, &ranges);
+        for (plan, r) in p.iter().zip(&ranges) {
+            assert_eq!(plan.actual, *r, "{ranges:?}");
+        }
+        let out = write(&src, &f, &p);
+        let o = assert_packets_copied(&src, &out, &p);
+        assert_eq!(o.links(), ranges.len(), "{ranges:?}");
+        assert_decodes_like_source(name, &src, &out, &p);
+    }
+}
+
+/// A kept range inside a single Opus packet is written correctly (RFC 7845:
+/// pre-skip and end trim inside one packet; our demuxer and granule
+/// positions agree on its length). ffmpeg plays it too long, by the part of
+/// the pre-skip that lies inside the packet; this test documents that, and
+/// fails once ffmpeg handles it, so [`ffmpeg_mistrims`] can go.
+#[test]
+fn opus_sliver_inside_one_packet() {
+    let name = "ogg_opus_stereo.opus";
+    let src = fixture(name);
+    let f = open(&src);
+    // Packet 1 holds source samples 648..1608.
+    let p = plans(&f, &[1_000..1_001]);
+    assert!(ffmpeg_mistrims(&p[0]));
+    let out = write(&src, &f, &p);
+    assert_packets_copied(&src, &out, &p);
+    let path = temp_file(&format!("sliver-{name}"), &out);
+    if let Some(d) = decode(CodecKind::Opus, &path) {
+        let decoded = d.len() / (sample_bytes(CodecKind::Opus) * 2);
+        assert_eq!(decoded, 1 + (1_000 - 648), "{name}");
+    }
+}
+
+/// A delete inside a single Opus packet keeps that packet twice: once to
+/// end the stream before the delete, once to start the one after it.
+#[test]
+fn opus_delete_inside_one_packet() {
+    let name = "ogg_opus_stereo.opus";
+    let src = fixture(name);
+    let f = open(&src);
+    let p = delete(&f, &[(30_100, 30_400)]);
+    assert_eq!(p.len(), 2);
+    assert_eq!(p[0].packets.end - 1, p[1].packets.start);
+    let out = write(&src, &f, &p);
+    let o = assert_packets_copied(&src, &out, &p);
+    assert_eq!(o.links(), 2);
+    assert_eq!(o.index().total_samples(), f.index().total_samples() - 300);
+    assert_decodes_like_source(name, &src, &out, &p);
+}
+
+/// Our own end trims survive a round trip: re-opening a cut and keeping all
+/// of it reproduces it byte for byte, and its index has the cut's length.
+#[test]
+fn opus_cut_of_cut_is_stable() {
+    let src = fixture("ogg_opus_chained.opus");
+    let f = open(&src);
+    let len = f.index().total_samples();
+    let p = delete(&f, &[(len / 3 + 17, len / 2 + 5)]);
+    let once = write(&src, &f, &p);
+    let o = open(&once);
+    assert_eq!(
+        o.index().total_samples(),
+        len - (len / 2 + 5 - len / 3 - 17)
+    );
+    let again = write(&once, &o, &plans(&o, &[0..o.index().total_samples()]));
+    assert_eq!(once, again);
 }
 
 #[test]
