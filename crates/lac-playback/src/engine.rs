@@ -17,6 +17,13 @@
 //! position, so nothing stale can slip in after the flush. Tests drive
 //! [`Output::fill`] directly, so the whole engine runs without a sound
 //! card.
+//!
+//! Jumps are smoothed so they never click: at a seek the callback fades
+//! out what it was playing over [`FADE_SECONDS`], stays silent until the
+//! decoder has audio for the new position, and fades that in. The first
+//! chunk after a seek is short, so that this gap stays small; that keeps
+//! scrubbing ([`crate::scrub`]), which seeks every few tens of
+//! milliseconds, responsive.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -90,7 +97,17 @@ pub struct Output {
     shared: Arc<Shared>,
     ring: rtrb::Consumer<f32>,
     channels: usize,
+    /// Length of a fade in frames.
+    fade: usize,
+    /// Frames of the current fade-in played so far (`fade` when none).
+    fade_in: usize,
+    /// Frames of the fade-out for the pending seek played so far.
+    fade_out: usize,
 }
+
+/// Length of the fades at jumps: long enough to avoid clicks, short
+/// enough not to be heard as a fade.
+pub const FADE_SECONDS: f64 = 0.005;
 
 impl Output {
     /// Fills `out` (interleaved, in the [`OutputFormat`]) with the next
@@ -109,15 +126,35 @@ impl Output {
             s.played.store(0, Ordering::Relaxed);
             s.drained.store(false, Ordering::Relaxed);
             s.flush_ack.store(req, Ordering::Release);
+            self.fade_in = 0;
         }
-        // Silent while paused, and while a seek waits for the decoder: what
-        // is in the ring belongs to the old position.
-        if !s.playing.load(Ordering::Relaxed)
-            || s.seeks.load(Ordering::Acquire) != s.flush_ack.load(Ordering::Relaxed)
-        {
+        if !s.playing.load(Ordering::Relaxed) {
             out.fill(0.0);
             return 0;
         }
+        let ch = self.channels;
+        if s.seeks.load(Ordering::Acquire) != s.flush_ack.load(Ordering::Relaxed) {
+            // A seek waits for the decoder: what is in the ring belongs to
+            // the old position. Fade it out, then stay silent. None of it
+            // counts as played.
+            let frames = out.len() / ch;
+            let mut i = 0;
+            while i < frames && self.fade_out < self.fade && self.ring.slots() >= ch {
+                let gain = 1.0 - (self.fade_out + 1) as f32 / self.fade as f32;
+                if let Ok(chunk) = self.ring.read_chunk(ch) {
+                    let (a, b) = chunk.as_slices();
+                    for (o, v) in out[i * ch..(i + 1) * ch].iter_mut().zip(a.iter().chain(b)) {
+                        *o = v * gain;
+                    }
+                    chunk.commit_all();
+                }
+                i += 1;
+                self.fade_out += 1;
+            }
+            out[i * ch..].fill(0.0);
+            return 0;
+        }
+        self.fade_out = 0;
         // Whole frames only, so channels never shift.
         let avail = self.ring.slots() / self.channels * self.channels;
         let n = avail.min(out.len() / self.channels * self.channels);
@@ -126,6 +163,15 @@ impl Output {
             out[..a.len()].copy_from_slice(a);
             out[a.len()..n].copy_from_slice(b);
             chunk.commit_all();
+        }
+        // Fade in after a seek.
+        for frame in out[..n].chunks_exact_mut(ch) {
+            if self.fade_in >= self.fade {
+                break;
+            }
+            let gain = self.fade_in as f32 / self.fade as f32;
+            frame.iter_mut().for_each(|v| *v *= gain);
+            self.fade_in += 1;
         }
         out[n..].fill(0.0);
         s.played
@@ -162,6 +208,9 @@ pub struct Engine {
 /// Source frames decoded per step: a quarter second keeps the cost of
 /// each random-access decoder start (its pre-roll) small.
 const CHUNK_SECONDS_DIV: u32 = 4;
+/// The first chunk after a seek is shorter (1/20 s), so that audio for
+/// the new position arrives quickly.
+const FIRST_CHUNK_SECONDS_DIV: u32 = 20;
 /// Ring buffer length in seconds of output.
 const RING_SECONDS: usize = 1;
 /// How long a seek waits for the callback to acknowledge the flush. The
@@ -216,10 +265,16 @@ impl Engine {
             out_rate: format.sample_rate.max(1),
             len,
         };
+        let fade = ((f64::from(format.sample_rate) * FADE_SECONDS) as usize).max(1);
         let output = Output {
             shared,
             ring: consumer,
             channels,
+            fade,
+            // No fade-in at the very start: playback starts with a seek
+            // anyway when it does not start at 0.
+            fade_in: fade,
+            fade_out: 0,
         };
         (engine, output)
     }
@@ -331,7 +386,10 @@ struct Decoder<S> {
 
 impl<S: PcmSource> Decoder<S> {
     fn run(mut self, rx: &Receiver<Command>) {
-        let chunk = SamplePos::from((self.source.sample_rate() / CHUNK_SECONDS_DIV).max(1));
+        let rate = self.source.sample_rate();
+        let chunk = SamplePos::from((rate / CHUNK_SECONDS_DIV).max(1));
+        let first_chunk = SamplePos::from((rate / FIRST_CHUNK_SECONDS_DIV).max(1));
+        let mut next_chunk = chunk;
         loop {
             // Wait only when there is nothing to do right now.
             let busy = !self.pending.is_empty() || self.pos < self.timeline.len();
@@ -357,6 +415,7 @@ impl<S: PcmSource> Decoder<S> {
                         .flush_req
                         .store(self.generation, Ordering::Release);
                     self.wait_for_flush();
+                    next_chunk = first_chunk;
                     continue;
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -365,8 +424,9 @@ impl<S: PcmSource> Decoder<S> {
                 self.write_pending();
                 continue;
             }
-            match self.timeline.chunk(self.pos, chunk) {
+            match self.timeline.chunk(self.pos, next_chunk) {
                 Some(range) => {
+                    next_chunk = chunk;
                     self.pos += range.end - range.start;
                     match self.source.read(range) {
                         Ok(pcm) => self.converter.push(&pcm, &mut self.pending),
@@ -515,9 +575,88 @@ mod tests {
         engine.seek(5000);
         assert_eq!(engine.position(), 5000, "reported at once");
         let after = pull(&mut out, 50);
-        assert_eq!(after[0], 5000.0, "no old audio after a seek");
+        // FMT is 1 kHz: the fade-in is 5 frames, starting from silence.
+        assert_eq!(after[0], 0.0);
+        assert_eq!(after[1], 5001.0 * 0.2);
+        assert_eq!(
+            &after[5..8],
+            &[5005.0, 5006.0, 5007.0],
+            "no old audio after a seek"
+        );
         assert_eq!(after[49], 5049.0);
         assert_eq!(engine.position(), 5050);
+    }
+
+    /// A ramp that lets only `allowed` reads through and holds the next
+    /// one until more are allowed, to catch the engine mid-seek.
+    struct Gated {
+        ramp: Ramp,
+        allowed: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl PcmSource for Gated {
+        fn channels(&self) -> usize {
+            1
+        }
+        fn sample_rate(&self) -> u32 {
+            self.ramp.rate
+        }
+        fn read(&mut self, r: Range<SamplePos>) -> Result<Vec<f32>, String> {
+            while self
+                .allowed
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+                .is_err()
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            self.ramp.read(r)
+        }
+    }
+
+    #[test]
+    fn a_seek_fades_out_the_old_audio_and_fades_in_the_new() {
+        let allowed = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let source = Gated {
+            ramp: Ramp {
+                rate: 1000,
+                total: 10_000,
+            },
+            allowed: Arc::clone(&allowed),
+        };
+        let (mut engine, mut out) = Engine::start(source, Timeline::whole(10_000), FMT);
+        engine.play();
+        assert_eq!(
+            pull(&mut out, 10),
+            (0..10).map(|i| i as f32).collect::<Vec<_>>()
+        );
+        // The decoder now hangs in its second read, so the seek stays
+        // pending: the callback fades out frames 10..15 (5 frames at
+        // 1 kHz) and then is silent; none of it counts as played.
+        engine.seek(5000);
+        let mut buf = [9.0; 10];
+        assert_eq!(out.fill(&mut buf), 0);
+        let want = [
+            10.0 * 0.8,
+            11.0 * 0.6,
+            12.0 * 0.4,
+            13.0 * 0.2,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        for (g, w) in buf.iter().zip(want) {
+            assert!((g - w).abs() < 1e-4, "{buf:?}");
+        }
+        assert_eq!(out.fill(&mut buf), 0);
+        assert_eq!(buf, [0.0; 10], "the fade-out happens once");
+        assert_eq!(engine.position(), 5000);
+        allowed.store(usize::MAX / 2, Ordering::Release);
+        let got = pull(&mut out, 8);
+        assert_eq!(got[0], 0.0, "fades in from silence");
+        assert_eq!(&got[5..], &[5005.0, 5006.0, 5007.0]);
     }
 
     #[test]
@@ -535,8 +674,9 @@ mod tests {
         // Delete 100..200; continue at timeline 100, i.e. source 200.
         engine.set_timeline(Timeline::new([0..100, 200..1000]), 100);
         assert_eq!(engine.len(), 900);
-        let got = pull(&mut out, 3);
-        assert_eq!(got, [200.0, 201.0, 202.0]);
+        let got = pull(&mut out, 8);
+        // After the fade-in (5 frames at 1 kHz).
+        assert_eq!(&got[5..], &[205.0, 206.0, 207.0]);
     }
 
     #[test]
