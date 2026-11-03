@@ -47,6 +47,11 @@ for all tracks (Ctrl+Shift+A) gives every track the value of the selected
 cell, e.g. the album. Selecting a row moves the cursor to that track. Tag
 changes are undone with Ctrl+Z like any other edit.
 
+The toolbar and the track list are dockable panes: drag them by their
+gripper or title to another edge of the window, float them, resize or close
+them; the View menu shows and hides each one. Their arrangement and the
+window size are remembered between runs.
+
 Space plays and stops. Playback plays what the export will contain: the kept
 parts, with the deleted ones skipped, starting at the selection or at the
 cursor (a click without dragging puts it; Home moves it to the start).

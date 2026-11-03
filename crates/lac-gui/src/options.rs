@@ -2,8 +2,10 @@
 //! store (the registry on Windows, a file in the home or config directory
 //! elsewhere).
 //!
-//! Only on/off choices from the menus live here; everything else about a
-//! session (the open file, the edits) is deliberately not remembered.
+//! Only on/off choices from the menus live here (which panes are shown,
+//! and where, is the window layout's business: see `panes.rs`);
+//! everything else about a session (the open file, the edits) is
+//! deliberately not remembered.
 
 use wxdragon::config::{Config, ConfigStyle};
 
@@ -11,8 +13,6 @@ use wxdragon::config::{Config, ConfigStyle};
 const KEEP_PITCH: &str = "/Playback/KeepPitch";
 /// Key of [`Options::scrub_while_selecting`].
 const SCRUB_WHILE_SELECTING: &str = "/Playback/ScrubWhileSelecting";
-/// Key of [`Options::track_list`].
-const TRACK_LIST: &str = "/View/TrackList";
 
 /// The remembered options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,8 +22,6 @@ pub struct Options {
     /// Play > Scrub while selecting: dragging a selection plays the edge
     /// being dragged.
     pub scrub_while_selecting: bool,
-    /// View > Track list: the track list is shown under the waveform.
-    pub track_list: bool,
 }
 
 impl Default for Options {
@@ -31,7 +29,6 @@ impl Default for Options {
         Options {
             keep_pitch: true,
             scrub_while_selecting: true,
-            track_list: true,
         }
     }
 }
@@ -44,7 +41,6 @@ impl Options {
         Options {
             keep_pitch: c.read_bool(KEEP_PITCH, d.keep_pitch),
             scrub_while_selecting: c.read_bool(SCRUB_WHILE_SELECTING, d.scrub_while_selecting),
-            track_list: c.read_bool(TRACK_LIST, d.track_list),
         }
     }
 
@@ -54,13 +50,12 @@ impl Options {
         let c = config();
         c.write_bool(KEEP_PITCH, self.keep_pitch);
         c.write_bool(SCRUB_WHILE_SELECTING, self.scrub_while_selecting);
-        c.write_bool(TRACK_LIST, self.track_list);
         c.flush(false);
     }
 }
 
 /// The application's config store.
-fn config() -> Config {
+pub(crate) fn config() -> Config {
     Config::new(
         "losslessaudiocut",
         None,
@@ -83,7 +78,6 @@ mod tests {
             Options {
                 keep_pitch: true,
                 scrub_while_selecting: true,
-                track_list: true,
             }
         );
     }
