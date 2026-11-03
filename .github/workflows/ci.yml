@@ -58,11 +58,20 @@ jobs:
       - name: Install FFmpeg development files (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip"
-          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          # BtbN's "latest" release holds builds of the newest release
+          # branches, named ffmpeg-nX.Y-latest-win64-gpl-shared-X.Y.zip;
+          # take the newest one instead of hard-coding a version.
+          $assets = gh release view latest -R BtbN/FFmpeg-Builds --json assets --jq '.assets[].name'
+          $name = $assets | Where-Object { $_ -match '^ffmpeg-n[0-9.]+-latest-win64-gpl-shared-[0-9.]+\.zip$' } |
+            Sort-Object { [version]($_ -replace '^ffmpeg-n([0-9.]+)-.*$', '$1') } | Select-Object -Last 1
+          if (-not $name) { throw "no shared win64 build found in: $assets" }
+          Write-Host "Using $name"
+          gh release download latest -R BtbN/FFmpeg-Builds -p $name -O ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath "$env:RUNNER_TEMP"
-          $dir = (Get-ChildItem "$env:RUNNER_TEMP" -Directory -Filter "ffmpeg-n7.1*").FullName
+          $dir = Join-Path "$env:RUNNER_TEMP" ($name -replace '\.zip$', '')
           "FFMPEG_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
           "$dir\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
