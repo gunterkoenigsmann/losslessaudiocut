@@ -491,7 +491,12 @@ fn opus_sliver_inside_one_packet() {
     let path = temp_file(&format!("sliver-{name}"), &out);
     if let Some(d) = decode(CodecKind::Opus, &path) {
         let decoded = d.len() / (sample_bytes(CodecKind::Opus) * 2);
-        assert_eq!(decoded, 1 + (1_000 - 648), "{name}");
+        // FFmpeg 8 decodes the planned single sample; older versions play
+        // the packet from its start (the documented mistrim).
+        assert!(
+            decoded == 1 || decoded == 1 + (1_000 - 648),
+            "{name}: {decoded} samples"
+        );
     }
 }
 
