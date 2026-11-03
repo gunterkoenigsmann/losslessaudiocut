@@ -9,6 +9,8 @@ repository.workspace = true
 [dependencies]
 lac-core.workspace = true
 lac-container.workspace = true
+lac-decode.workspace = true
+lac-peaks.workspace = true
 thiserror.workspace = true
 
 [lints]
