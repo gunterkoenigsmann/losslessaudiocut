@@ -14,9 +14,11 @@
 //!   and exporting a cut of it.
 //! - [`waveform`]: the waveform display's view model (zoom, scroll,
 //!   pixel columns).
+//! - [`peak_job`]: building the waveform summary in a background thread.
 //!
 //! See `docs/architecture.md` in the repository for how this crate fits in.
 
+pub mod peak_job;
 pub mod ranges;
 pub mod session;
 pub mod time;
