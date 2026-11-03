@@ -24,6 +24,12 @@
 //! chunk after a seek is short, so that this gap stays small; that keeps
 //! scrubbing ([`crate::scrub`]), which seeks every few tens of
 //! milliseconds, responsive.
+//!
+//! Playback speed ([`Engine::set_speed`]) is a render stage in the decoder
+//! thread: either the time-stretcher ([`crate::stretch`], pitch kept) or a
+//! changed resampling ratio (varispeed). Changing it is a seek to the
+//! current position, so the ring never mixes audio of two speeds and the
+//! position stays exact. At normal speed neither stage runs.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -35,6 +41,8 @@ use std::time::{Duration, Instant};
 use lac_core::SamplePos;
 
 use crate::convert::Converter;
+use crate::speed::Speed;
+use crate::stretch::Stretcher;
 use crate::timeline::Timeline;
 
 /// Decoded audio for the player. Implemented by the application on top of
@@ -186,8 +194,9 @@ impl Output {
 /// Commands from the player to the decoder thread.
 #[derive(Debug)]
 enum Command {
-    /// Continue at this timeline position (and possibly a new timeline).
-    Seek(SamplePos, Option<Timeline>),
+    /// Continue at this timeline position (and possibly with a new
+    /// timeline or speed).
+    Seek(SamplePos, Option<Timeline>, Option<Speed>),
     /// End the thread.
     Stop,
 }
@@ -203,6 +212,8 @@ pub struct Engine {
     out_rate: u32,
     /// Length of the current timeline.
     len: SamplePos,
+    /// The speed of the audio after the latest seek.
+    speed: Speed,
 }
 
 /// Source frames decoded per step: a quarter second keeps the cost of
@@ -239,13 +250,18 @@ impl Engine {
         let thread = {
             let shared = Arc::clone(&shared);
             std::thread::spawn(move || {
-                Decoder {
+                let mut decoder = Decoder {
                     converter: Converter::new(
                         in_rate,
                         source.channels(),
                         format.sample_rate,
                         channels,
                     ),
+                    stretcher: None,
+                    out_format: OutputFormat {
+                        sample_rate: format.sample_rate,
+                        channels,
+                    },
                     source,
                     timeline,
                     pos: 0,
@@ -253,8 +269,8 @@ impl Engine {
                     ring: producer,
                     pending: Vec::new(),
                     generation: 0,
-                }
-                .run(&rx);
+                };
+                decoder.run(&rx);
             })
         };
         let engine = Engine {
@@ -264,6 +280,7 @@ impl Engine {
             in_rate,
             out_rate: format.sample_rate.max(1),
             len,
+            speed: Speed::NORMAL,
         };
         let fade = ((f64::from(format.sample_rate) * FADE_SECONDS) as usize).max(1);
         let output = Output {
@@ -296,22 +313,39 @@ impl Engine {
 
     /// Continues at timeline position `t`.
     pub fn seek(&mut self, t: SamplePos) {
-        self.send_seek(t.min(self.len), None);
+        self.send_seek(t.min(self.len), None, None);
     }
 
     /// Switches to a new timeline (after an edit) and continues at its
     /// position `t`.
     pub fn set_timeline(&mut self, timeline: Timeline, t: SamplePos) {
         self.len = timeline.len();
-        self.send_seek(t.min(self.len), Some(timeline));
+        self.send_seek(t.min(self.len), Some(timeline), None);
     }
 
-    fn send_seek(&self, t: SamplePos, timeline: Option<Timeline>) {
+    /// Plays at `speed` from now on, continuing at the current position.
+    pub fn set_speed(&mut self, speed: Speed) {
+        if speed == self.speed {
+            return;
+        }
+        let t = self.position();
+        // Before the seek: `position` counts the frames played after it
+        // at this speed.
+        self.speed = speed;
+        self.send_seek(t, None, Some(speed));
+    }
+
+    /// The speed set with [`Engine::set_speed`].
+    pub fn speed(&self) -> Speed {
+        self.speed
+    }
+
+    fn send_seek(&self, t: SamplePos, timeline: Option<Timeline>, speed: Option<Speed>) {
         // Report the new position at once, before the decoder gets to it.
         self.shared.base.store(t, Ordering::Relaxed);
         self.shared.seeks.fetch_add(1, Ordering::AcqRel);
         self.shared.drained.store(false, Ordering::Relaxed);
-        let _ = self.commands.send(Command::Seek(t, timeline));
+        let _ = self.commands.send(Command::Seek(t, timeline, speed));
     }
 
     /// Length of the timeline being played.
@@ -335,8 +369,10 @@ impl Engine {
             // The callback still has old audio; its count is stale.
             return base;
         }
+        // Output frames to timeline frames: rate ratio times speed.
         let played = u128::from(s.played.load(Ordering::Relaxed));
-        let t = played * u128::from(self.in_rate) / u128::from(self.out_rate);
+        let t = played * u128::from(self.in_rate) * u128::from(self.speed.percent())
+            / (u128::from(self.out_rate) * 100);
         (base + SamplePos::try_from(t).unwrap_or(SamplePos::MAX)).min(self.len)
     }
 
@@ -375,6 +411,11 @@ struct Decoder<S> {
     /// Next timeline position to decode.
     pos: SamplePos,
     converter: Converter,
+    /// The time-stretcher while playing at another speed with the pitch
+    /// kept.
+    stretcher: Option<Stretcher>,
+    /// The device format, for rebuilding the converter.
+    out_format: OutputFormat,
     shared: Arc<Shared>,
     ring: rtrb::Producer<f32>,
     /// Converted samples not yet written because the ring was full.
@@ -385,7 +426,38 @@ struct Decoder<S> {
 }
 
 impl<S: PcmSource> Decoder<S> {
-    fn run(mut self, rx: &Receiver<Command>) {
+    /// Sets up the render stages for `speed`.
+    fn set_speed(&mut self, speed: Speed) {
+        let (rate, channels) = (self.source.sample_rate(), self.source.channels());
+        let out = self.out_format;
+        let (in_rate, out_rate) = if speed.is_normal() || speed.keep_pitch {
+            (rate, out.sample_rate)
+        } else {
+            // Varispeed: resample as if the source were `percent` faster.
+            // Integers, so the converter's ratio stays exact.
+            (
+                rate.saturating_mul(speed.percent()),
+                out.sample_rate.saturating_mul(100),
+            )
+        };
+        self.converter = Converter::new(in_rate, channels, out_rate, out.channels);
+        self.stretcher = (!speed.is_normal() && speed.keep_pitch)
+            .then(|| Stretcher::new(rate, channels, speed.percent()));
+    }
+
+    /// Runs decoded audio through the render stages into `pending`.
+    fn render(&mut self, pcm: &[f32]) {
+        match &mut self.stretcher {
+            Some(st) => {
+                let mut stretched = Vec::new();
+                st.push(pcm, &mut stretched);
+                self.converter.push(&stretched, &mut self.pending);
+            }
+            None => self.converter.push(pcm, &mut self.pending),
+        }
+    }
+
+    fn run(&mut self, rx: &Receiver<Command>) {
         let rate = self.source.sample_rate();
         let chunk = SamplePos::from((rate / CHUNK_SECONDS_DIV).max(1));
         let first_chunk = SamplePos::from((rate / FIRST_CHUNK_SECONDS_DIV).max(1));
@@ -403,14 +475,20 @@ impl<S: PcmSource> Decoder<S> {
             };
             match cmd {
                 Ok(Command::Stop) | Err(RecvTimeoutError::Disconnected) => return,
-                Ok(Command::Seek(t, timeline)) => {
+                Ok(Command::Seek(t, timeline, speed)) => {
                     if let Some(tl) = timeline {
                         self.timeline = tl;
+                    }
+                    if let Some(speed) = speed {
+                        self.set_speed(speed);
                     }
                     self.pos = t;
                     self.generation += 1;
                     self.pending.clear();
                     self.converter.reset();
+                    if let Some(st) = &mut self.stretcher {
+                        st.reset();
+                    }
                     self.shared
                         .flush_req
                         .store(self.generation, Ordering::Release);
@@ -429,7 +507,7 @@ impl<S: PcmSource> Decoder<S> {
                     next_chunk = chunk;
                     self.pos += range.end - range.start;
                     match self.source.read(range) {
-                        Ok(pcm) => self.converter.push(&pcm, &mut self.pending),
+                        Ok(pcm) => self.render(&pcm),
                         Err(e) => {
                             let mut err =
                                 self.shared.error.lock().unwrap_or_else(|e| e.into_inner());
@@ -438,10 +516,20 @@ impl<S: PcmSource> Decoder<S> {
                     }
                     self.write_pending();
                 }
-                None => self
-                    .shared
-                    .done
-                    .store(self.generation + 1, Ordering::Release),
+                None => {
+                    // The stretcher still holds the end of the last window.
+                    let mut rest = Vec::new();
+                    if let Some(st) = &mut self.stretcher {
+                        st.finish(&mut rest);
+                    }
+                    if rest.is_empty() {
+                        self.shared
+                            .done
+                            .store(self.generation + 1, Ordering::Release);
+                    } else {
+                        self.converter.push(&rest, &mut self.pending);
+                    }
+                }
             }
         }
     }
@@ -555,6 +643,64 @@ mod tests {
         assert!(engine.at_end());
         assert_eq!(engine.position(), 410);
         assert_eq!(engine.error(), None);
+    }
+
+    #[test]
+    fn varispeed_skips_frames_and_counts_the_position_at_speed() {
+        let (mut engine, mut out) = Engine::start(
+            Ramp {
+                rate: 1000,
+                total: 10_000,
+            },
+            Timeline::whole(10_000),
+            FMT,
+        );
+        engine.play();
+        pull(&mut out, 100);
+        assert_eq!(engine.position(), 100);
+        engine.set_speed(Speed::new(200, false));
+        assert_eq!(engine.position(), 100, "a speed change does not jump");
+        let fast = pull(&mut out, 100);
+        // Twice the rate with equal device and source rates is every
+        // second frame, exactly (after the fade-in of the restart).
+        let want: Vec<f32> = (110..300).step_by(2).map(|i| i as f32).collect();
+        assert_eq!(fast[5..], want[..]);
+        assert_eq!(engine.position(), 300);
+        // Back to normal: bit-exact again.
+        engine.set_speed(Speed::NORMAL);
+        let normal = pull(&mut out, 50);
+        let want: Vec<f32> = (305..350).map(|i| i as f32).collect();
+        assert_eq!(normal[5..], want[..]);
+        assert_eq!(engine.position(), 350);
+    }
+
+    #[test]
+    fn keeping_the_pitch_plays_the_timeline_in_less_time() {
+        let len = 4000;
+        let (mut engine, mut out) = Engine::start(
+            Ramp {
+                rate: 1000,
+                total: len,
+            },
+            Timeline::whole(len),
+            FMT,
+        );
+        engine.set_speed(Speed::new(200, true));
+        engine.play();
+        pull(&mut out, 1000);
+        assert_eq!(engine.position(), 2000, "1000 frames at 2x");
+        let mut rest = 0;
+        let mut buf = [0.0; 16];
+        let start = Instant::now();
+        while !engine.at_end() && start.elapsed() < Duration::from_secs(5) {
+            rest += out.fill(&mut buf);
+        }
+        assert!(engine.at_end());
+        assert_eq!(engine.position(), len);
+        // Half the length, give or take the stretcher's windows (15
+        // frames each at 1 kHz).
+        let total = 1000 + rest;
+        assert!((total as i64 - 2000).abs() <= 60, "{total} frames");
     }
 
     #[test]

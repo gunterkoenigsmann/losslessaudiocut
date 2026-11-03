@@ -104,7 +104,7 @@ graph TD
 | `lac-container` | One demuxer and one muxer per container: WAV, FLAC native, MP3 elementary stream, ADTS, MP4/M4A, Ogg. Builds the packet index, copies packets, writes trimming metadata and per-track tags, recomputes CRCs, seek tables and headers. **This is the lossless heart and is written by us.** | `crc`, maybe `mp4-atom` for box parsing |
 | `lac-decode` | Turns packets into interleaved `f32` PCM for playback, the waveform cache and analysis. Wraps FFmpeg's decoders (libavcodec only, not its demuxers): it is fed packets from *our* demuxer, so the packet index stays the single source of truth and waveform positions match cut positions exactly. Each container describes its stream as `DecodeSection`s (codec, extradata, packets, and the part of the decoder output that is timeline: encoder delay, pre-skip and padding removed); the tests check the result bit for bit against the `ffmpeg` tool *(implemented: whole-file decoding, and random access via `decode_range`: a fresh decoder starts a codec-specific pre-roll before the range and its output is placed by `DecodeSection::packet_ends`; bit-exact against the whole-file decode on all fixtures)*. `ffmpeg-next` links libavformat too, but its demuxers are never called. | `ffmpeg-next` |
 | `lac-peaks` | Per-packet min/max/RMS summary, multi-level pyramid, optional on-disk cache. Built progressively from decoded samples and queryable while it grows (`PeakBuilder`, `PeakSummary::columns`) *(implemented; stored and loaded as versioned bytes by `PeakSummary::to_bytes`/`from_bytes`, the cache directory itself is `lac_app::peak_cache`)*. | none |
-| `lac-playback` | Audio output, transport (play/pause/seek), scrubbing, position reporting for the cursor *(implemented: `Timeline` of kept ranges, `Engine` with decoder thread, `rtrb` ring buffer and generation-checked flushes, linear-interpolation rate and channel conversion, `Player` on the default `cpal` device; the decoder is supplied by `lac_app::playback` as a `PcmSource`, so this crate does not depend on FFmpeg. Grain-restart scrubbing: `scrub::Scrubber` plus 5 ms fades at every seek; speed is not implemented yet)*. | `cpal` (directly, `rodio` is not needed), `rtrb`; later `rubato` for varispeed |
+| `lac-playback` | Audio output, transport (play/pause/seek), scrubbing, position reporting for the cursor *(implemented: `Timeline` of kept ranges, `Engine` with decoder thread, `rtrb` ring buffer and generation-checked flushes, linear-interpolation rate and channel conversion, `Player` on the default `cpal` device; the decoder is supplied by `lac_app::playback` as a `PcmSource`, so this crate does not depend on FFmpeg. Grain-restart scrubbing: `scrub::Scrubber` plus 5 ms fades at every seek. Speed: `Speed` in percent steps, `stretch::Stretcher` (WSOLA) or varispeed through the converter's ratio)*. | `cpal` (directly, `rodio` is not needed), `rtrb`; later `rubato` for varispeed |
 | `lac-analysis` | Pluggable analyzers that turn PCM/summary data into labeled regions. | later: `webrtc-vad` or an ONNX model via `ort` |
 | `lac-app` | Use cases (open, select, cut, split, edit track tags, undo, export, analyse) and view models. Knows nothing about wxWidgets, so all UI logic is unit-testable *(implemented so far: `Source` open/export, `waveform`, `detail`, `peak_job`, `peak_cache`, `editor` (selection, cursor, and `Edits` = deleted ranges, split points and track names on the source timeline, undone by snapshots), `export_job` (one file, or one per track, from one opened source) and `playback`. The editor keeps split points on the source timeline rather than an `EditList` of tracks: deleting across a split then shortens both tracks without moving the split, and a track is derived as its span minus the deletions. Per-track tags (section 4) are not written yet; each track file keeps the source's tags)*. | none |
 | `lac-gui` | wxWidgets windows, waveform widget, menus, key bindings. Renders view models, forwards user events *(implemented: waveform window with zoom and scroll, fed by `lac_app::peak_job::PeakJob` and `lac_app::waveform::WaveformView`; below one packet per pixel column it draws from samples decoded in the background by `lac_app::detail::DetailLoader`, as exact per-pixel min/max and, below one sample per pixel, as a polyline; mouse selection, delete/restore with undo and export through `lac_app::editor::Editor` and `lac_app::export_job::ExportJob`; deleted parts stay on the source timeline, shaded)*. | `wxdragon` |
@@ -460,6 +460,19 @@ exact cut point:
   playback without a gap. The position counter always reports *timeline*
   positions, so the cursor stays correct at any speed.
 - Speed only affects listening. It is never applied to exported files.
+
+**Implemented so far:** speeds from 0.5x to 3x in steps (Ctrl+Up/Down,
+Ctrl+1 for normal, *Play > Keep pitch*). The time-stretcher is our own
+WSOLA (`lac_playback::stretch`, 30 ms Hann windows at 50 % overlap, the
+window moved by up to a quarter window to the best cross-correlation,
+searched coarse to fine); it needs no extra dependency. Varispeed needs no
+resampler crate either: the existing linear converter gets the ratio
+`in_rate * percent : out_rate * 100`, exact in integers. Instead of a
+`SetRate` command that changes speed without a gap, a speed change is a
+seek to the current position with the new speed (5 ms fade out and in):
+the ring then never holds audio of two speeds, and the position stays
+`base + played * in_rate * percent / (out_rate * 100)`, exactly. Normal
+speed bypasses both stages, so it stays bit-exact.
 
 Scrubbing works on the **timeline** (after edits), so you scrub through the
 result of your cuts. Two details make it feel right:
