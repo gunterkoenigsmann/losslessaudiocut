@@ -35,7 +35,10 @@ pub trait WriteSeek: Write + Seek {}
 impl<T: Write + Seek + ?Sized> WriteSeek for T {}
 
 /// The operations every supported container offers.
-pub trait Container {
+///
+/// `Send`, so that an opened file can move to a worker thread (decoding
+/// for playback, exporting); containers are plain parsed data.
+pub trait Container: Send {
     /// Short format name, e.g. `"FLAC"`.
     fn format_name(&self) -> &'static str;
     /// Human-readable details such as the sample encoding.

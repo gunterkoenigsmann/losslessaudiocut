@@ -14,6 +14,7 @@ path = "src/main.rs"
 lac-app.workspace = true
 lac-core.workspace = true
 lac-peaks.workspace = true
+lac-playback.workspace = true
 # Without default features: they pull in the Linux tray icon library
 # (appindicator) and image formats we do not use.
 wxdragon = { version = "0.9.24", default-features = false }

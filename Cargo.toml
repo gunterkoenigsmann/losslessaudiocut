@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/lac-core", "crates/lac-container", "crates/lac-app", "crates/lac-decode", "crates/lac-peaks", "crates/lac-cli", "crates/lac-gui"]
+members = ["crates/lac-core", "crates/lac-container", "crates/lac-app", "crates/lac-decode", "crates/lac-peaks", "crates/lac-cli", "crates/lac-gui", "crates/lac-playback"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,11 +14,14 @@ lac-container = { path = "crates/lac-container" }
 lac-app = { path = "crates/lac-app" }
 lac-peaks = { path = "crates/lac-peaks" }
 lac-decode = { path = "crates/lac-decode" }
+lac-playback = { path = "crates/lac-playback" }
 thiserror = "2.0.21"
 anyhow = "1"
 clap = { version = "4.6.7", features = ["derive"] }
 proptest = "1.12.0"
 directories = "6.0.0"
+cpal = "0.18.2"
+rtrb = "0.4.1"
 
 [workspace.lints.rust]
 missing_docs = "deny"

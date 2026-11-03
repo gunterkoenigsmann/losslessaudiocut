@@ -5,7 +5,8 @@ or split it into tracks, without ever re-encoding lossy audio.
 
 Status: early development. WAV, FLAC, Ogg (Vorbis, Opus, Speex) and MP3
 cutting work from the command line and in the wxWidgets GUI (waveform, zoom,
-select, delete, undo, export); playback, track splitting and AAC follow. See
+select, delete, undo, export, playback of the result); track splitting,
+scrubbing, playback speed and AAC follow. See
 [`docs/architecture.md`](docs/architecture.md) for the design.
 
 ## GUI
@@ -27,6 +28,11 @@ then says how much the cuts moved to packet boundaries. A `*` in the title
 marks edits that are not exported yet, and closing or opening another file
 asks before they are lost.
 
+Space plays and stops. Playback plays what the export will contain: the kept
+parts, with the deleted ones skipped, starting at the selection or at the
+cursor (a click without dragging puts it; Home moves it to the start).
+Clicking while playing jumps there; stopping returns to the cursor.
+
 ## Command line
 
 ```sh
@@ -46,8 +52,10 @@ pkg-config`. Only FFmpeg's decoders are used.
 
 The GUI uses [wxdragon](https://crates.io/crates/wxdragon), which downloads
 and builds wxWidgets itself (the first build takes several minutes). It needs
-CMake and a C++ compiler everywhere, and on Linux the GTK 3 development files
-(`apt install cmake ninja-build libgtk-3-dev`).
+CMake and a C++ compiler everywhere, and on Linux the GTK 3 development files.
+Playback uses [cpal](https://crates.io/crates/cpal), which on Linux needs the
+ALSA development files (`apt install cmake ninja-build libgtk-3-dev
+libasound2-dev`).
 
 ```sh
 cargo fmt --all -- --check

@@ -15,6 +15,8 @@
 //! - [`lac_app::editor::Editor`] holds the selection, the deleted parts and
 //!   the undo history;
 //! - [`lac_app::export_job::ExportJob`] writes the cut in the background;
+//! - [`lac_playback::Player`] plays the kept parts (`lac_app::playback`
+//!   connects it to the decoder);
 //! - [`lanes`] (here, also tested) turns that into pixel rows.
 //!
 //! What remains here is wiring: menus, events, a timer that polls the
@@ -37,11 +39,13 @@ use std::time::Duration;
 use lac_app::detail::{Detail, DetailLoader};
 use lac_app::editor::{Editor, describe_export};
 use lac_app::export_job::{ExportJob, default_output};
+use lac_app::format_samples;
 use lac_app::peak_cache::PeakCache;
 use lac_app::peak_job::{JobStatus, PeakJob};
 use lac_app::waveform::{DrawMode, WaveformView};
 use lac_core::SamplePos;
 use lac_peaks::PeakSummary;
+use lac_playback::{Player, Timeline};
 use wxdragon::prelude::*;
 
 /// Menu command ids (above wxWidgets' reserved range).
@@ -57,10 +61,14 @@ const ID_DELETE: Id = ID_HIGHEST + 9;
 const ID_RESTORE: Id = ID_HIGHEST + 10;
 const ID_SELECT_ALL: Id = ID_HIGHEST + 11;
 const ID_SELECT_NONE: Id = ID_HIGHEST + 12;
+const ID_PLAY: Id = ID_HIGHEST + 13;
+const ID_TO_START: Id = ID_HIGHEST + 14;
 
 /// Status bar fields: file and messages, then selection and edits.
 const FIELD_FILE: i32 = 0;
 const FIELD_EDIT: i32 = 1;
+/// Status bar field with the play or cursor position.
+const FIELD_TIME: i32 = 2;
 
 /// How often the timer looks for new waveform data, in milliseconds.
 const POLL_MS: i32 = 50;
@@ -92,6 +100,10 @@ const DELETED_RMS: Colour = Colour::rgb(0x8c, 0x78, 0x7c);
 const SELECTION: Colour = Colour::rgb(0x34, 0x40, 0x52);
 /// Left and right edge of the selection.
 const SELECTION_EDGE: Colour = Colour::rgb(0xe8, 0xc0, 0x50);
+/// The cursor where playback starts.
+const CURSOR: Colour = Colour::rgb(0xc8, 0xcc, 0xd0);
+/// The position being played.
+const PLAYHEAD: Colour = Colour::rgb(0x6c, 0xe0, 0x7c);
 
 /// An export in progress.
 struct RunningExport {
@@ -133,6 +145,12 @@ struct State {
     rate: Option<u32>,
     /// The export being written, if any (at most one at a time).
     export: Option<RunningExport>,
+    /// Plays the kept parts; opened on the first play, because opening
+    /// the audio device can fail and should only bother users who play.
+    player: Option<Player>,
+    /// The timeline `player` plays: the kept parts when it was last
+    /// synchronised with the editor.
+    timeline: Timeline,
 }
 
 impl State {
@@ -148,6 +166,114 @@ impl State {
         self.detail = None;
         self.editor = None;
         self.rate = None;
+        self.player = None;
+        self.timeline = Timeline::default();
+    }
+
+    /// The source position being played, while playing.
+    fn playhead(&self) -> Option<SamplePos> {
+        let p = self.player.as_ref().filter(|p| p.engine().is_playing())?;
+        Some(self.timeline.to_source(p.engine().position()))
+    }
+
+    /// Space: stops if playing, else plays the kept parts from the start of
+    /// the selection or the cursor (from the beginning if that is at the
+    /// end). Returns a message for the status bar.
+    fn toggle_play(&mut self) -> Option<String> {
+        if let Some(p) = self.player.as_ref().filter(|p| p.engine().is_playing()) {
+            p.engine().pause();
+            return None;
+        }
+        let (Some(path), Some(editor)) = (&self.path, &self.editor) else {
+            return Some("open a file first".to_string());
+        };
+        let tl = lac_app::playback::timeline(editor);
+        if tl.is_empty() {
+            return Some("everything is deleted; nothing to play".to_string());
+        }
+        let start = match tl.from_source(editor.play_from()) {
+            t if t >= tl.len() => 0,
+            t => t,
+        };
+        match &mut self.player {
+            Some(p) => p.engine_mut().set_timeline(tl.clone(), start),
+            None => match lac_app::playback::open_player(path, tl.clone()) {
+                Ok(mut p) => {
+                    p.engine_mut().seek(start);
+                    self.player = Some(p);
+                }
+                Err(e) => return Some(format!("cannot play: {e}")),
+            },
+        }
+        self.timeline = tl;
+        if let Some(p) = &self.player {
+            p.engine().play();
+        }
+        None
+    }
+
+    /// After an edit: lets playback continue on the new timeline at the
+    /// same source position (or where playback goes on after it, if that
+    /// was just deleted).
+    fn sync_timeline(&mut self) {
+        let (Some(p), Some(editor)) = (&mut self.player, &self.editor) else {
+            return;
+        };
+        let tl = lac_app::playback::timeline(editor);
+        if tl == self.timeline {
+            return;
+        }
+        let src = self.timeline.to_source(p.engine().position());
+        p.engine_mut().set_timeline(tl.clone(), tl.from_source(src));
+        self.timeline = tl;
+    }
+
+    /// While playing, a click moves playback to the cursor.
+    fn seek_to_cursor(&mut self) {
+        let (Some(p), Some(editor)) = (&mut self.player, &self.editor) else {
+            return;
+        };
+        if p.engine().is_playing() && editor.selection().is_none() {
+            p.engine_mut()
+                .seek(self.timeline.from_source(editor.cursor()));
+        }
+    }
+
+    /// Timer: stops at the end and keeps the playhead in view. Returns
+    /// whether to redraw.
+    fn poll_player(&mut self) -> bool {
+        let Some(p) = &self.player else { return false };
+        if !p.engine().is_playing() {
+            return false;
+        }
+        if p.engine().at_end() {
+            p.engine().pause();
+            return true;
+        }
+        if let (Some(pos), Some(v)) = (self.playhead(), &mut self.view)
+            && !v.visible().contains(&pos)
+        {
+            // Page along, playhead at the left edge.
+            v.scroll_to(pos);
+        }
+        true
+    }
+
+    /// The status bar text with the time: the play position on the
+    /// edited timeline while playing, else the cursor.
+    fn time_status(&self) -> String {
+        let Some(rate) = self.rate else {
+            return String::new();
+        };
+        match (&self.player, &self.editor) {
+            (Some(p), _) if p.engine().is_playing() => format!(
+                "▶ {} / {}",
+                format_samples(p.engine().position(), rate),
+                format_samples(self.timeline.len(), rate)
+            ),
+            (_, Some(e)) => format!("cursor {}", format_samples(e.cursor(), rate)),
+            _ => String::new(),
+        }
     }
 
     /// File name of the open file, for messages and the title.
@@ -294,8 +420,8 @@ fn main() {
             .with_title("losslessaudiocut")
             .with_size(Size::new(1000, 400))
             .build();
-        let status = frame.create_status_bar(2, 0, -1, "status");
-        status.set_status_widths(&[-1, -1]);
+        let status = frame.create_status_bar(3, 0, -1, "status");
+        status.set_status_widths(&[-4, -4, -2]);
         frame.set_menu_bar(menu_bar());
 
         let panel = Panel::builder(&frame).build();
@@ -348,10 +474,18 @@ fn main() {
         {
             let state = Rc::clone(&state);
             timer.on_tick(move |_| {
-                let (status, detail, export) = {
+                let (status, detail, export, playing) = {
                     let mut st = state.borrow_mut();
-                    (st.poll(), st.poll_detail(), st.poll_export())
+                    (
+                        st.poll(),
+                        st.poll_detail(),
+                        st.poll_export(),
+                        st.poll_player(),
+                    )
                 };
+                if playing {
+                    frame.set_status_text(&state.borrow().time_status(), FIELD_TIME);
+                }
                 if let Some(s) = &status {
                     frame.set_status_text(s, FIELD_FILE);
                 }
@@ -361,7 +495,7 @@ fn main() {
                 if status.is_some() || export.is_some() {
                     update_chrome(&frame, &state.borrow());
                 }
-                if status.is_some() || detail {
+                if status.is_some() || detail || playing {
                     panel.refresh(false, None);
                 }
             });
@@ -420,6 +554,18 @@ fn menu_bar() -> MenuBar {
         )
         .append_item(ID_SELECT_NONE, "Select &none\tEsc", "Clear the selection")
         .build();
+    let play = Menu::builder()
+        .append_item(
+            ID_PLAY,
+            "&Play/Stop\tSpace",
+            "Play the kept parts from the selection or the cursor, or stop",
+        )
+        .append_item(
+            ID_TO_START,
+            "Cursor to &start\tHome",
+            "Put the cursor at the beginning",
+        )
+        .build();
     let view = Menu::builder()
         .append_item(
             ID_ZOOM_IN,
@@ -432,6 +578,7 @@ fn menu_bar() -> MenuBar {
     MenuBar::builder()
         .append(file, "&File")
         .append(edit, "&Edit")
+        .append(play, "&Play")
         .append(view, "&View")
         .build()
 }
@@ -471,8 +618,31 @@ fn bind_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
         } else if id == ID_EXIT {
             f.close(false);
             return;
-        } else if let Some(msg) = edit(&mut state.borrow_mut(), id) {
-            if !msg.is_empty() {
+        } else if id == ID_PLAY {
+            let msg = state.borrow_mut().toggle_play();
+            if let Some(msg) = msg {
+                f.set_status_text(&msg, FIELD_FILE);
+            }
+        } else if id == ID_TO_START {
+            let mut st = state.borrow_mut();
+            if let Some(e) = &mut st.editor {
+                e.clear_selection();
+                e.set_cursor(0);
+            }
+            st.seek_to_cursor();
+            if let Some(v) = &mut st.view {
+                v.scroll_to(0);
+            }
+        } else if is_edit(id) {
+            // One borrow: the `if let` scrutinee's would last through the
+            // whole block.
+            let msg = {
+                let mut st = state.borrow_mut();
+                let msg = edit(&mut st, id);
+                st.sync_timeline();
+                msg
+            };
+            if let Some(msg) = msg.filter(|m| !m.is_empty()) {
                 f.set_status_text(msg, FIELD_FILE);
             }
         } else {
@@ -491,13 +661,18 @@ fn bind_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
     });
 }
 
+/// Whether `id` is an Edit menu command.
+fn is_edit(id: Id) -> bool {
+    matches!(
+        id,
+        ID_UNDO | ID_REDO | ID_DELETE | ID_RESTORE | ID_SELECT_ALL | ID_SELECT_NONE
+    )
+}
+
 /// Runs Edit menu command `id`. Returns `None` if `id` is not one, else a
 /// message for the status bar (empty if there is nothing to say).
 fn edit(st: &mut State, id: Id) -> Option<&'static str> {
-    if !matches!(
-        id,
-        ID_UNDO | ID_REDO | ID_DELETE | ID_RESTORE | ID_SELECT_ALL | ID_SELECT_NONE
-    ) {
+    if !is_edit(id) {
         return None;
     }
     let Some(e) = &mut st.editor else {
@@ -527,6 +702,7 @@ fn edit(st: &mut State, id: Id) -> Option<&'static str> {
 fn update_chrome(frame: &Frame, st: &State) {
     frame.set_title(&st.title());
     frame.set_status_text(&st.edit_status(), FIELD_EDIT);
+    frame.set_status_text(&st.time_status(), FIELD_TIME);
 }
 
 /// If the open file has edits that no export contains, asks whether to
@@ -642,30 +818,41 @@ fn mouse_event(e: &WindowEventData) -> Option<(&Event, f64)> {
     Some((ev, x))
 }
 
-/// Left button: drag to select, Shift+click to move the nearer edge. The
-/// view scrolls when the pointer leaves the window while dragging.
+/// Left button: drag to select, Shift+click to move the nearer edge, a
+/// click puts the cursor (and moves playback there). The view scrolls when
+/// the pointer leaves the window while dragging.
+///
+/// Each handler changes the state inside one mutable borrow and only then
+/// touches widgets: on GTK, setting a status text can paint at once, and
+/// the paint handler borrows the state too.
 fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
     let (p, f) = (*panel, *frame);
+    // After a change: status bar and waveform.
+    let show = move |state: &RefCell<State>| {
+        update_chrome(&f, &state.borrow());
+        p.refresh(false, None);
+    };
     {
         let state = Rc::clone(state);
         panel.on_mouse_left_down(move |e| {
             let Some((ev, x)) = mouse_event(&e) else {
                 return;
             };
-            let mut guard = state.borrow_mut();
-            let st = &mut *guard;
-            let (Some(v), Some(ed)) = (&st.view, &mut st.editor) else {
-                return;
-            };
-            let pos = v.x_to_sample(x);
-            if ev.shift_down() {
-                ed.begin_extend(pos);
-            } else {
-                ed.begin_drag(pos);
+            {
+                let mut guard = state.borrow_mut();
+                let st = &mut *guard;
+                let (Some(v), Some(ed)) = (&st.view, &mut st.editor) else {
+                    return;
+                };
+                let pos = v.x_to_sample(x);
+                if ev.shift_down() {
+                    ed.begin_extend(pos);
+                } else {
+                    ed.begin_drag(pos);
+                }
             }
             p.capture_mouse();
-            f.set_status_text(&st.edit_status(), FIELD_EDIT);
-            p.refresh(false, None);
+            show(&state);
         });
     }
     {
@@ -674,23 +861,24 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
             let Some((_, x)) = mouse_event(&e) else {
                 return;
             };
-            let mut guard = state.borrow_mut();
-            let st = &mut *guard;
-            let (Some(v), Some(ed)) = (&mut st.view, &mut st.editor) else {
-                return;
-            };
-            if !ed.dragging() {
-                return;
+            {
+                let mut guard = state.borrow_mut();
+                let st = &mut *guard;
+                let (Some(v), Some(ed)) = (&mut st.view, &mut st.editor) else {
+                    return;
+                };
+                if !ed.dragging() {
+                    return;
+                }
+                let width = f64::from(v.width());
+                if x < 0.0 {
+                    v.scroll_by(x);
+                } else if x > width {
+                    v.scroll_by(x - width);
+                }
+                ed.drag_to(v.x_to_sample(x.clamp(0.0, width)));
             }
-            let width = f64::from(v.width());
-            if x < 0.0 {
-                v.scroll_by(x);
-            } else if x > width {
-                v.scroll_by(x - width);
-            }
-            ed.drag_to(v.x_to_sample(x.clamp(0.0, width)));
-            f.set_status_text(&st.edit_status(), FIELD_EDIT);
-            p.refresh(false, None);
+            show(&state);
         });
     }
     {
@@ -702,19 +890,21 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
             if p.has_capture() {
                 p.release_mouse();
             }
-            let mut guard = state.borrow_mut();
-            let st = &mut *guard;
-            let (Some(v), Some(ed)) = (&st.view, &mut st.editor) else {
-                return;
-            };
-            if ed.dragging() {
-                // A click without movement ends with an empty range, i.e.
-                // no selection.
-                ed.drag_to(v.x_to_sample(x.clamp(0.0, f64::from(v.width()))));
-                ed.end_drag();
+            {
+                let mut guard = state.borrow_mut();
+                let st = &mut *guard;
+                let (Some(v), Some(ed)) = (&st.view, &mut st.editor) else {
+                    return;
+                };
+                if ed.dragging() {
+                    // A click without movement ends with an empty range,
+                    // i.e. no selection.
+                    ed.drag_to(v.x_to_sample(x.clamp(0.0, f64::from(v.width()))));
+                    ed.end_drag();
+                }
+                st.seek_to_cursor();
             }
-            f.set_status_text(&st.edit_status(), FIELD_EDIT);
-            p.refresh(false, None);
+            show(&state);
         });
     }
 }
@@ -824,15 +1014,20 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
                 }
             }
         }
-        // Selection edges on top, where they lie in view.
-        if let Some(sel) = editor.and_then(Editor::selection) {
-            dc.set_pen(SELECTION_EDGE, 1, PenStyle::Solid);
-            for pos in [sel.start, sel.end] {
-                let x = view.sample_to_x(pos).round();
-                if (0.0..f64::from(view.width())).contains(&x) {
-                    let x = x as i32;
-                    dc.draw_line(x, 0, x, size.height);
-                }
+        // Vertical markers on top: selection edges (or the cursor), then
+        // the playhead.
+        let mut marks = Vec::new();
+        match editor.and_then(Editor::selection) {
+            Some(sel) => marks.extend([(sel.start, SELECTION_EDGE), (sel.end, SELECTION_EDGE)]),
+            None => marks.extend(editor.map(|e| (e.cursor(), CURSOR))),
+        }
+        marks.extend(st.playhead().map(|pos| (pos, PLAYHEAD)));
+        for (pos, colour) in marks {
+            let x = view.sample_to_x(pos).round();
+            if (0.0..f64::from(view.width())).contains(&x) {
+                dc.set_pen(colour, 1, PenStyle::Solid);
+                let x = x as i32;
+                dc.draw_line(x, 0, x, size.height);
             }
         }
     });

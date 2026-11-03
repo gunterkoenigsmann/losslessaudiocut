@@ -26,6 +26,9 @@ pub struct Editor {
     /// Deleted ranges, normalised (sorted, disjoint, non-adjacent).
     deleted: Vec<Range<SamplePos>>,
     selection: Option<Range<SamplePos>>,
+    /// Where a click without dragging put the cursor; playback starts
+    /// here when nothing is selected.
+    cursor: SamplePos,
     /// Where the current mouse drag started.
     anchor: Option<SamplePos>,
     undo: Vec<Vec<Range<SamplePos>>>,
@@ -42,6 +45,7 @@ impl Editor {
             total,
             deleted: Vec::new(),
             selection: None,
+            cursor: 0,
             anchor: None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -76,10 +80,29 @@ impl Editor {
         self.selection = None;
     }
 
-    /// Mouse button pressed at `pos`: starts a new selection there.
+    /// Mouse button pressed at `pos`: starts a new selection there and
+    /// puts the cursor there.
     pub fn begin_drag(&mut self, pos: SamplePos) {
-        self.anchor = Some(pos.min(self.total));
+        let pos = pos.min(self.total);
+        self.anchor = Some(pos);
+        self.cursor = pos;
         self.selection = None;
+    }
+
+    /// The cursor position (source frames).
+    pub fn cursor(&self) -> SamplePos {
+        self.cursor
+    }
+
+    /// Moves the cursor, clamped to the recording.
+    pub fn set_cursor(&mut self, pos: SamplePos) {
+        self.cursor = pos.min(self.total);
+    }
+
+    /// Where playback starts: the start of the selection, else the
+    /// cursor.
+    pub fn play_from(&self) -> SamplePos {
+        self.selection.as_ref().map_or(self.cursor, |s| s.start)
     }
 
     /// Shift-click at `pos`: moves the nearer end of the selection there and
@@ -464,6 +487,23 @@ mod tests {
         e.begin_extend(320);
         e.drag_to(900);
         assert_eq!(e.selection(), Some(500..900));
+    }
+
+    #[test]
+    fn the_cursor_follows_clicks_and_playback_starts_at_the_selection() {
+        let mut e = Editor::new(1000);
+        assert_eq!((e.cursor(), e.play_from()), (0, 0));
+        e.begin_drag(400);
+        e.end_drag();
+        assert_eq!((e.cursor(), e.play_from()), (400, 400));
+        e.begin_drag(700);
+        e.drag_to(600);
+        e.end_drag();
+        assert_eq!(e.play_from(), 600, "selection start, not the press point");
+        e.clear_selection();
+        assert_eq!(e.play_from(), 700);
+        e.set_cursor(5000);
+        assert_eq!(e.cursor(), 1000, "clamped");
     }
 
     #[test]
