@@ -47,8 +47,10 @@ cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
-The GUI crate needs wxWidgets development files; if they are missing, use
-`--exclude lac-gui` locally and mention it in the PR.
+The GUI crate needs wxWidgets development files and `lac-decode` needs
+FFmpeg's (libavcodec, libavformat, libavutil; FFmpeg 5.1 or newer) plus
+libclang for bindgen. If they are missing, use `--exclude lac-gui` or
+`--exclude lac-decode` locally and mention it in the PR.
 
 ## Layering
 

@@ -241,6 +241,34 @@ impl FlacFile {
         CutCapabilities::PCM
     }
 
+    /// A single section of all frames, with STREAMINFO as extradata.
+    pub fn decode_sections<R: Read + Seek + ?Sized>(
+        &self,
+        _r: &mut R,
+    ) -> Result<Vec<crate::DecodeSection>> {
+        Ok(vec![crate::DecodeSection {
+            codec: crate::Codec::Flac,
+            sample_rate: self.stream_info.sample_rate,
+            channels: u16::from(self.stream_info.channels),
+            extradata: self.stream_info.to_bytes().to_vec(),
+            packets: self.index.packets().len(),
+            keep: 0..self.index.total_samples(),
+        }])
+    }
+
+    /// The bytes of frame `packet`, header and CRC included.
+    pub fn read_decode_packet<R: Read + Seek + ?Sized>(
+        &self,
+        r: &mut R,
+        section: usize,
+        packet: usize,
+    ) -> Result<Vec<u8>> {
+        if section != 0 {
+            return Err(crate::decode::no_section(section));
+        }
+        crate::decode::read_index_packet(&self.index, r, packet)
+    }
+
     /// Decodes the sample frames in `range`, one vector per channel.
     ///
     /// Used for tests and for previews; normal playback goes through

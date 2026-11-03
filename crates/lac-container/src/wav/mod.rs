@@ -231,6 +231,38 @@ impl WavFile {
         CutCapabilities::PCM
     }
 
+    /// A single section of PCM blocks, see [`crate::decode`].
+    pub fn decode_sections<R: Read + Seek + ?Sized>(
+        &self,
+        _r: &mut R,
+    ) -> Result<Vec<crate::DecodeSection>> {
+        Ok(vec![crate::DecodeSection {
+            codec: crate::Codec::Pcm {
+                encoding: self.encoding,
+                bits_per_sample: self.bits_per_sample,
+                block_align: self.block_align,
+            },
+            sample_rate: self.info().sample_rate,
+            channels: self.info().channels,
+            extradata: Vec::new(),
+            packets: self.index.packets().len(),
+            keep: 0..self.index.total_samples(),
+        }])
+    }
+
+    /// The bytes of PCM block `packet`.
+    pub fn read_decode_packet<R: Read + Seek + ?Sized>(
+        &self,
+        r: &mut R,
+        section: usize,
+        packet: usize,
+    ) -> Result<Vec<u8>> {
+        if section != 0 {
+            return Err(crate::decode::no_section(section));
+        }
+        crate::decode::read_index_packet(&self.index, r, packet)
+    }
+
     /// Reads the raw bytes of the sample frames in `range`.
     ///
     /// For PCM this *is* the decoded audio, which makes it the reference for

@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 4ea7d1eb8e6168a08f3017874ee1668faa088813dca457ecce5b49640639f4d6 # shrinks to which = 3, deletes = [(0.0634396123930368, 0.16568500788611507)]
+cc 6467248717f7b08c3ed163129880b1192eeaa42caf57d4d210f689fd8c51c474 # shrinks to which = 0, deletes = [(0.0005958525149526856, 0.02917334398547981)]

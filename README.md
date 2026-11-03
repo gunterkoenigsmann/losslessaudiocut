@@ -19,6 +19,11 @@ Times are seconds (`90.5`), `m:ss`, `h:mm:ss` or `@N` for sample frame N.
 
 ## Development
 
+Building needs the FFmpeg development files (FFmpeg 5.1 or newer: libavcodec,
+libavformat, libavutil) and libclang, e.g. `apt install libavcodec-dev
+libavformat-dev libavutil-dev clang pkg-config` or `brew install ffmpeg
+pkg-config`. Only FFmpeg's decoders are used.
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings

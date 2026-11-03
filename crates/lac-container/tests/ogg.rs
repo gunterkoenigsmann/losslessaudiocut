@@ -416,6 +416,22 @@ fn deletes_become_chained_streams() {
     }
 }
 
+/// Regression (found by `random_deletes_copy_packets`): a kept part of a
+/// single Vorbis packet becomes a two-packet chained stream (priming packet
+/// plus that one). With both on one page, which is then the first and the
+/// last audio page, libvorbisfile dropped the whole stream from the chain.
+#[test]
+fn one_packet_vorbis_part_survives_chaining() {
+    let name = "ogg_vorbis_stereo_44k.ogg";
+    let src = fixture(name);
+    let f = open(&src);
+    let p = delete(&f, &[(39, 1969)]);
+    assert_eq!(p[0].packets.len(), 1, "the first part is a single packet");
+    let out = write(&src, &f, &p);
+    assert_packets_copied(&src, &out, &p);
+    assert_decodes_like_source(name, &src, &out, &p);
+}
+
 /// Opus: a cut inside the source's pre-skip keeps exactly the audible part.
 #[test]
 fn opus_cut_near_start_respects_pre_skip() {
@@ -475,7 +491,12 @@ fn opus_sliver_inside_one_packet() {
     let path = temp_file(&format!("sliver-{name}"), &out);
     if let Some(d) = decode(CodecKind::Opus, &path) {
         let decoded = d.len() / (sample_bytes(CodecKind::Opus) * 2);
-        assert_eq!(decoded, 1 + (1_000 - 648), "{name}");
+        // FFmpeg 8 decodes the planned single sample; older versions play
+        // the packet from its start (the documented mistrim).
+        assert!(
+            decoded == 1 || decoded == 1 + (1_000 - 648),
+            "{name}: {decoded} samples"
+        );
     }
 }
 

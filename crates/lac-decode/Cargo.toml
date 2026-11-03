@@ -1,0 +1,23 @@
+[package]
+name = "lac-decode"
+description = "Decoding of losslessaudiocut's packets to PCM, using FFmpeg's libavcodec decoders only."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+lac-core.workspace = true
+lac-container.workspace = true
+thiserror.workspace = true
+ffmpeg-next = { version = "9.0.0", default-features = false, features = ["codec", "format"] }
+
+# The workspace forbids `unsafe`; this crate wraps FFmpeg's C API and is the
+# one place allowed to use it (AGENTS.md), module by module with
+# `#[allow(unsafe_code)]` and a `// SAFETY:` comment per block.
+[lints.rust]
+missing_docs = "deny"
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
