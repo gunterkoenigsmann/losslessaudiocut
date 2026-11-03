@@ -5,8 +5,8 @@ or split it into tracks, without ever re-encoding lossy audio.
 
 Status: early development. WAV, FLAC, Ogg (Vorbis, Opus, Speex) and MP3
 cutting work from the command line and in the wxWidgets GUI (waveform, zoom,
-select, delete, split into tracks, undo, export, playback of the result);
-per-track tags, scrubbing, playback speed and AAC follow. See
+select, delete, split into tracks, undo, export, playback of the result,
+scrubbing); per-track tags, playback speed and AAC follow. See
 [`docs/architecture.md`](docs/architecture.md) for the design.
 
 ## GUI
@@ -40,6 +40,11 @@ Space plays and stops. Playback plays what the export will contain: the kept
 parts, with the deleted ones skipped, starting at the selection or at the
 cursor (a click without dragging puts it; Home moves it to the start).
 Clicking while playing jumps there; stopping returns to the cursor.
+
+Dragging with the right mouse button scrubs: playback follows the pointer
+in short pieces of unaltered audio, so a word or a note can be found by ear.
+Released, playback goes on from there if it was running before; otherwise it
+stops and the cursor stays where the scrub ended.
 
 ## Command line
 
