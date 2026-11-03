@@ -32,6 +32,45 @@ jobs:
       - uses: actions/checkout@v6
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  # Short fuzzing run of every demuxer/muxer target (see fuzz/Cargo.toml):
+  # malformed files must give an error, never a panic, hang or OOM. The
+  # committed test fixtures are the seed corpus. A crash uploads the
+  # input that triggered it; turn that into a regression test.
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [open_any, wav, flac, ogg, mp3]
+    runs-on: ubuntu-latest
+    # 2 minutes of fuzzing plus a cold nightly build of lac-container.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      # -max_len keeps inputs small so each run is fast; the seeds are
+      # cut to that length, which still keeps their headers. -timeout
+      # turns a hang (a parser loop that never advances) into a failure.
+      - name: Fuzz
+        working-directory: fuzz
+        run: |
+          mkdir -p corpus/${{ matrix.target }}
+          cargo +nightly fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} \
+            ../crates/lac-container/tests/fixtures -- \
+            -max_total_time=120 -max_len=8192 -timeout=10 -rss_limit_mb=2048
+      - name: Upload crashing input
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: fuzz-${{ matrix.target }}-artifacts
+          path: fuzz/artifacts/
+
   test:
     name: test (${{ matrix.os }})
     strategy:
