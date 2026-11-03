@@ -5,8 +5,8 @@ or split it into tracks, without ever re-encoding lossy audio.
 
 Status: early development. WAV, FLAC, Ogg (Vorbis, Opus, Speex) and MP3
 cutting work from the command line and in the wxWidgets GUI (waveform, zoom,
-select, delete, undo, export, playback of the result); track splitting,
-scrubbing, playback speed and AAC follow. See
+select, delete, split into tracks, undo, export, playback of the result);
+per-track tags, scrubbing, playback speed and AAC follow. See
 [`docs/architecture.md`](docs/architecture.md) for the design.
 
 ## GUI
@@ -27,6 +27,14 @@ parts to a new file of the same format without re-encoding; the status bar
 then says how much the cuts moved to packet boundaries. A `*` in the title
 marks edits that are not exported yet, and closing or opening another file
 asks before they are lost.
+
+Ctrl+K starts a new track at the cursor (or the selection start), Ctrl+J
+joins the track under the cursor with the one before it, and F2 names it.
+Track boundaries show as dashed lines with the track number and name. With
+tracks, File > Export asks for a folder and writes one file per track,
+`<name>-01 <track name>.<ext>`, `<name>-02.<ext>`, …; a track that is
+deleted entirely gets no file. The files keep the source's tags for now;
+per-track titles and numbers in the tags come later (issue #24).
 
 Space plays and stops. Playback plays what the export will contain: the kept
 parts, with the deleted ones skipped, starting at the selection or at the
