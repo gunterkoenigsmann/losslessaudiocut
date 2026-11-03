@@ -1,0 +1,21 @@
+[package]
+name = "lac-gui"
+description = "Graphical user interface of losslessaudiocut (wxWidgets via wxdragon)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "losslessaudiocut"
+path = "src/main.rs"
+
+[dependencies]
+lac-app.workspace = true
+lac-peaks.workspace = true
+# Without default features: they pull in the Linux tray icon library
+# (appindicator) and image formats we do not use.
+wxdragon = { version = "0.9.24", default-features = false }
+
+[lints]
+workspace = true
