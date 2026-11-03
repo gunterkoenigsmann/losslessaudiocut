@@ -7,14 +7,15 @@
 //! new files by copying packets verbatim according to
 //! [`lac_core::CutPlan`]s. Lossy audio is never decoded or re-encoded here.
 //!
-//! Supported so far: [`wav`], [`flac`], [`ogg`] (Vorbis, Opus, Speex) and
-//! [`mp3`]. [`open`] detects the format
+//! Supported so far: [`wav`], [`flac`], [`ogg`] (Vorbis, Opus, Speex),
+//! [`mp3`] and [`mkv`] (Matroska/WebM with Opus). [`open`] detects the format
 //! from the file's content and returns it behind the common [`Container`]
 //! interface.
 
 mod bits;
 pub mod decode;
 pub mod flac;
+pub mod mkv;
 pub mod mp3;
 pub mod ogg;
 pub mod wav;
@@ -222,6 +223,50 @@ impl Container for mp3::Mp3File {
     }
 }
 
+impl Container for mkv::MkvFile {
+    fn format_name(&self) -> &'static str {
+        if self.doc_type() == "webm" {
+            "WebM"
+        } else {
+            "Matroska"
+        }
+    }
+    fn details(&self) -> String {
+        match self.other_tracks() {
+            0 => "Opus".into(),
+            n => format!("Opus, {n} other track(s) ignored"),
+        }
+    }
+    fn index(&self) -> &PacketIndex {
+        mkv::MkvFile::index(self)
+    }
+    fn capabilities(&self) -> CutCapabilities {
+        mkv::MkvFile::capabilities(self)
+    }
+    fn warnings(&self) -> &[String] {
+        mkv::MkvFile::warnings(self)
+    }
+    fn write_cut(
+        &self,
+        r: &mut dyn ReadSeek,
+        plans: &[CutPlan],
+        w: &mut dyn WriteSeek,
+    ) -> Result<()> {
+        mkv::MkvFile::write_cut(self, r, plans, w)
+    }
+    fn decode_sections(&self, r: &mut dyn ReadSeek) -> Result<Vec<DecodeSection>> {
+        mkv::MkvFile::decode_sections(self, r)
+    }
+    fn read_decode_packet(
+        &self,
+        r: &mut dyn ReadSeek,
+        section: usize,
+        packet: usize,
+    ) -> Result<Vec<u8>> {
+        mkv::MkvFile::read_decode_packet(self, r, section, packet)
+    }
+}
+
 /// Detects the container format from the first bytes of `r` and opens it.
 pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
     let mut head = [0u8; 12];
@@ -253,8 +298,12 @@ pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
     if head.starts_with(b"OggS") {
         return Ok(Box::new(ogg::OggFile::open(r)?));
     }
+    // RFC 8794 8: the EBML header ID.
+    if head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        return Ok(Box::new(mkv::MkvFile::open(r)?));
+    }
     Err(ContainerError::Unsupported(
-        "unknown file format (supported: WAV, FLAC, Ogg, MP3)".into(),
+        "unknown file format (supported: WAV, FLAC, Ogg, MP3, Matroska/WebM)".into(),
     ))
 }
 

@@ -85,7 +85,8 @@ const ZOOM_STEP: f64 = 1.25;
 const SCROLL_STEP: f64 = 40.0;
 
 /// File types offered by the open dialog.
-const WILDCARD: &str = "Audio files|*.mp3;*.ogg;*.oga;*.opus;*.spx;*.flac;*.wav|All files|*";
+const WILDCARD: &str =
+    "Audio files|*.mp3;*.ogg;*.oga;*.opus;*.spx;*.webm;*.mka;*.mkv;*.flac;*.wav|All files|*";
 
 /// Background of the waveform area.
 const BACKGROUND: Colour = Colour::rgb(0x1e, 0x22, 0x28);
