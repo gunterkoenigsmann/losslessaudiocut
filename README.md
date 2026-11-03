@@ -47,6 +47,11 @@ in short pieces of unaltered audio, so a word or a note can be found by ear.
 Released, playback goes on from there if it was running before; otherwise it
 stops and the cursor stays where the scrub ended.
 
+Dragging a selection with the left button scrubs its moving edge too, so a
+cut point can be placed by ear (a plain click stays silent). *Play > Scrub
+while selecting* switches that off; it and *Keep pitch* are remembered
+between runs.
+
 Ctrl+Up and Ctrl+Down play faster or slower (0.5× to 3×), Ctrl+1 returns to
 normal speed. By default the pitch stays the same, so speech stays
 intelligible when skimming through long recordings; with *Play > Keep pitch*
