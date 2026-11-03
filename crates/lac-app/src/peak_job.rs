@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use lac_core::AudioStreamInfo;
+use lac_core::{AudioStreamInfo, Tags};
 use lac_decode::{DecodeError, DecodeReport, Flow};
 use lac_peaks::PeakSummary;
 
@@ -50,6 +50,9 @@ pub struct JobUpdate {
     pub cached: bool,
     /// Sample rate and channels, `None` until the file is open.
     pub info: Option<AudioStreamInfo>,
+    /// The file's tags, `None` until the file is open. Shared, because
+    /// every poll copies the update and tags can hold pictures.
+    pub tags: Option<Arc<Tags>>,
 }
 
 /// A background thread building the waveform summary of one file.
@@ -79,6 +82,7 @@ impl PeakJob {
             status: JobStatus::Running,
             cached: false,
             info: None,
+            tags: None,
         }));
         let cancel = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -150,8 +154,9 @@ fn run(
         Ok(s) => s,
         Err(e) => return publish(shared, None, JobStatus::Failed(e.to_string())),
     };
-    // Becomes visible with the first publication below.
+    // Become visible with the first publication below.
     lock(shared).info = Some(source.info());
+    lock(shared).tags = Some(Arc::new(source.tags().clone()));
     if let Some((peaks, warnings)) = cache.and_then(|c| c.load(&source)) {
         let report = DecodeReport {
             frames: peaks.total_samples(),
@@ -215,6 +220,7 @@ mod tests {
         assert_eq!(peaks.channels(), 2);
         let info = u.info.expect("info");
         assert_eq!((info.sample_rate, info.channels), (44_100, 2));
+        assert!(u.tags.expect("tags").is_empty(), "the fixture has none");
     }
 
     #[test]

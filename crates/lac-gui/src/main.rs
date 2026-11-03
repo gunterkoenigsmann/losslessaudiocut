@@ -18,7 +18,10 @@
 //! - [`lac_playback::Player`] plays the kept parts (`lac_app::playback`
 //!   connects it to the decoder), and [`lac_playback::scrub::Scrubber`]
 //!   decides where it restarts while the user scrubs;
-//! - [`lanes`] (here, also tested) turns that into pixel rows.
+//! - [`lanes`] (here, also tested) turns that into pixel rows;
+//! - [`lac_app::track_list`] says what the track list under the waveform
+//!   shows and applies the user's tag edits ([`track_list`] here puts it
+//!   into a grid).
 //!
 //! What remains here is wiring: menus, events, a timer that polls the
 //! background jobs, and the paint handler.
@@ -30,6 +33,7 @@
 
 mod lanes;
 mod options;
+mod track_list;
 
 use std::cell::RefCell;
 use std::ops::Range;
@@ -45,7 +49,7 @@ use lac_app::format_samples;
 use lac_app::peak_cache::PeakCache;
 use lac_app::peak_job::{JobStatus, PeakJob};
 use lac_app::waveform::{DrawMode, WaveformView};
-use lac_core::SamplePos;
+use lac_core::{SamplePos, Tags};
 use lac_peaks::PeakSummary;
 use lac_playback::scrub::Scrubber;
 use lac_playback::{Player, Speed, Timeline};
@@ -75,6 +79,8 @@ const ID_SLOWER: Id = ID_HIGHEST + 19;
 const ID_NORMAL_SPEED: Id = ID_HIGHEST + 20;
 const ID_KEEP_PITCH: Id = ID_HIGHEST + 21;
 const ID_SCRUB_SELECTING: Id = ID_HIGHEST + 22;
+const ID_ALL_TRACKS: Id = ID_HIGHEST + 23;
+const ID_TRACK_LIST: Id = ID_HIGHEST + 24;
 
 /// Status bar fields: file and messages, then selection and edits.
 const FIELD_FILE: i32 = 0;
@@ -174,6 +180,10 @@ struct State {
     /// Whether the current left-button drag has tried to start a scrub
     /// (at most once per drag, so a failing audio device is reported once).
     drag_scrub_tried: bool,
+    /// The file's tags, once the peak job has opened it.
+    tags: Option<Arc<Tags>>,
+    /// The track list under the waveform.
+    grid: Option<Grid>,
 }
 
 /// A scrub: dragging with the right button plays short pieces of audio
@@ -206,6 +216,15 @@ impl State {
         self.player = None;
         self.timeline = Timeline::default();
         self.scrub = None;
+        self.tags = None;
+    }
+
+    /// The track list's rows, empty until the file is read.
+    fn track_rows(&self) -> Vec<lac_app::track_list::Row> {
+        match (&self.editor, &self.tags, self.rate) {
+            (Some(e), Some(t), Some(rate)) => lac_app::track_list::rows(e, t, rate),
+            _ => Vec::new(),
+        }
     }
 
     /// The source position being played, while playing.
@@ -518,6 +537,9 @@ impl State {
         if let Some(info) = u.info {
             self.rate = Some(info.sample_rate);
         }
+        if u.tags.is_some() {
+            self.tags = u.tags;
+        }
         if let Some(p) = u.peaks {
             if self.view.is_none() {
                 self.view = Some(WaveformView::new(p.total_samples(), self.width));
@@ -570,8 +592,11 @@ fn main() {
         // We paint every pixel ourselves; letting the system erase first
         // would flicker.
         panel.set_background_style(BackgroundStyle::Paint);
+        let grid = track_list::create(&frame);
+        grid.show(options.track_list);
         let sizer = BoxSizer::builder(Orientation::Vertical).build();
-        sizer.add(&panel, 1, SizerFlag::Expand, 0);
+        sizer.add(&panel, 2, SizerFlag::Expand, 0);
+        sizer.add(&grid, 1, SizerFlag::Expand, 0);
         frame.set_sizer(sizer, true);
 
         let cache = PeakCache::default_dir().map(PeakCache::new);
@@ -587,8 +612,10 @@ fn main() {
             cache,
             speed: Speed::new(100, options.keep_pitch),
             options,
+            grid: Some(grid),
             ..State::default()
         }));
+        bind_track_list(&grid, &frame, &panel, &state);
         bind_paint(&panel, &state);
         bind_mouse(&panel, &state);
         bind_select(&panel, &frame, &state);
@@ -706,6 +733,11 @@ fn menu_bar(options: Options) -> MenuBar {
             "Re&name track…\tF2",
             "Name the track under the cursor",
         )
+        .append_item(
+            ID_ALL_TRACKS,
+            "Use for all trac&ks\tCtrl+Shift+A",
+            "Give every track the value of the selected cell of the track list",
+        )
         .append_separator()
         .append_item(
             ID_SELECT_ALL,
@@ -756,6 +788,12 @@ fn menu_bar(options: Options) -> MenuBar {
         )
         .append_item(ID_ZOOM_OUT, "Zoom &out\tCtrl+-", "Show more time")
         .append_item(ID_ZOOM_FIT, "Zoom to &fit\tCtrl+0", "Show the whole file")
+        .append_separator()
+        .append_check_item(
+            ID_TRACK_LIST,
+            "&Track list\tCtrl+L",
+            "Show the tracks and their tags under the waveform",
+        )
         .build();
     let bar = MenuBar::builder()
         .append(file, "&File")
@@ -765,6 +803,7 @@ fn menu_bar(options: Options) -> MenuBar {
         .build();
     bar.check_item(ID_KEEP_PITCH, options.keep_pitch);
     bar.check_item(ID_SCRUB_SELECTING, options.scrub_while_selecting);
+    bar.check_item(ID_TRACK_LIST, options.track_list);
     bar
 }
 
@@ -793,6 +832,17 @@ fn bind_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
             export(&f, &state);
         } else if id == ID_RENAME {
             rename_track(&f, &state);
+        } else if id == ID_ALL_TRACKS {
+            use_for_all_tracks(&f, &state);
+        } else if id == ID_TRACK_LIST {
+            let mut st = state.borrow_mut();
+            let on = e.is_checked().unwrap_or(!st.options.track_list);
+            st.options.track_list = on;
+            st.options.save();
+            if let Some(g) = &st.grid {
+                g.show(on);
+            }
+            f.layout();
         } else if id == ID_CLEAR_CACHE {
             let cache = state.borrow().cache.clone();
             let msg = match cache.map(|c| c.clear()) {
@@ -927,6 +977,9 @@ fn update_chrome(frame: &Frame, st: &State) {
     frame.set_title(&st.title());
     frame.set_status_text(&st.edit_status(), FIELD_EDIT);
     frame.set_status_text(&st.time_status(), FIELD_TIME);
+    if let Some(g) = &st.grid {
+        track_list::refresh(g, &st.track_rows());
+    }
 }
 
 /// If the open file has edits that no export contains, asks whether to
@@ -1076,6 +1129,95 @@ fn rename_track(frame: &Frame, state: &Rc<RefCell<State>>) {
     let name = dialog.get_value().unwrap_or_default();
     if let Some(e) = &mut state.borrow_mut().editor {
         e.rename_track(index, &name);
+    }
+}
+
+/// Edits in the track list: a changed cell becomes a tag edit of its
+/// track, and selecting a cell puts the cursor at the start of its track.
+fn bind_track_list(grid: &Grid, frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
+    {
+        let (state, f, panel, g) = (Rc::clone(state), *frame, *panel, *grid);
+        grid.on_cell_changed(move |e| {
+            let (row, col) = (e.get_row(), e.get_col());
+            let text = g.get_cell_value(row, col);
+            let msg = {
+                let Ok(mut st) = state.try_borrow_mut() else {
+                    return;
+                };
+                let tags = st.tags.clone().unwrap_or_default();
+                let (Some(ed), Some(field), Ok(index)) =
+                    (&mut st.editor, track_list::field(col), usize::try_from(row))
+                else {
+                    return;
+                };
+                lac_app::track_list::edit(ed, &tags, index, field, &text, false)
+                    .err()
+                    .map(|e| e.to_string())
+            };
+            if let Some(m) = &msg {
+                f.set_status_text(m, FIELD_FILE);
+            }
+            // Puts the accepted value back, or the old one after an error.
+            update_chrome(&f, &state.borrow());
+            panel.refresh(false, None);
+        });
+    }
+    {
+        let (state, f, panel) = (Rc::clone(state), *frame, *panel);
+        grid.on_select_cell(move |e| {
+            // Refreshing the grid selects cells too; the state is borrowed
+            // then, and those are no user's choice anyway.
+            let Ok(mut st) = state.try_borrow_mut() else {
+                return;
+            };
+            if let Ok(index) = usize::try_from(e.get_row()) {
+                let start = st
+                    .editor
+                    .as_ref()
+                    .and_then(|ed| lac_app::track_list::track_start(ed, index));
+                if let (Some(start), Some(ed)) = (start, &mut st.editor)
+                    && ed.track_at(ed.play_from()) != index
+                {
+                    ed.clear_selection();
+                    ed.set_cursor(start);
+                    st.seek_to_cursor();
+                    if let Some(v) = &mut st.view
+                        && !v.visible().contains(&start)
+                    {
+                        v.scroll_to(start);
+                    }
+                    f.set_status_text(&st.time_status(), FIELD_TIME);
+                    f.set_status_text(&st.edit_status(), FIELD_EDIT);
+                    panel.refresh(false, None);
+                }
+            }
+            // Not vetoed, so the grid moves its cursor there.
+        });
+    }
+}
+
+/// Edit > Use for all tracks: gives every track the value of the track
+/// list's selected cell.
+fn use_for_all_tracks(frame: &Frame, state: &Rc<RefCell<State>>) {
+    let msg = {
+        let mut st = state.borrow_mut();
+        let Some(g) = st.grid else { return };
+        let (row, col) = (g.get_grid_cursor_row(), g.get_grid_cursor_col());
+        let tags = st.tags.clone().unwrap_or_default();
+        match (&mut st.editor, track_list::field(col), usize::try_from(row)) {
+            (None, _, _) => Some("open a file first".to_string()),
+            (Some(ed), Some(field), Ok(index)) => {
+                let text = g.get_cell_value(row, col);
+                match lac_app::track_list::edit(ed, &tags, index, field, &text, true) {
+                    Ok(_) => Some(format!("{field} of every track: {text}")),
+                    Err(e) => Some(e.to_string()),
+                }
+            }
+            _ => Some("select a tag in the track list first".to_string()),
+        }
+    };
+    if let Some(m) = msg {
+        frame.set_status_text(&m, FIELD_FILE);
     }
 }
 

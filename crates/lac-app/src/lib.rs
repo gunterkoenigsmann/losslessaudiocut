@@ -18,6 +18,7 @@
 //! - [`editor`]: selection, deletions and undo of one recording.
 //! - [`export_job`]: writing a cut in a background thread.
 //! - [`tag_edits`]: what the user changed in a track's tags.
+//! - [`track_list`]: the track list's view model (tags per track).
 //! - [`playback`]: playing the kept parts through the audio device.
 //! - [`peak_cache`]: the on-disk cache of waveform summaries.
 //! - [`analysis_job`]: suggesting deletable pauses and track starts
@@ -38,6 +39,7 @@ pub mod ranges;
 pub mod session;
 pub mod tag_edits;
 pub mod time;
+pub mod track_list;
 pub mod waveform;
 
 /// Returned by progress callbacks such as [`Source::analyze`] to go on or stop.
