@@ -208,8 +208,9 @@ impl CodecInfo {
     }
 }
 
-/// Duration of an Opus packet in 48 kHz samples (RFC 6716 3.1).
-fn opus_packet_samples(p: &[u8]) -> Result<u32, CodecError> {
+/// Duration of an Opus packet in 48 kHz samples (RFC 6716 3.1). Needs
+/// only the first two bytes (TOC and, for code 3, the frame count).
+pub fn opus_packet_samples(p: &[u8]) -> Result<u32, CodecError> {
     let Some(&toc) = p.first() else {
         return err("empty Opus packet");
     };

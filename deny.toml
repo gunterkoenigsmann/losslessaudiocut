@@ -1,0 +1,55 @@
+# cargo-deny configuration: checks every dependency for security
+# advisories, licenses incompatible with our GPL-3.0-or-later, and crates
+# from unknown sources. CI runs `cargo deny check`.
+# Reference: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+
+[graph]
+# Check the dependencies of every platform we ship on, not only the host
+# CI happens to run on (Windows and macOS pull in their own crates).
+all-features = true
+
+[advisories]
+# RustSec advisories. Vulnerabilities always fail; unmaintained crates
+# only fail when we depend on them directly, because we cannot replace a
+# transitive one ourselves.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Licenses that may be combined into a GPL-3.0-or-later program. Add to
+# this list only after checking compatibility; never to silence a crate.
+allow = [
+    "GPL-3.0-or-later",
+    "LGPL-2.1-or-later",
+    "MPL-2.0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "0BSD",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    # ffmpeg-next / ffmpeg-sys-next (the Rust bindings, not FFmpeg itself).
+    "WTFPL",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Several versions of one crate only cost build time, so they are
+# reported but do not fail the check.
+multiple-versions = "warn"
+# Not checked: cargo-deny counts our own versionless path dependencies
+# (lac-core = { path = ... }) as wildcards because the crates are not
+# marked `publish = false`, and `cargo publish` rejects real "*"
+# dependencies on crates.io anyway.
+wildcards = "allow"
+
+[sources]
+# Only crates.io; a git dependency has to be added here deliberately.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

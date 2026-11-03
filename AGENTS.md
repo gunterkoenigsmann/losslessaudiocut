@@ -48,6 +48,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+cargo deny check   # advisories, licenses, sources; see deny.toml
 ```
 
 The GUI crate needs CMake, a C++ compiler and on Linux GTK 3 development
@@ -107,9 +108,13 @@ lac-gui, lac-cli  ->  lac-app  ->  lac-analysis, lac-peaks, lac-playback
 - Where available, cross-check exported files with an independent decoder
   (`ffmpeg`, `flac --test`) so our demuxer and muxer cannot agree on a bug.
 - Every bug fix starts with a test that reproduces it.
+- Fuzzing: `fuzz/` holds cargo-fuzz targets for format detection and each
+  demuxer/muxer; CI runs each for two minutes. Locally (nightly toolchain):
+  `cd fuzz && cargo +nightly fuzz run <target> corpus/<target> ../crates/lac-container/tests/fixtures`.
+  A crash becomes a unit test with the minimized input as a byte literal.
 
 ## Adding a format
 
 Follow the `add-container-format` skill. In short: demuxer -> packet index ->
 `CutCapabilities` -> `CutPlanner` -> muxer -> fixtures -> equivalence tests ->
-update the per-format table in `docs/architecture.md`.
+fuzz target in `fuzz/` -> update the per-format table in `docs/architecture.md`.
