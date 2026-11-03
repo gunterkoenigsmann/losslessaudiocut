@@ -47,7 +47,7 @@ use lac_app::waveform::{DrawMode, WaveformView};
 use lac_core::SamplePos;
 use lac_peaks::PeakSummary;
 use lac_playback::scrub::Scrubber;
-use lac_playback::{Player, Timeline};
+use lac_playback::{Player, Speed, Timeline};
 use wxdragon::prelude::*;
 
 /// Menu command ids (above wxWidgets' reserved range).
@@ -68,6 +68,10 @@ const ID_TO_START: Id = ID_HIGHEST + 14;
 const ID_SPLIT: Id = ID_HIGHEST + 15;
 const ID_JOIN: Id = ID_HIGHEST + 16;
 const ID_RENAME: Id = ID_HIGHEST + 17;
+const ID_FASTER: Id = ID_HIGHEST + 18;
+const ID_SLOWER: Id = ID_HIGHEST + 19;
+const ID_NORMAL_SPEED: Id = ID_HIGHEST + 20;
+const ID_KEEP_PITCH: Id = ID_HIGHEST + 21;
 
 /// Status bar fields: file and messages, then selection and edits.
 const FIELD_FILE: i32 = 0;
@@ -160,6 +164,8 @@ struct State {
     timeline: Timeline,
     /// The scrub in progress while the right button is held.
     scrub: Option<Scrub>,
+    /// Playback speed; kept when another file is opened.
+    speed: Speed,
 }
 
 /// A scrub: dragging with the right button plays short pieces of audio
@@ -228,6 +234,7 @@ impl State {
             Some(p) => p.engine_mut().set_timeline(tl.clone(), start),
             None => match lac_app::playback::open_player(path, tl.clone()) {
                 Ok(mut p) => {
+                    p.engine_mut().set_speed(self.speed);
                     p.engine_mut().seek(start);
                     self.player = Some(p);
                 }
@@ -239,6 +246,21 @@ impl State {
             p.engine().play();
         }
         Ok(())
+    }
+
+    /// Changes the playback speed, also while playing. Returns a message
+    /// for the status bar.
+    fn set_speed(&mut self, speed: Speed) -> String {
+        self.speed = speed;
+        if let Some(p) = &mut self.player {
+            p.engine_mut().set_speed(speed);
+        }
+        let how = match (speed.is_normal(), speed.keep_pitch) {
+            (true, _) => "",
+            (false, true) => " (pitch kept)",
+            (false, false) => " (pitch follows the speed)",
+        };
+        format!("speed {}{how}", speed.label())
     }
 
     /// The playback position for a pointer at source position `src`:
@@ -371,13 +393,19 @@ impl State {
         let Some(rate) = self.rate else {
             return String::new();
         };
+        // The speed only when it is not normal.
+        let speed = if self.speed.is_normal() {
+            String::new()
+        } else {
+            format!("{} ", self.speed.label())
+        };
         match (&self.player, &self.editor) {
             (Some(p), _) if p.engine().is_playing() => format!(
-                "▶ {} / {}",
+                "▶ {speed}{} / {}",
                 format_samples(p.engine().position(), rate),
                 format_samples(self.timeline.len(), rate)
             ),
-            (_, Some(e)) => format!("cursor {}", format_samples(e.cursor(), rate)),
+            (_, Some(e)) => format!("{speed}cursor {}", format_samples(e.cursor(), rate)),
             _ => String::new(),
         }
     }
@@ -676,6 +704,23 @@ fn menu_bar() -> MenuBar {
             "Cursor to &start\tHome",
             "Put the cursor at the beginning",
         )
+        .append_separator()
+        .append_item(ID_FASTER, "&Faster\tCtrl+Up", "Play faster (up to 3×)")
+        .append_item(
+            ID_SLOWER,
+            "S&lower\tCtrl+Down",
+            "Play slower (down to 0.5×)",
+        )
+        .append_item(
+            ID_NORMAL_SPEED,
+            "&Normal speed\tCtrl+1",
+            "Play at normal speed",
+        )
+        .append_check_item(
+            ID_KEEP_PITCH,
+            "&Keep pitch",
+            "At other speeds keep the pitch; else it changes like a tape played faster",
+        )
         .build();
     let view = Menu::builder()
         .append_item(
@@ -686,12 +731,14 @@ fn menu_bar() -> MenuBar {
         .append_item(ID_ZOOM_OUT, "Zoom &out\tCtrl+-", "Show more time")
         .append_item(ID_ZOOM_FIT, "Zoom to &fit\tCtrl+0", "Show the whole file")
         .build();
-    MenuBar::builder()
+    let bar = MenuBar::builder()
         .append(file, "&File")
         .append(edit, "&Edit")
         .append(play, "&Play")
         .append(view, "&View")
-        .build()
+        .build();
+    bar.check_item(ID_KEEP_PITCH, Speed::NORMAL.keep_pitch);
+    bar
 }
 
 /// Menu commands.
@@ -736,6 +783,22 @@ fn bind_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
             if let Some(msg) = msg {
                 f.set_status_text(&msg, FIELD_FILE);
             }
+        } else if matches!(id, ID_FASTER | ID_SLOWER | ID_NORMAL_SPEED | ID_KEEP_PITCH) {
+            let msg = {
+                let mut st = state.borrow_mut();
+                let speed = match id {
+                    ID_FASTER => st.speed.faster(),
+                    ID_SLOWER => st.speed.slower(),
+                    ID_NORMAL_SPEED => Speed::new(100, st.speed.keep_pitch),
+                    // The menu has toggled the check mark already.
+                    _ => Speed::new(
+                        st.speed.percent(),
+                        e.is_checked().unwrap_or(!st.speed.keep_pitch),
+                    ),
+                };
+                st.set_speed(speed)
+            };
+            f.set_status_text(&msg, FIELD_FILE);
         } else if id == ID_TO_START {
             let mut st = state.borrow_mut();
             if let Some(e) = &mut st.editor {

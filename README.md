@@ -6,7 +6,8 @@ or split it into tracks, without ever re-encoding lossy audio.
 Status: early development. WAV, FLAC, Ogg (Vorbis, Opus, Speex), MP3 and
 Matroska/WebM (Opus) cutting work from the command line and in the
 wxWidgets GUI (waveform, zoom, select, delete, split into tracks, undo,
-export, playback of the result, scrubbing); per-track tags, playback speed and AAC follow. See
+export, playback of the result, scrubbing, playback speed); per-track tags
+and AAC follow. See
 [`docs/architecture.md`](docs/architecture.md) for the design.
 
 ## GUI
@@ -45,6 +46,12 @@ Dragging with the right mouse button scrubs: playback follows the pointer
 in short pieces of unaltered audio, so a word or a note can be found by ear.
 Released, playback goes on from there if it was running before; otherwise it
 stops and the cursor stays where the scrub ended.
+
+Ctrl+Up and Ctrl+Down play faster or slower (0.5× to 3×), Ctrl+1 returns to
+normal speed. By default the pitch stays the same, so speech stays
+intelligible when skimming through long recordings; with *Play > Keep pitch*
+switched off, the pitch follows the speed like a tape. The speed only
+affects listening, never the exported files.
 
 ## Command line
 
