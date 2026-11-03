@@ -521,9 +521,14 @@ features.
    above the floor and never above −45 dBFS, so that a recording without
    pauses keeps its quiet passages.
 2. **Classes**: quiet (at most the threshold), noise (up to 25 dB above it
-   with a smoothed flatness of at least 0.3), content (everything else).
-   Flatness is what finds a noisy pause, e.g. between songs of a live
-   recording, whose level alone looks like content.
+   and either flat, with a smoothed flatness of at least 0.3, or steady,
+   with a spectral flux below 1 dB per frame averaged over 1.5 s before or
+   after the frame), content (everything else). Flatness is what finds a
+   noisy pause, e.g. between songs of a live recording, whose level alone
+   looks like content; flux finds hum and fans, which are tonal but never
+   change. The flux of a frame is the mean change of the band spectrum
+   since the previous frame, weighted by band energy so that near-empty
+   bands do not count with their random fluctuation.
 3. **Regions**: pauses shorter than 0.5 s inside content are content,
    content shorter than 0.2 s between pauses (a click) is pause. Every
    remaining pause is a deletable region.
@@ -545,9 +550,6 @@ packets by the cut planner like any manual cut.
 - **Voice activity** (WebRTC VAD on 10/20/30 ms frames) to tell speech from
   other sounds, and **4 Hz modulation energy** (syllable rate) as a cheap
   speech cue.
-- **Stationarity** (spectral flux over a second): steady hum or a fan is
-  flat in time, content is not. Would catch loud tonal hum that flatness
-  misses.
 - **Chroma / MFCC novelty** instead of the plain band spectrum, for track
   changes within one genre.
 - A music/speech/noise classifier (small ONNX model via `ort`).
