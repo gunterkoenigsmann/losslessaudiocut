@@ -17,6 +17,7 @@
 //! - [`peak_job`]: building the waveform summary in a background thread.
 //! - [`editor`]: selection, deletions and undo of one recording.
 //! - [`export_job`]: writing a cut in a background thread.
+//! - [`tag_edits`]: what the user changed in a track's tags.
 //! - [`playback`]: playing the kept parts through the audio device.
 //! - [`peak_cache`]: the on-disk cache of waveform summaries.
 //! - [`analysis_job`]: suggesting deletable pauses and track starts
@@ -35,10 +36,12 @@ pub mod peak_job;
 pub mod playback;
 pub mod ranges;
 pub mod session;
+pub mod tag_edits;
 pub mod time;
 pub mod waveform;
 
 /// Returned by progress callbacks such as [`Source::analyze`] to go on or stop.
 pub use lac_decode::Flow;
 pub use session::{AppError, CutRequest, KeptRange, Source};
+pub use tag_edits::TagEdits;
 pub use time::{TimeError, TimeRange, TimeSpec, format_samples};

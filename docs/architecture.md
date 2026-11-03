@@ -105,7 +105,7 @@ graph TD
 | `lac-peaks` | Per-packet min/max/RMS summary, multi-level pyramid, optional on-disk cache. Built progressively from decoded samples and queryable while it grows (`PeakBuilder`, `PeakSummary::columns`) *(implemented; stored and loaded as versioned bytes by `PeakSummary::to_bytes`/`from_bytes`, the cache directory itself is `lac_app::peak_cache`)*. | none |
 | `lac-playback` | Audio output, transport (play/pause/seek), scrubbing, position reporting for the cursor *(implemented: `Timeline` of kept ranges, `Engine` with decoder thread, `rtrb` ring buffer and generation-checked flushes, linear-interpolation rate and channel conversion, `Player` on the default `cpal` device; the decoder is supplied by `lac_app::playback` as a `PcmSource`, so this crate does not depend on FFmpeg. Grain-restart scrubbing: `scrub::Scrubber` plus 5 ms fades at every seek. Speed: `Speed` in percent steps, `stretch::Stretcher` (WSOLA) or varispeed through the converter's ratio)*. | `cpal` (directly, `rodio` is not needed), `rtrb`; later `rubato` for varispeed |
 | `lac-analysis` | Suggestions where to cut: deletable pauses (quiet or only noise) and track starts, from per-frame level, spectral flatness and band spectrum (section 8). Fed decoded PCM like `lac-peaks`, so it does not depend on `lac-decode` and is tested on synthetic signals *(implemented: `FeatureExtractor`, `detect`; run from `lac_app::analysis_job::AnalysisJob` and `lac detect`)*. | `rustfft`; later: `webrtc-vad` or an ONNX model via `ort` |
-| `lac-app` | Use cases (open, select, cut, split, edit track tags, undo, export, analyse) and view models. Knows nothing about wxWidgets, so all UI logic is unit-testable *(implemented so far: `Source` open/export, `waveform`, `detail`, `peak_job`, `peak_cache`, `editor` (selection, cursor, and `Edits` = deleted ranges, split points and track names on the source timeline, undone by snapshots), `export_job` (one file, or one per track, from one opened source) and `playback`. The editor keeps split points on the source timeline rather than an `EditList` of tracks: deleting across a split then shortens both tracks without moving the split, and a track is derived as its span minus the deletions. Per-track tags (section 4) are not written yet; each track file keeps the source's tags)*. | none |
+| `lac-app` | Use cases (open, select, cut, split, edit track tags, undo, export, analyse) and view models. Knows nothing about wxWidgets, so all UI logic is unit-testable *(implemented so far: `Source` open/export, `waveform`, `detail`, `peak_job`, `peak_cache`, `editor` (selection, cursor, and `Edits` = deleted ranges, split points and track names on the source timeline, undone by snapshots), `export_job` (one file, or one per track, from one opened source) and `playback`. The editor keeps split points on the source timeline rather than an `EditList` of tracks: deleting across a split then shortens both tracks without moving the split, and a track is derived as its span minus the deletions. Per-track tags: `tag_edits::TagEdits` holds what the user changed per track; an export applies it to the source's tags, track files are numbered among the files written and get the track's name as title)*. | none |
 | `lac-gui` | wxWidgets windows, waveform widget, menus, key bindings. Renders view models, forwards user events *(implemented: waveform window with zoom and scroll, fed by `lac_app::peak_job::PeakJob` and `lac_app::waveform::WaveformView`; below one packet per pixel column it draws from samples decoded in the background by `lac_app::detail::DetailLoader`, as exact per-pixel min/max and, below one sample per pixel, as a polyline; mouse selection, delete/restore with undo and export through `lac_app::editor::Editor` and `lac_app::export_job::ExportJob`; deleted parts stay on the source timeline, shaded)*. | `wxdragon` |
 | `lac-cli` | Same use cases without a GUI: `lac cut in.mp3 --keep 0:10-3:45 -o out.mp3`. Doubles as the integration-test driver. | `clap` |
 
@@ -168,12 +168,16 @@ pub struct Tags {
     pub date: Option<String>,
     pub genre: Option<String>,
     pub comment: Option<String>,
-    /// Front cover image (MIME type, bytes); shared between tracks by `Arc`.
-    pub cover: Option<Arc<Picture>>,
     /// Anything else found in the source, kept as key/value pairs.
     pub extra: Vec<(String, String)>,
 }
 ```
+
+*(implemented as above, without a `cover` field: an export never changes the
+format, so each muxer copies the source's pictures and other binary tag data
+(FLAC `PICTURE` blocks, ID3 `APIC` and other frames, Ogg
+`METADATA_BLOCK_PICTURE` as an extra) itself. Editing covers is not planned
+yet.)*
 
 When a recording is split into tracks, every new track starts with the
 source's tags, gets `track_number`/`track_total` filled in automatically, and
@@ -211,21 +215,28 @@ pub struct CutPlan {
 | Ogg Vorbis | pages; timestamps from packet durations, granule positions ignored | new pages, copy headers, new serial, CRC; one chained stream per kept part, led by its predecessor packet as pre-roll | packet-granular, bit-exact including joins *(implemented)*; sample-exact via granule positions later | block size variable (64..8192) |
 | Ogg Opus | as above; pre-skip from `OpusHead`; end trim from the final granule when the granules before it are consistent | as Vorbis, with at least 80 ms pre-roll hidden by a rewritten `pre_skip`; the start trim is added to `pre_skip`, the end trim lowers the final granule (RFC 7845 4.4) | **sample-exact at every cut**, including joins, since each kept part is its own chained stream *(implemented)*; bit-exact after a short convergence window at joins | ffmpeg plays a kept part that starts and ends inside the same packet too long (see below) |
 | Speex | Ogg pages, Speex header | as Vorbis, but all kept parts of a link in one stream, no pre-roll | packet-granular (20 ms) *(implemented)*; bit-exact after convergence at joins | ffmpeg and speexdec do not handle chained Speex |
-| Matroska / WebM Opus | EBML elements, `SimpleBlock`/`BlockGroup` frames (all lacing modes), unknown-size Segments and Clusters of live recordings; timeline from packet durations, codec delay from `CodecDelay` (or the `OpusHead` pre-skip), end trim from `DiscardPadding` on the last block; only the first audio track | one Opus track in a fresh file of the same `DocType`: SeekHead, Info, Tracks, Clusters of verbatim packets, Cues; ≥ 80 ms pre-roll plus the start trim hidden by `CodecDelay` and `OpusHead` pre-skip, end trim by `DiscardPadding` | sample-exact at the file's start and end, packet-granular at joins (`trims_at_file_ends_only`) *(implemented)*; bit-exact after a convergence window at joins | Matroska cannot drop leading samples in the middle of a track (ffmpeg ignores negative `DiscardPadding`), so joins have neither pre-roll nor chaining; video and other tracks are dropped with a warning; tags not copied yet |
+| Matroska / WebM Opus | EBML elements, `SimpleBlock`/`BlockGroup` frames (all lacing modes), unknown-size Segments and Clusters of live recordings; timeline from packet durations, codec delay from `CodecDelay` (or the `OpusHead` pre-skip), end trim from `DiscardPadding` on the last block; only the first audio track | one Opus track in a fresh file of the same `DocType`: SeekHead, Info, Tracks, Clusters of verbatim packets, Cues; ≥ 80 ms pre-roll plus the start trim hidden by `CodecDelay` and `OpusHead` pre-skip, end trim by `DiscardPadding` | sample-exact at the file's start and end, packet-granular at joins (`trims_at_file_ends_only`) *(implemented)*; bit-exact after a convergence window at joins | Matroska cannot drop leading samples in the middle of a track (ffmpeg ignores negative `DiscardPadding`), so joins have neither pre-roll nor chaining; video and other tracks are dropped with a warning |
 
 ### Tags per container
 
 Tags live outside the audio packets, so rewriting them never touches audio.
 
+Every container reads its source's tags into `Tags` (`Container::tags`), and
+`Container::write_cut` takes the tags to write: `None` keeps the source's
+tags (verbatim where the format allows), `Some` writes the given ones. The
+shared tag formats live in `lac_container::tags` *(implemented for all
+containers with a muxer; round-trip tests, ffprobe cross-checks and a fuzz
+target)*.
+
 | Container | Tag format written | Notes |
 |---|---|---|
-| MP3 | ID3v2.4 at the start (`TIT2`, `TPE1`, `TALB`, `TPE2`, `TRCK`, `TDRC`, `TCON`, `COMM`, `APIC`, `TXXX` for extras) | no ID3v1 |
+| MP3 | ID3v2.4 at the start (`TIT2`, `TPE1`, `TALB`, `TPE2`, `TRCK`, `TDRC`, `TCON`, `COMM`, `TXXX` for extras); the source's other frames (`APIC`, ...) are copied, except those a cut makes wrong (`TLEN`, `MLLT`, ...) | reads ID3v2.2-2.4 and ID3v1; with new tags no ID3v1 is written, without them both source tags are copied verbatim |
 | AAC (ADTS) | ID3v2.4 at the start | not standardised, but read by common players |
 | AAC (M4A) | `moov/udta/meta/ilst` (`©nam`, `©ART`, `©alb`, `aART`, `trkn`, `©day`, `©gen`, `©cmt`, `covr`, `----` for extras) | |
-| FLAC | `VORBIS_COMMENT` and `PICTURE` metadata blocks | |
-| Ogg Vorbis / Opus / Speex | the comment header packet (`TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `TRACKNUMBER`, `TRACKTOTAL`, `DATE`, `GENRE`, `COMMENT`, `METADATA_BLOCK_PICTURE`) | the header is re-paged; audio packets stay verbatim |
-| Matroska / WebM | `Tags` element with `SimpleTag`s (`TITLE`, `ARTIST`, `ALBUM`, `PART_NUMBER`, `DATE_RELEASED`, `GENRE`, `COMMENT`) *(planned; source tags are not copied yet)* | |
-| WAV | `LIST/INFO` chunk plus an `id3 ` chunk | INFO has no album artist or cover |
+| FLAC | `VORBIS_COMMENT` (in place of the source's); `PICTURE` blocks copied | an ID3v2 tag in front of the stream is read, and written as `VORBIS_COMMENT` if there is none |
+| Ogg Vorbis / Opus / Speex | the comment header packet (`TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `TRACKNUMBER`, `TRACKTOTAL`, `DATE`, `GENRE`, `COMMENT`, extras such as `METADATA_BLOCK_PICTURE`) of every output stream | the header is re-paged, vendor string and Opus extension data kept; audio packets stay verbatim |
+| Matroska / WebM | one `Tag` without targets, with `SimpleTag`s (`TITLE`, `ARTIST`, `ALBUM`, `ALBUM_ARTIST`, `PART_NUMBER`, `TOTAL_PARTS`, `DATE_RELEASED`, `GENRE`, `COMMENT`), and the title as `Info/Title` | as ffmpeg writes global tags; tags aimed at a track UID (ffmpeg's `DURATION`) are not read |
+| WAV | `LIST/INFO` chunk (`INAM`, `IART`, `IPRD`, `ITRK`, `ICRD`, `IGNR`, `ICMT`) plus an `id3 ` chunk, both before `data` | INFO has no album artist or cover; ffprobe reads only INFO |
 
 Milestone order *(agreed)*: WAV, FLAC, Ogg (Vorbis, Opus, Speex), MP3, then the GUI, then AAC/M4A and ADTS.
 Matroska/WebM with Opus was added after the GUI on request (Opus as recorded by browsers, OBS and conferencing tools).

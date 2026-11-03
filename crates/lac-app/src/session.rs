@@ -248,11 +248,18 @@ impl Source {
         Ok(kept.into_iter().filter(|r| r.start < r.end).collect())
     }
 
+    /// The source's tags, as far as [`Tags`] can hold them.
+    pub fn tags(&self) -> &Tags {
+        self.container.tags()
+    }
+
     /// Writes the part of the source selected by `request` to `output`,
-    /// without re-encoding, and reports what each kept range became.
+    /// without re-encoding, and reports what each kept range became. The
+    /// file gets `tags` if given, else it keeps the source's tags.
     pub fn export(
         &mut self,
         request: &CutRequest,
+        tags: Option<&Tags>,
         output: impl AsRef<Path>,
     ) -> Result<Vec<KeptRange>, AppError> {
         let output = output.as_ref();
@@ -270,7 +277,7 @@ impl Source {
         let file = File::create(output).map_err(|e| write_err(e.into()))?;
         let mut w = BufWriter::new(file);
         self.container
-            .write_cut(&mut self.reader, &plans, &mut w)
+            .write_cut(&mut self.reader, &plans, tags, &mut w)
             .map_err(write_err)?;
         w.flush().map_err(|e| write_err(e.into()))?;
 

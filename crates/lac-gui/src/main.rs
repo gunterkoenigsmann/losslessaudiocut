@@ -992,11 +992,10 @@ fn export(frame: &Frame, state: &Rc<RefCell<State>>) {
         let Some(output) = dialog.get_path().map(PathBuf::from) else {
             return;
         };
-        let task = lac_app::export_job::ExportTask {
-            request: editor.cut_request(),
-            output,
-        };
-        (vec![task], Vec::new())
+        (
+            vec![lac_app::export_job::single_task(&editor, output)],
+            Vec::new(),
+        )
     } else {
         // One file per track: ask for the folder, the names follow from
         // the track numbers and names.

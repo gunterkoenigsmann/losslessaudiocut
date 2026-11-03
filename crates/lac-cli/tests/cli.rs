@@ -157,6 +157,53 @@ fn flac_is_detected_and_cut() {
 }
 
 #[test]
+fn tags_are_set_and_shown() {
+    let d = temp_dir("tags");
+    // TITLE=Fixture, ARTIST=losslessaudiocut.
+    let input = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../lac-container/tests/fixtures/flac_wasted_22k.flac");
+    let output = d.join("out.flac");
+    let out = lac()
+        .arg("cut")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .args([
+            "--keep",
+            "0.25..",
+            "--tag",
+            "title=Part 2",
+            "--tag",
+            "TRACK=2",
+        ])
+        .args(["--tag", "artist="])
+        .output()
+        .expect("run lac");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let info = lac().arg("info").arg(&output).output().expect("run lac");
+    let text = String::from_utf8_lossy(&info.stdout);
+    assert!(text.contains("title:       Part 2"), "{text}");
+    assert!(text.contains("track:       2"), "{text}");
+    assert!(!text.contains("artist:"), "{text}");
+
+    for bad in ["nonsense=1", "track=two", "title"] {
+        let out = lac()
+            .arg("cut")
+            .arg(&input)
+            .arg("-o")
+            .arg(d.join("bad.flac"))
+            .args(["--tag", bad])
+            .output()
+            .expect("run lac");
+        assert!(!out.status.success(), "{bad} is refused");
+    }
+}
+
+#[test]
 fn ogg_is_detected_and_cut() {
     let d = temp_dir("ogg");
     let input = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

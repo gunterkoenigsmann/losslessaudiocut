@@ -6,8 +6,8 @@ or split it into tracks, without ever re-encoding lossy audio.
 Status: early development. WAV, FLAC, Ogg (Vorbis, Opus, Speex), MP3 and
 Matroska/WebM (Opus) cutting work from the command line and in the
 wxWidgets GUI (waveform, zoom, select, delete, split into tracks, undo,
-export, playback of the result, scrubbing, playback speed); per-track tags
-and AAC follow. See
+export, playback of the result, scrubbing, playback speed, per-track tags);
+a track list for editing all tags and AAC follow. See
 [`docs/architecture.md`](docs/architecture.md) for the design.
 
 ## GUI
@@ -34,8 +34,9 @@ joins the track under the cursor with the one before it, and F2 names it.
 Track boundaries show as dashed lines with the track number and name. With
 tracks, File > Export asks for a folder and writes one file per track,
 `<name>-01 <track name>.<ext>`, `<name>-02.<ext>`, …; a track that is
-deleted entirely gets no file. The files keep the source's tags for now;
-per-track titles and numbers in the tags come later (issue #24).
+deleted entirely gets no file. Each file gets the source's tags with its
+track number (counting the files written), the number of tracks, and the
+track's name as title.
 
 Space plays and stops. Playback plays what the export will contain: the kept
 parts, with the deleted ones skipped, starting at the selection or at the
@@ -64,9 +65,13 @@ affects listening, never the exported files.
 cargo run --bin lac -- info recording.wav
 cargo run --bin lac -- cut recording.wav -o out.wav --delete 1:00..1:30 --delete 5:00..
 cargo run --bin lac -- cut recording.wav -o out.wav --keep 0:10..3:45
+cargo run --bin lac -- cut show.mp3 -o part2.mp3 --keep 30:00.. --tag title="Part 2" --tag track=2
 ```
 
 Times are seconds (`90.5`), `m:ss`, `h:mm:ss` or `@N` for sample frame N.
+`info` shows the tags; `--tag FIELD=VALUE` changes one in the output (title,
+artist, album, album_artist, track, tracktotal, date, genre, comment; an
+empty value removes it), the others are copied from the input.
 
 ## Development
 

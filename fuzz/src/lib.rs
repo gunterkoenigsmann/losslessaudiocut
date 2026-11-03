@@ -49,6 +49,9 @@ pub fn exercise(c: &dyn Container, data: &[u8]) {
             continue;
         };
         let mut out = Cursor::new(Vec::new());
-        let _ = c.write_cut(&mut r, &plans, &mut out);
+        let _ = c.write_cut(&mut r, &plans, None, &mut out);
+        // Rewriting the tags read from the file.
+        let mut out = Cursor::new(Vec::new());
+        let _ = c.write_cut(&mut r, &plans, Some(c.tags()), &mut out);
     }
 }
