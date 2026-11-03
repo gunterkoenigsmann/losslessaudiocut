@@ -1,0 +1,16 @@
+[package]
+name = "lac-peaks"
+description = "Waveform summary of losslessaudiocut: per-packet min/max/RMS and a pyramid for zoomed-out views."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+lac-core.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

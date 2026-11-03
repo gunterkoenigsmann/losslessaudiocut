@@ -10,7 +10,8 @@
 //! - [`time`]: parsing and formatting of user-facing times; the one place
 //!   where seconds become sample frames.
 //! - [`ranges`]: helpers on sample ranges.
-//! - [`session`]: opening a source file and exporting a cut of it.
+//! - [`session`]: opening a source file, building its waveform summary
+//!   and exporting a cut of it.
 //!
 //! See `docs/architecture.md` in the repository for how this crate fits in.
 

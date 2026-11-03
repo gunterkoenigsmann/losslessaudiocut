@@ -139,3 +139,37 @@ fn missing_and_unsupported_files_are_errors() {
     std::fs::write(&junk, b"definitely not audio").expect("write");
     assert!(matches!(Source::open(&junk), Err(AppError::Read { .. })));
 }
+
+/// The waveform summary of a real recording matches its decoded samples:
+/// per packet, min and max equal those of the decoded PCM.
+#[test]
+fn peaks_of_a_fixture_match_its_samples() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../lac-container/tests/fixtures/mp3_cbr128_44k.mp3");
+    let mut src = Source::open(&path).expect("open");
+    let mut calls = 0;
+    let (peaks, report) = src
+        .build_peaks(|_| {
+            calls += 1;
+            lac_decode::Flow::Continue
+        })
+        .expect("decode");
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert!(calls > 1, "progress is reported while decoding");
+    assert_eq!(peaks.packets_done(), src.index().packets().len());
+
+    // Independent decode of the same file.
+    let mut r = std::io::BufReader::new(std::fs::File::open(&path).expect("file"));
+    let c = lac_container::open(&mut r).expect("container");
+    let (pcm, _) = lac_decode::decode_to_vec(c.as_ref(), &mut r).expect("pcm");
+    let ch = usize::from(src.info().channels);
+    for (k, p) in src.index().packets().iter().enumerate() {
+        for (c_i, peak) in peaks.packet(k).expect("done").iter().enumerate() {
+            let vals = p.sample_range().map(|i| pcm[i as usize * ch + c_i]);
+            let q = |x: f32| (x * 32767.0).round() as i16;
+            let (min, max) =
+                vals.fold((i16::MAX, i16::MIN), |(a, b), x| (a.min(q(x)), b.max(q(x))));
+            assert_eq!((peak.min, peak.max), (min, max), "packet {k} channel {c_i}");
+        }
+    }
+}

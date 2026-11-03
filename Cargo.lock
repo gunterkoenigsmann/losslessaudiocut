@@ -420,6 +420,8 @@ version = "0.1.0"
 dependencies = [
  "lac-container",
  "lac-core",
+ "lac-decode",
+ "lac-peaks",
  "thiserror",
 ]
 
@@ -459,6 +461,14 @@ dependencies = [
  "lac-container",
  "lac-core",
  "thiserror",
+]
+
+[[package]]
+name = "lac-peaks"
+version = "0.1.0"
+dependencies = [
+ "lac-core",
+ "proptest",
 ]
 
 [[package]]

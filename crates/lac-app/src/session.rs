@@ -160,6 +160,23 @@ impl Source {
         self.index().total_samples()
     }
 
+    /// Decodes the whole source once and builds its waveform summary.
+    ///
+    /// `progress` is called after every decoded chunk with the summary so
+    /// far (the GUI shows it while it grows); returning
+    /// [`lac_decode::Flow::Stop`] cancels, e.g. when the file is closed.
+    pub fn build_peaks(
+        &mut self,
+        mut progress: impl FnMut(&lac_peaks::PeakSummary) -> lac_decode::Flow,
+    ) -> Result<(lac_peaks::PeakSummary, lac_decode::DecodeReport), lac_decode::DecodeError> {
+        let mut builder = lac_peaks::PeakBuilder::new(self.container.index());
+        let report = lac_decode::decode_all(self.container.as_ref(), &mut self.reader, |chunk| {
+            builder.push(chunk);
+            progress(builder.summary())
+        })?;
+        Ok((builder.finish(), report))
+    }
+
     /// The ranges of the source that `request` keeps, in output order,
     /// without empty ones.
     pub fn kept_ranges(&self, request: &CutRequest) -> Result<Vec<Range<SamplePos>>, AppError> {
