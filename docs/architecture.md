@@ -103,7 +103,7 @@ graph TD
 | `lac-core` | Integer time base (`SamplePos: u64`), `PacketInfo`, `PacketIndex`, `EditList`, `CutCapabilities`, error types. Pure data, no I/O. | none |
 | `lac-container` | One demuxer and one muxer per container: WAV, FLAC native, MP3 elementary stream, ADTS, MP4/M4A, Ogg. Builds the packet index, copies packets, writes trimming metadata and per-track tags, recomputes CRCs, seek tables and headers. **This is the lossless heart and is written by us.** | `crc`, maybe `mp4-atom` for box parsing |
 | `lac-decode` | Turns packets into interleaved `f32` PCM for playback, the waveform cache and analysis. Wraps FFmpeg's decoders (libavcodec only, not its demuxers): it is fed packets from *our* demuxer, so the packet index stays the single source of truth and waveform positions match cut positions exactly. Each container describes its stream as `DecodeSection`s (codec, extradata, packets, and the part of the decoder output that is timeline: encoder delay, pre-skip and padding removed); the tests check the result bit for bit against the `ffmpeg` tool *(implemented: whole-file decoding, and random access via `decode_range`: a fresh decoder starts a codec-specific pre-roll before the range and its output is placed by `DecodeSection::packet_ends`; bit-exact against the whole-file decode on all fixtures)*. `ffmpeg-next` links libavformat too, but its demuxers are never called. | `ffmpeg-next` |
-| `lac-peaks` | Per-packet min/max/RMS summary, multi-level pyramid, optional on-disk cache. Built progressively from decoded samples and queryable while it grows (`PeakBuilder`, `PeakSummary::columns`) *(implemented; on-disk cache not yet)*. | none |
+| `lac-peaks` | Per-packet min/max/RMS summary, multi-level pyramid, optional on-disk cache. Built progressively from decoded samples and queryable while it grows (`PeakBuilder`, `PeakSummary::columns`) *(implemented; stored and loaded as versioned bytes by `PeakSummary::to_bytes`/`from_bytes`, the cache directory itself is `lac_app::peak_cache`)*. | none |
 | `lac-playback` | Audio output, transport (play/pause/seek), scrubbing, position reporting for the cursor. | `cpal` (directly, `rodio` is not needed), `rtrb`; later `rubato` for varispeed |
 | `lac-analysis` | Pluggable analyzers that turn PCM/summary data into labeled regions. | later: `webrtc-vad` or an ONNX model via `ort` |
 | `lac-app` | Use cases (open, select, cut, split, edit track tags, undo, export, analyse) and view models. Knows nothing about wxWidgets, so all UI logic is unit-testable. | none |
@@ -362,6 +362,13 @@ tools already treat as disposable:
   until the total is below a size limit (default 1 GB). Both limits are
   settings, and there is a "clear cache" menu entry.
 - The cache is purely an accelerator: deleting it at any time is safe.
+
+*Implemented* in `lac_app::peak_cache` (entries in a `peaks` subdirectory
+of the locations above), used by `PeakJob`; File → "Clear waveform cache" in
+the GUI. The key's content hash is 64-bit FNV-1a, which is stable across Rust
+versions; each entry stores its full key, so a hash collision is a miss.
+The two limits are constructor parameters for now; a settings dialog does not
+exist yet.
 
 ## 7. Playback
 

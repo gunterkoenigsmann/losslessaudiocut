@@ -20,6 +20,7 @@ use lac_decode::{DecodeError, DecodeReport, Flow};
 use lac_peaks::PeakSummary;
 
 use crate::Source;
+use crate::peak_cache::PeakCache;
 
 /// Where a [`PeakJob`] is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +44,9 @@ pub struct JobUpdate {
     pub peaks: Option<Arc<PeakSummary>>,
     /// Running, done or failed.
     pub status: JobStatus,
+    /// Whether the summary came from the [`PeakCache`] instead of being
+    /// decoded.
+    pub cached: bool,
 }
 
 /// A background thread building the waveform summary of one file.
@@ -56,18 +60,27 @@ pub struct PeakJob {
 impl PeakJob {
     /// Starts summarising `path`. Partial summaries are published at most
     /// every `min_interval` (they are copies, so this bounds the cost).
-    pub fn start(path: impl Into<PathBuf>, min_interval: Duration) -> Self {
+    ///
+    /// With a `cache`, a stored summary of the file is used if there is a
+    /// valid one; otherwise a completed build is stored there. Cache
+    /// problems never fail the job, they only cost decoding time.
+    pub fn start(
+        path: impl Into<PathBuf>,
+        min_interval: Duration,
+        cache: Option<PeakCache>,
+    ) -> Self {
         let path = path.into();
         let shared = Arc::new(Mutex::new(JobUpdate {
             generation: 0,
             peaks: None,
             status: JobStatus::Running,
+            cached: false,
         }));
         let cancel = Arc::new(AtomicBool::new(false));
         let thread = {
             let shared = Arc::clone(&shared);
             let cancel = Arc::clone(&cancel);
-            std::thread::spawn(move || run(&path, min_interval, &shared, &cancel))
+            std::thread::spawn(move || run(&path, min_interval, cache.as_ref(), &shared, &cancel))
         };
         PeakJob {
             shared,
@@ -125,6 +138,7 @@ fn publish(shared: &Mutex<JobUpdate>, peaks: Option<Arc<PeakSummary>>, status: J
 fn run(
     path: &std::path::Path,
     min_interval: Duration,
+    cache: Option<&PeakCache>,
     shared: &Mutex<JobUpdate>,
     cancel: &AtomicBool,
 ) {
@@ -132,6 +146,16 @@ fn run(
         Ok(s) => s,
         Err(e) => return publish(shared, None, JobStatus::Failed(e.to_string())),
     };
+    if let Some((peaks, warnings)) = cache.and_then(|c| c.load(&source)) {
+        let report = DecodeReport {
+            frames: peaks.total_samples(),
+            warnings,
+        };
+        // Set before publishing, so that no poller sees `Done` without it.
+        lock(shared).cached = true;
+        publish(shared, Some(Arc::new(peaks)), JobStatus::Done(report));
+        return;
+    }
     let mut last = Instant::now();
     let mut first = true;
     let result = source.build_peaks(|summary| {
@@ -148,7 +172,14 @@ fn run(
         Flow::Continue
     });
     match result {
-        Ok((peaks, report)) => publish(shared, Some(Arc::new(peaks)), JobStatus::Done(report)),
+        Ok((peaks, report)) => {
+            if let Some(c) = cache {
+                // A full disk or a read-only cache only means decoding
+                // again next time.
+                let _ = c.store(&source, &peaks, &report.warnings);
+            }
+            publish(shared, Some(Arc::new(peaks)), JobStatus::Done(report));
+        }
         // Cancelled: nobody is listening any more.
         Err(DecodeError::Stopped) => {}
         Err(e) => publish(shared, None, JobStatus::Failed(e.to_string())),
@@ -167,7 +198,7 @@ mod tests {
 
     #[test]
     fn summarises_a_whole_file() {
-        let job = PeakJob::start(fixture("flac_stereo16_44k.flac"), Duration::ZERO);
+        let job = PeakJob::start(fixture("flac_stereo16_44k.flac"), Duration::ZERO, None);
         let u = job.wait();
         let JobStatus::Done(report) = &u.status else {
             panic!("{:?}", u.status)
@@ -180,7 +211,7 @@ mod tests {
 
     #[test]
     fn partial_updates_grow_and_poll_skips_seen_generations() {
-        let job = PeakJob::start(fixture("mp3_cbr128_44k.mp3"), Duration::ZERO);
+        let job = PeakJob::start(fixture("mp3_cbr128_44k.mp3"), Duration::ZERO, None);
         let mut seen = None;
         let mut done_before = 0;
         loop {
@@ -204,8 +235,25 @@ mod tests {
     }
 
     #[test]
+    fn the_second_open_comes_from_the_cache() {
+        let dir = std::env::temp_dir().join(format!("lac-job-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("a.mp3");
+        std::fs::copy(fixture("mp3_vbr_44k.mp3"), &path).expect("copy");
+        let cache = PeakCache::new(dir.join("cache"));
+        let first = PeakJob::start(&path, Duration::ZERO, Some(cache.clone())).wait();
+        assert!(!first.cached);
+        let second = PeakJob::start(&path, Duration::ZERO, Some(cache)).wait();
+        assert!(second.cached);
+        assert!(matches!(second.status, JobStatus::Done(_)));
+        assert_eq!(second.peaks, first.peaks);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_missing_file_fails_with_a_message() {
-        let u = PeakJob::start("/nonexistent/x.flac", Duration::ZERO).wait();
+        let u = PeakJob::start("/nonexistent/x.flac", Duration::ZERO, None).wait();
         assert!(u.peaks.is_none());
         let JobStatus::Failed(msg) = u.status else {
             panic!("{:?}", u.status)
@@ -219,6 +267,7 @@ mod tests {
         drop(PeakJob::start(
             fixture("ogg_vorbis_stereo_44k.ogg"),
             Duration::ZERO,
+            None,
         ));
         assert!(t.elapsed() < Duration::from_secs(1));
     }

@@ -14,6 +14,10 @@
 //! The summary is built front to back from decoded samples
 //! ([`PeakBuilder::push`]) and can be queried while it grows, so the
 //! display fills in progressively. This crate does no decoding itself.
+//!
+//! A finished summary can be stored and loaded ([`PeakSummary::to_bytes`],
+//! [`PeakSummary::from_bytes`]) so that a recording is decoded only once;
+//! where the bytes live is up to the caller (`lac-app`'s peak cache).
 
 use std::ops::Range;
 
@@ -85,8 +89,23 @@ fn to_i16(x: f32) -> i16 {
     (x * 32767.0).round() as i16
 }
 
+/// Why stored summary bytes were rejected. Callers treat every variant the
+/// same way: rebuild the summary.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FormatError {
+    /// The bytes do not start with [`PeakSummary::MAGIC`].
+    #[error("not a stored waveform summary")]
+    Magic,
+    /// Written by another version of the format.
+    #[error("waveform summary format {0}, expected {expected}", expected = PeakSummary::FORMAT_VERSION)]
+    Version(u32),
+    /// Cut short, inconsistent or with trailing bytes.
+    #[error("damaged waveform summary: {0}")]
+    Damaged(&'static str),
+}
+
 /// The waveform summary of one source.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeakSummary {
     channels: usize,
     /// First sample of every packet, plus the total length at the end.
@@ -99,6 +118,130 @@ pub struct PeakSummary {
 }
 
 impl PeakSummary {
+    /// First bytes of [`PeakSummary::to_bytes`].
+    pub const MAGIC: [u8; 8] = *b"LACPEAKS";
+    /// Version of the byte layout; bumped on every change, and an old
+    /// version is never read (it is rebuilt instead).
+    pub const FORMAT_VERSION: u32 = 1;
+
+    /// Whether every packet is summarised and the pyramid is complete,
+    /// i.e. this came from [`PeakBuilder::finish`] after all samples.
+    pub fn is_complete(&self) -> bool {
+        self.packets_done() == self.packets() && self.levels_consistent()
+    }
+
+    /// Whether the summary was built for `index` (same packet layout), so
+    /// that a stored one may be used for it.
+    pub fn matches_index(&self, index: &PacketIndex) -> bool {
+        usize::from(index.info().channels).max(1) == self.channels
+            && self.packets() == index.packets().len()
+            && self.total_samples() == index.total_samples()
+            && index
+                .packets()
+                .iter()
+                .zip(&self.starts)
+                .all(|(p, &s)| p.first_sample == s)
+    }
+
+    /// The level sizes [`PeakBuilder::finish`] produces: each level has
+    /// ceil(n / FAN_OUT) entries of the n below, up to a single entry.
+    fn levels_consistent(&self) -> bool {
+        let c = self.channels;
+        let mut entries = self.packets();
+        for (k, level) in self.levels.iter().enumerate() {
+            if level.len() != entries * c {
+                return false;
+            }
+            let last = k + 1 == self.levels.len();
+            if last != (entries <= 1) {
+                return false;
+            }
+            entries = entries.div_ceil(FAN_OUT);
+        }
+        !self.levels.is_empty()
+    }
+
+    /// The summary as bytes (little-endian): [`PeakSummary::MAGIC`], format
+    /// version, channel count, packet starts plus total length, then every
+    /// level as its entry count and (min, max, rms) per channel and entry.
+    /// Meant for complete summaries; [`PeakSummary::from_bytes`] rejects
+    /// others.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(
+            32 + self.starts.len() * 8 + self.levels.iter().map(|l| 8 + l.len() * 6).sum::<usize>(),
+        );
+        out.extend(Self::MAGIC);
+        out.extend(Self::FORMAT_VERSION.to_le_bytes());
+        out.extend((self.channels as u32).to_le_bytes());
+        out.extend((self.starts.len() as u64).to_le_bytes());
+        for s in &self.starts {
+            out.extend(s.to_le_bytes());
+        }
+        out.extend((self.levels.len() as u32).to_le_bytes());
+        for level in &self.levels {
+            out.extend((level.len() as u64).to_le_bytes());
+            for p in level {
+                out.extend(p.min.to_le_bytes());
+                out.extend(p.max.to_le_bytes());
+                out.extend(p.rms.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// Reads bytes written by [`PeakSummary::to_bytes`]. Anything else
+    /// (another version, truncation, inconsistent sizes, an incomplete
+    /// summary) is an error and never a panic; the caller rebuilds then.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, FormatError> {
+        let mut r = Reader(bytes);
+        if r.take(8)? != Self::MAGIC {
+            return Err(FormatError::Magic);
+        }
+        let version = r.u32()?;
+        if version != Self::FORMAT_VERSION {
+            return Err(FormatError::Version(version));
+        }
+        let channels = r.u32()? as usize;
+        if channels == 0 {
+            return Err(FormatError::Damaged("no channels"));
+        }
+        let n_starts = r.len(8)?;
+        let starts = (0..n_starts)
+            .map(|_| r.u64())
+            .collect::<Result<Vec<_>, _>>()?;
+        // Packets are never empty (PacketIndex), so starts increase.
+        if starts.is_empty() || starts[0] != 0 || starts.windows(2).any(|w| w[0] >= w[1]) {
+            return Err(FormatError::Damaged("packet starts"));
+        }
+        let n_levels = r.u32()? as usize;
+        let mut levels = Vec::new();
+        for _ in 0..n_levels {
+            let n = r.len(6)?;
+            let level = (0..n)
+                .map(|_| {
+                    Ok(Peak {
+                        min: r.u16()? as i16,
+                        max: r.u16()? as i16,
+                        rms: r.u16()?,
+                    })
+                })
+                .collect::<Result<Vec<_>, FormatError>>()?;
+            levels.push(level);
+        }
+        if !r.0.is_empty() {
+            return Err(FormatError::Damaged("trailing bytes"));
+        }
+        let s = PeakSummary {
+            channels,
+            starts,
+            levels,
+        };
+        if !s.is_complete() {
+            return Err(FormatError::Damaged("level sizes"));
+        }
+        Ok(s)
+    }
+
     /// Number of channels.
     pub fn channels(&self) -> usize {
         self.channels
@@ -210,6 +353,55 @@ impl PeakSummary {
     /// Sample frames covered by the packets `p`.
     fn span_samples(&self, p: Range<usize>) -> SamplePos {
         self.starts[p.end] - self.starts[p.start]
+    }
+}
+
+/// Reads little-endian numbers from a byte slice, failing on truncation.
+struct Reader<'a>(&'a [u8]);
+
+impl Reader<'_> {
+    fn take(&mut self, n: usize) -> Result<&[u8], FormatError> {
+        if self.0.len() < n {
+            return Err(FormatError::Damaged("cut short"));
+        }
+        let (a, b) = self.0.split_at(n);
+        self.0 = b;
+        Ok(a)
+    }
+
+    fn u16(&mut self) -> Result<u16, FormatError> {
+        Ok(u16::from_le_bytes(
+            self.take(2)?
+                .try_into()
+                .map_err(|_| FormatError::Damaged("cut short"))?,
+        ))
+    }
+
+    fn u32(&mut self) -> Result<u32, FormatError> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?
+                .try_into()
+                .map_err(|_| FormatError::Damaged("cut short"))?,
+        ))
+    }
+
+    fn u64(&mut self) -> Result<u64, FormatError> {
+        Ok(u64::from_le_bytes(
+            self.take(8)?
+                .try_into()
+                .map_err(|_| FormatError::Damaged("cut short"))?,
+        ))
+    }
+
+    /// An element count followed by `count * elem_size` bytes; checked
+    /// against the bytes left so that a damaged count cannot make us
+    /// allocate gigabytes.
+    fn len(&mut self, elem_size: usize) -> Result<usize, FormatError> {
+        let n = usize::try_from(self.u64()?).map_err(|_| FormatError::Damaged("count"))?;
+        if n.checked_mul(elem_size).is_none_or(|b| b > self.0.len()) {
+            return Err(FormatError::Damaged("count"));
+        }
+        Ok(n)
     }
 }
 
@@ -462,7 +654,77 @@ mod tests {
         assert!(cols[2].is_none() && cols[3].is_none());
     }
 
+    /// A finished summary of `lengths` packets with `channels` channels.
+    fn finished(lengths: &[u32], channels: u16, seed: u64) -> (PacketIndex, PeakSummary) {
+        let idx = index(lengths, channels);
+        let mut b = PeakBuilder::new(&idx);
+        b.push(&samples(
+            idx.total_samples() as usize * usize::from(channels),
+            seed,
+        ));
+        (idx, b.finish())
+    }
+
+    #[test]
+    fn stored_bytes_are_rejected_when_damaged() {
+        let (_, s) = finished(&[100; 40], 2, 7);
+        let bytes = s.to_bytes();
+        assert_eq!(PeakSummary::from_bytes(&bytes).as_ref(), Ok(&s));
+        // Every truncation, and trailing bytes.
+        for n in 0..bytes.len() {
+            assert!(PeakSummary::from_bytes(&bytes[..n]).is_err(), "cut at {n}");
+        }
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert!(PeakSummary::from_bytes(&longer).is_err());
+        // Another version is rebuilt, not read.
+        let mut v2 = bytes.clone();
+        v2[8] = 2;
+        assert_eq!(PeakSummary::from_bytes(&v2), Err(FormatError::Version(2)));
+        assert_eq!(
+            PeakSummary::from_bytes(b"RIFFxxxxxxxx"),
+            Err(FormatError::Magic)
+        );
+        // A huge count must not allocate; it fails as damaged.
+        let mut huge = bytes.clone();
+        huge[16..24].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(PeakSummary::from_bytes(&huge).is_err());
+        // A partial summary is never stored as if complete.
+        let idx = index(&[100; 40], 2);
+        let mut b = PeakBuilder::new(&idx);
+        b.push(&samples(1000 * 2, 1));
+        assert!(!b.summary().is_complete());
+        assert!(PeakSummary::from_bytes(&b.summary().to_bytes()).is_err());
+    }
+
+    #[test]
+    fn matches_only_its_own_index() {
+        let (idx, s) = finished(&[10, 20, 30], 1, 3);
+        assert!(s.matches_index(&idx));
+        assert!(!s.matches_index(&index(&[10, 20, 31], 1)), "length");
+        assert!(!s.matches_index(&index(&[20, 10, 30], 1)), "layout");
+        assert!(!s.matches_index(&index(&[10, 20, 30], 2)), "channels");
+    }
+
     proptest! {
+        /// Stored and loaded summaries are identical, for any layout, and
+        /// flipping any single byte never panics.
+        #[test]
+        fn bytes_round_trip(
+            lengths in proptest::collection::vec(1u32..40, 1..400),
+            channels in 1u16..4,
+            seed in any::<u64>(),
+            flip in any::<prop::sample::Index>(),
+        ) {
+            let (_, s) = finished(&lengths, channels, seed);
+            prop_assert!(s.is_complete());
+            let bytes = s.to_bytes();
+            prop_assert_eq!(PeakSummary::from_bytes(&bytes), Ok(s));
+            let mut bad = bytes.clone();
+            bad[flip.index(bytes.len())] ^= 0x5a;
+            let _ = PeakSummary::from_bytes(&bad);
+        }
+
         /// Any packet range summarises like the samples themselves, for
         /// finished and for partial builds: min and max exactly, RMS
         /// within the quantisation of the stored values.
