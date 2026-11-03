@@ -7,8 +7,35 @@
 use std::ops::Range;
 use std::str::FromStr;
 
-use anyhow::{Result, bail};
 use lac_core::SamplePos;
+
+/// Errors from parsing or resolving user-typed times.
+///
+/// The messages are meant to be shown to the user as they are.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TimeError {
+    /// The text is not a valid time or range; the string says why.
+    #[error("{0}")]
+    Syntax(String),
+    /// The range ends before it starts.
+    #[error("range starts after it ends")]
+    Reversed,
+    /// The range extends past the end of the stream.
+    #[error("range ends at {end} but the file is only {total} long")]
+    PastEnd {
+        /// Formatted end of the requested range.
+        end: String,
+        /// Formatted length of the stream.
+        total: String,
+    },
+}
+
+/// Shorthand for returning a [`TimeError::Syntax`].
+macro_rules! syntax {
+    ($($arg:tt)*) => {
+        return Err(TimeError::Syntax(format!($($arg)*)))
+    };
+}
 
 /// A point in time as typed by the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,34 +65,38 @@ impl TimeSpec {
 }
 
 impl FromStr for TimeSpec {
-    type Err = anyhow::Error;
+    type Err = TimeError;
 
-    fn from_str(s: &str) -> Result<Self> {
+    fn from_str(s: &str) -> Result<Self, TimeError> {
         let s = s.trim();
         if let Some(n) = s.strip_prefix('@') {
-            return Ok(TimeSpec::Samples(n.parse()?));
+            return n
+                .parse()
+                .map(TimeSpec::Samples)
+                .map_err(|_| TimeError::Syntax(format!("invalid sample frame {s:?}")));
         }
         let (whole, frac) = s.split_once('.').unwrap_or((s, ""));
         if !frac.chars().all(|c| c.is_ascii_digit()) || frac.len() > 9 {
-            bail!("invalid fraction in time {s:?}");
+            syntax!("invalid fraction in time {s:?}");
         }
         // [[h:]m:]s, each part an unsigned integer.
         let parts: Vec<&str> = whole.split(':').collect();
         if parts.len() > 3 || parts.iter().any(|p| p.is_empty()) {
-            bail!("invalid time {s:?}; use seconds, m:ss, h:mm:ss or @samples");
+            syntax!("invalid time {s:?}; use seconds, m:ss, h:mm:ss or @samples");
         }
         let mut secs: u128 = 0;
         for (i, p) in parts.iter().enumerate() {
             let v: u128 = p
                 .parse()
-                .map_err(|_| anyhow::anyhow!("invalid time {s:?}"))?;
+                .map_err(|_| TimeError::Syntax(format!("invalid time {s:?}")))?;
             if i > 0 && v >= 60 {
-                bail!("minutes and seconds must be below 60 in {s:?}");
+                syntax!("minutes and seconds must be below 60 in {s:?}");
             }
             secs = secs * 60 + v;
         }
         let den = 10u128.pow(frac.len() as u32);
-        let frac_num: u128 = if frac.is_empty() { 0 } else { frac.parse()? };
+        // At most nine ASCII digits (checked above), so this cannot fail.
+        let frac_num: u128 = frac.parse().unwrap_or(0);
         Ok(TimeSpec::Seconds {
             num: secs * den + frac_num,
             den,
@@ -84,31 +115,30 @@ pub struct TimeRange {
 
 impl TimeRange {
     /// Resolves to sample frames for a stream of `total` frames at `rate`.
-    pub fn resolve(&self, rate: u32, total: SamplePos) -> Result<Range<SamplePos>> {
+    pub fn resolve(&self, rate: u32, total: SamplePos) -> Result<Range<SamplePos>, TimeError> {
         let start = self.start.map_or(0, |t| t.to_samples(rate));
         let end = self.end.map_or(total, |t| t.to_samples(rate));
         if start > end {
-            bail!("range starts after it ends");
+            return Err(TimeError::Reversed);
         }
         if end > total {
-            bail!(
-                "range ends at {} but the file is only {} long",
-                format_samples(end, rate),
-                format_samples(total, rate)
-            );
+            return Err(TimeError::PastEnd {
+                end: format_samples(end, rate),
+                total: format_samples(total, rate),
+            });
         }
         Ok(start..end)
     }
 }
 
 impl FromStr for TimeRange {
-    type Err = anyhow::Error;
+    type Err = TimeError;
 
-    fn from_str(s: &str) -> Result<Self> {
+    fn from_str(s: &str) -> Result<Self, TimeError> {
         let Some((a, b)) = s.split_once("..") else {
-            bail!("a range is written START..END, got {s:?}");
+            syntax!("a range is written START..END, got {s:?}");
         };
-        let opt = |x: &str| -> Result<Option<TimeSpec>> {
+        let opt = |x: &str| -> Result<Option<TimeSpec>, TimeError> {
             if x.trim().is_empty() {
                 Ok(None)
             } else {
