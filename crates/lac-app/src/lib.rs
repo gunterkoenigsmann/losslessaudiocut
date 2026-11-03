@@ -28,6 +28,8 @@
 //! - [`positions`]: the position bar (selection start, end, length and
 //!   play clock) and typing times into it.
 //! - [`ruler`]: ticks and labels of the time ruler under the waveform.
+//! - [`minimap`]: the whole recording in one strip, with the visible
+//!   part framed and draggable.
 //! - [`detail`]: decoded samples for a zoomed-in waveform, loaded in the
 //!   background with random access.
 //!
@@ -38,6 +40,7 @@ pub mod detail;
 pub mod editor;
 pub mod export_job;
 pub mod layout;
+pub mod minimap;
 pub mod peak_cache;
 pub mod peak_job;
 pub mod playback;

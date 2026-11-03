@@ -30,11 +30,19 @@ pub enum Pane {
     Positions,
     /// The tracks and their tags, editable.
     TrackList,
+    /// The whole recording, with the visible part framed (see
+    /// [`crate::minimap`]).
+    Minimap,
 }
 
 impl Pane {
     /// Every pane, in the order of the View menu.
-    pub const ALL: [Pane; 3] = [Pane::Toolbar, Pane::Positions, Pane::TrackList];
+    pub const ALL: [Pane; 4] = [
+        Pane::Toolbar,
+        Pane::Minimap,
+        Pane::Positions,
+        Pane::TrackList,
+    ];
 
     /// The pane's name in the stored layout. Never change one: a layout
     /// stored by an earlier version would lose the pane.
@@ -43,6 +51,7 @@ impl Pane {
             Pane::Toolbar => "toolbar",
             Pane::Positions => "positions",
             Pane::TrackList => "track_list",
+            Pane::Minimap => "minimap",
         }
     }
 
@@ -52,13 +61,14 @@ impl Pane {
             Pane::Toolbar => "Toolbar",
             Pane::Positions => "Selection and clock",
             Pane::TrackList => "Track list",
+            Pane::Minimap => "Minimap",
         }
     }
 
     /// Whether the pane is shown when there is no stored layout.
     pub fn shown_by_default(self) -> bool {
         match self {
-            Pane::Toolbar | Pane::Positions | Pane::TrackList => true,
+            Pane::Toolbar | Pane::Positions | Pane::TrackList | Pane::Minimap => true,
         }
     }
 
@@ -220,7 +230,7 @@ mod tests {
     fn names_are_unique_and_stable() {
         // Stored layouts refer to these; renaming one loses the pane.
         let names: Vec<&str> = Pane::ALL.iter().map(|p| p.name()).collect();
-        assert_eq!(names, ["toolbar", "positions", "track_list"]);
+        assert_eq!(names, ["toolbar", "minimap", "positions", "track_list"]);
         for p in Pane::ALL {
             assert_eq!(Pane::from_name(p.name()), Some(p));
         }
@@ -256,8 +266,11 @@ mod tests {
     fn a_complete_layout_is_loaded_as_it_is() {
         let r = restore(Some(SAVED), |_| true);
         assert_eq!(r.perspective.as_deref(), Some(SAVED));
-        // Saved before the position bar existed.
-        assert_eq!(r.then_show, [(Pane::Positions, true)]);
+        // Saved before the minimap and the position bar existed.
+        assert_eq!(
+            r.then_show,
+            [(Pane::Minimap, true), (Pane::Positions, true)]
+        );
     }
 
     #[test]
@@ -267,7 +280,11 @@ mod tests {
         assert_eq!(r.perspective.as_deref(), Some(old));
         assert_eq!(
             r.then_show,
-            [(Pane::Positions, false), (Pane::TrackList, true)]
+            [
+                (Pane::Minimap, false),
+                (Pane::Positions, false),
+                (Pane::TrackList, true)
+            ]
         );
     }
 
