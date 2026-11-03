@@ -33,15 +33,18 @@ pub enum Pane {
     /// The whole recording, with the visible part framed (see
     /// [`crate::minimap`]).
     Minimap,
+    /// The messages of the status bar, kept (see [`crate::log`]).
+    Log,
 }
 
 impl Pane {
     /// Every pane, in the order of the View menu.
-    pub const ALL: [Pane; 4] = [
+    pub const ALL: [Pane; 5] = [
         Pane::Toolbar,
         Pane::Minimap,
         Pane::Positions,
         Pane::TrackList,
+        Pane::Log,
     ];
 
     /// The pane's name in the stored layout. Never change one: a layout
@@ -52,6 +55,7 @@ impl Pane {
             Pane::Positions => "positions",
             Pane::TrackList => "track_list",
             Pane::Minimap => "minimap",
+            Pane::Log => "log",
         }
     }
 
@@ -62,6 +66,7 @@ impl Pane {
             Pane::Positions => "Selection and clock",
             Pane::TrackList => "Track list",
             Pane::Minimap => "Minimap",
+            Pane::Log => "Log",
         }
     }
 
@@ -69,6 +74,8 @@ impl Pane {
     pub fn shown_by_default(self) -> bool {
         match self {
             Pane::Toolbar | Pane::Positions | Pane::TrackList | Pane::Minimap => true,
+            // Wanted now and then, e.g. to read a warning again.
+            Pane::Log => false,
         }
     }
 
@@ -230,7 +237,10 @@ mod tests {
     fn names_are_unique_and_stable() {
         // Stored layouts refer to these; renaming one loses the pane.
         let names: Vec<&str> = Pane::ALL.iter().map(|p| p.name()).collect();
-        assert_eq!(names, ["toolbar", "minimap", "positions", "track_list"]);
+        assert_eq!(
+            names,
+            ["toolbar", "minimap", "positions", "track_list", "log"]
+        );
         for p in Pane::ALL {
             assert_eq!(Pane::from_name(p.name()), Some(p));
         }
@@ -263,13 +273,17 @@ mod tests {
     }
 
     #[test]
-    fn a_complete_layout_is_loaded_as_it_is() {
+    fn a_stored_layout_is_loaded_as_it_is() {
         let r = restore(Some(SAVED), |_| true);
         assert_eq!(r.perspective.as_deref(), Some(SAVED));
-        // Saved before the minimap and the position bar existed.
+        // Saved before the minimap, the position bar and the log existed.
         assert_eq!(
             r.then_show,
-            [(Pane::Minimap, true), (Pane::Positions, true)]
+            [
+                (Pane::Minimap, true),
+                (Pane::Positions, true),
+                (Pane::Log, true)
+            ]
         );
     }
 
@@ -283,7 +297,8 @@ mod tests {
             [
                 (Pane::Minimap, false),
                 (Pane::Positions, false),
-                (Pane::TrackList, true)
+                (Pane::TrackList, true),
+                (Pane::Log, false),
             ]
         );
     }
