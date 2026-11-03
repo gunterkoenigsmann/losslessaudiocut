@@ -516,13 +516,15 @@ frame:
 |---|---|---|
 | level | RMS of the frame's samples, dBFS | quiet from loud |
 | spectral flatness | geometric / arithmetic mean of the power spectrum, 150 Hz to 6 kHz (Hann window of two hops) | noise (hiss, wind, murmur: about 0.56 for white noise) from voice and music (harmonics: below 0.1) |
-| band spectrum | power in 16 log-spaced bands, 80 Hz to 12 kHz, half-dB steps | one piece of music from the next |
+| band spectrum | power in 16 log-spaced bands, 80 Hz to 12 kHz, half-dB steps | one piece of music from the next by timbre |
+| chroma | share of the energy from 400 Hz to 5 kHz in each of the 12 pitch classes (octaves folded) | one piece from the next by key and harmony, when the instruments stay the same |
 
 The flatness band stays below every codec's low-pass, whose empty bins
 would otherwise make everything look tonal. "RMS of the FFT versus the
 amplitude" is constant by Parseval's theorem; how *evenly* the energy is
-spread is what flatness measures. A 3 h recording needs about 12 MB of
-features.
+spread is what flatness measures. Chroma starts at 400 Hz because below,
+one FFT bin is wider than a semitone; low notes count through their
+harmonics. A 3 h recording needs about 18 MB of features.
 
 ### Rules
 
@@ -555,7 +557,11 @@ features.
    6 dB (spread of the per-band difference plus half its mean, so loudness
    alone counts half), with both windows at least 90 % content (a simple
    form of Foote's novelty, for gapless recordings). Bands more than 20 dB
-   below the quiet threshold are not compared.
+   below the quiet threshold are not compared. Likewise where the mean
+   chroma of the two windows has a cosine distance of at least 0.25 (the
+   same melody on both sides: below 0.08; a fifth apart: 0.3; a third: 0.5).
+   With few partials the band spectrum reacts to a change of pitch as well,
+   so a key change is often found by both.
 
 All numbers are `DetectParams` fields in seconds or dB, so a settings
 dialog can expose them; re-running `detect` on kept `Features` takes
@@ -566,8 +572,8 @@ packets by the cut planner like any manual cut.
 
 - A **speech/music label** for content (WebRTC VAD's spectral model, or
   4 Hz modulation energy of the envelope), e.g. to colour the regions lane.
-- **Chroma / MFCC novelty** instead of the plain band spectrum, for track
-  changes within one genre.
+- **MFCC** instead of the plain band spectrum, so that timbre is measured
+  independently of pitch.
 - A music/speech/noise classifier (small ONNX model via `ort`).
 - Results as a separate lane below the waveform, where accepting a region
   deletes it.

@@ -62,7 +62,7 @@ enum Command {
     ///
     /// Pauses are stretches that are quiet or only noise (a flat
     /// spectrum: hiss, wind, murmur); a new track is suggested after each
-    /// long pause and where the timbre changes without a pause.
+    /// long pause and where the timbre or the key changes without a pause.
     Detect {
         /// The audio file.
         file: PathBuf,
@@ -75,6 +75,9 @@ enum Command {
         /// Do not suggest track starts at changes of timbre.
         #[arg(long)]
         no_timbre: bool,
+        /// Do not suggest track starts at changes of key or harmony.
+        #[arg(long)]
+        no_key: bool,
     },
 }
 
@@ -93,6 +96,7 @@ fn main() -> Result<()> {
             min_gap,
             min_pause,
             no_timbre,
+            no_key,
         } => detect(
             &file,
             &DetectParams {
@@ -102,6 +106,11 @@ fn main() -> Result<()> {
                     f32::INFINITY
                 } else {
                     DetectParams::default().min_novelty_db
+                },
+                min_key_distance: if no_key {
+                    f32::INFINITY
+                } else {
+                    DetectParams::default().min_key_distance
                 },
                 ..DetectParams::default()
             },
@@ -234,6 +243,9 @@ fn detect(path: &Path, params: &DetectParams) -> Result<()> {
             ),
             SplitReason::TimbreChange { novelty_db } => {
                 format!("timbre changes by {novelty_db:.1} dB")
+            }
+            SplitReason::KeyChange { distance } => {
+                format!("key or harmony changes (distance {distance:.2})")
             }
         };
         println!(
