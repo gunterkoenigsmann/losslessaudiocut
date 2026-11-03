@@ -35,6 +35,7 @@ mod icons;
 mod lanes;
 mod options;
 mod panes;
+mod position_bar;
 mod toolbar;
 mod track_list;
 
@@ -60,6 +61,7 @@ use lac_playback::scrub::Scrubber;
 use lac_playback::{Player, Speed, Timeline};
 use options::Options;
 use panes::Panes;
+use position_bar::PositionBar;
 use toolbar::Tool;
 use wxdragon::prelude::*;
 
@@ -261,6 +263,8 @@ struct State {
     grid: Option<Grid>,
     /// The dockable panes around the waveform.
     panes: Option<Panes>,
+    /// Selection fields and play clock.
+    position_bar: Option<PositionBar>,
 }
 
 /// A scrub: dragging with the right button plays short pieces of audio
@@ -524,6 +528,14 @@ impl State {
         }
     }
 
+    /// Fills the position bar.
+    fn show_positions(&self) {
+        let (Some(bar), Some(e), Some(rate)) = (&self.position_bar, &self.editor, self.rate) else {
+            return;
+        };
+        bar.show(&lac_app::positions::positions(e, rate, self.playhead()));
+    }
+
     /// File name of the open file, for messages and the title.
     fn name(&self) -> String {
         self.path
@@ -703,9 +715,19 @@ fn main() {
                 p.set_focus();
             })
         };
-        let panes = Panes::new(&frame, &panel, &tools, &grid);
+        let bar = {
+            let (state, f, p) = (Rc::clone(&state), frame, panel);
+            PositionBar::create(&frame, move |field, text| {
+                type_position(&f, &p, &state, field, &text);
+            })
+        };
+        let panes = Panes::new(&frame, &panel, &tools, &bar.panel(), &grid);
         panes.restore();
-        state.borrow_mut().panes = Some(panes);
+        {
+            let mut st = state.borrow_mut();
+            st.panes = Some(panes);
+            st.position_bar = Some(bar);
+        }
         bind_menu(&frame, &panel, &state);
         bind_close(&frame, &state);
 
@@ -742,7 +764,9 @@ fn main() {
                     )
                 };
                 if playing {
-                    frame.set_status_text(&state.borrow().time_status(), FIELD_TIME);
+                    let st = state.borrow();
+                    frame.set_status_text(&st.time_status(), FIELD_TIME);
+                    st.show_positions();
                 }
                 if let Some(s) = &status {
                     frame.set_status_text(s, FIELD_FILE);
@@ -1076,6 +1100,47 @@ fn update_chrome(frame: &Frame, st: &State) {
     if let Some(g) = &st.grid {
         track_list::refresh(g, &st.track_rows());
     }
+    st.show_positions();
+}
+
+/// Enter in a field of the position bar: sets the selection (or cursor)
+/// from the typed time, see [`lac_app::positions::apply`].
+fn type_position(
+    frame: &Frame,
+    panel: &Panel,
+    state: &Rc<RefCell<State>>,
+    field: lac_app::positions::Field,
+    text: &str,
+) {
+    let error = {
+        let mut st = state.borrow_mut();
+        let rate = st.rate;
+        let result = match (&mut st.editor, rate) {
+            (Some(e), Some(rate)) => lac_app::positions::apply(e, field, text, rate)
+                .err()
+                .map(|e| e.to_string()),
+            _ => Some("open a file first".to_string()),
+        };
+        if result.is_none() {
+            st.seek_to_cursor();
+            // Show where the selection now starts.
+            let from = st.editor.as_ref().map(Editor::play_from);
+            if let (Some(from), Some(v)) = (from, &mut st.view)
+                && !v.visible().contains(&from)
+            {
+                v.scroll_to(from);
+            }
+        }
+        result
+    };
+    if let Some(msg) = &error {
+        frame.set_status_text(msg, FIELD_FILE);
+    }
+    // Back to the waveform, whose keys (Space, Del) the field would eat;
+    // also lets the field show the accepted (or the old) value again.
+    panel.set_focus();
+    update_chrome(frame, &state.borrow());
+    panel.refresh(false, None);
 }
 
 /// If the open file has edits that no export contains, asks whether to
