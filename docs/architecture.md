@@ -529,6 +529,12 @@ features.
    change. The flux of a frame is the mean change of the band spectrum
    since the previous frame, weighted by band energy so that near-empty
    bands do not count with their random fluctuation.
+   **Voice activity**: a noise frame is content after all when it rises at
+   least 9 dB above the quietest frame within 1 s before it *and* within
+   1 s after it, i.e. a burst such as a whispered syllable. This is the
+   local signal-to-noise test of energy-based voice activity detectors;
+   needing a dip on both sides keeps a pause that just gets louder
+   (applause starting) a pause.
 3. **Regions**: pauses shorter than 0.5 s inside content are content,
    content shorter than 0.2 s between pauses (a click) is pause. Every
    remaining pause is a deletable region.
@@ -547,9 +553,8 @@ packets by the cut planner like any manual cut.
 
 ### Further features, not implemented yet
 
-- **Voice activity** (WebRTC VAD on 10/20/30 ms frames) to tell speech from
-  other sounds, and **4 Hz modulation energy** (syllable rate) as a cheap
-  speech cue.
+- A **speech/music label** for content (WebRTC VAD's spectral model, or
+  4 Hz modulation energy of the envelope), e.g. to colour the regions lane.
 - **Chroma / MFCC novelty** instead of the plain band spectrum, for track
   changes within one genre.
 - A music/speech/noise classifier (small ONNX model via `ort`).

@@ -11,7 +11,8 @@
 //!   least [`DetectParams::noise_flatness`]: hiss, wind, crowd murmur,
 //!   traffic) or steady (smoothed spectral flux below
 //!   [`DetectParams::steady_flux_db`]: mains hum, a fan, a fridge),
-//! - **content**: everything else (voice, music, and loud noise).
+//! - **content**: everything else (voice, music, and loud noise), and noise
+//!   frames that rise as a burst above their surroundings (see below).
 //!
 //! The quiet threshold adapts to the recording: it lies a fraction of the
 //! way from the noise floor (a low percentile of the frame levels) to the
@@ -24,6 +25,16 @@
 //! never changes, while voice and music change their spectrum several
 //! times a second: the *spectral flux* (how much the band spectrum moves
 //! from frame to frame, weighted by where the energy is) tells them apart.
+//!
+//! Some voice is noise-like too: whispers and unvoiced sounds have a flat
+//! spectrum. What gives them away is their rhythm: syllables come in
+//! bursts, about four per second, with dips in between. A noise frame is
+//! therefore content when its level is at least
+//! [`DetectParams::burst_rise_db`] above the lowest level within
+//! [`DetectParams::burst_window_secs`] before it *and* the lowest level
+//! within that time after it. This is the local signal-to-noise test of
+//! energy-based voice activity detectors; requiring a dip on both sides
+//! keeps a pause that simply gets louder (applause starting) a pause.
 //!
 //! ## Regions and splits
 //!
@@ -87,6 +98,13 @@ pub struct DetectParams {
     /// is low. Long enough to span several notes or syllables, so a held
     /// note does not count as steady.
     pub flux_smoothing_secs: f32,
+    /// How far (dB) a noise frame must rise above the quietest frame
+    /// before and after it to be a burst (a syllable), and thus content.
+    /// `f32::INFINITY` turns this off.
+    pub burst_rise_db: f32,
+    /// How far (seconds) to look before and after a frame for the dips
+    /// around a burst.
+    pub burst_window_secs: f32,
     /// Pauses shorter than this (seconds) count as content.
     pub min_pause_secs: f32,
     /// Content shorter than this (seconds) between pauses counts as pause.
@@ -118,6 +136,8 @@ impl Default for DetectParams {
             flatness_smoothing_secs: 0.25,
             steady_flux_db: 1.0,
             flux_smoothing_secs: 1.5,
+            burst_rise_db: 9.0,
+            burst_window_secs: 1.0,
             min_pause_secs: 0.5,
             min_content_secs: 0.2,
             min_track_gap_secs: 2.0,
@@ -250,7 +270,7 @@ pub fn classify(f: &Features, p: &DetectParams) -> (Vec<FrameClass>, Thresholds)
         &spectral_flux(f, quiet_db - INAUDIBLE_BELOW_QUIET_DB),
         f.frames_for_secs(p.flux_smoothing_secs),
     );
-    let classes = frames
+    let mut classes: Vec<FrameClass> = frames
         .iter()
         .zip(flat)
         .zip(flux)
@@ -266,7 +286,46 @@ pub fn classify(f: &Features, p: &DetectParams) -> (Vec<FrameClass>, Thresholds)
             }
         })
         .collect();
+    rescue_bursts(f, p, &mut classes);
     (classes, thresholds)
+}
+
+/// Turns noise frames that rise as a burst above the level before and
+/// after them into content, see the module documentation.
+fn rescue_bursts(f: &Features, p: &DetectParams, classes: &mut [FrameClass]) {
+    if !p.burst_rise_db.is_finite() {
+        return;
+    }
+    let levels: Vec<f32> = f.frames().iter().map(|x| x.level_db).collect();
+    let w = f.frames_for_secs(p.burst_window_secs);
+    let before = running_min(&levels, w);
+    let reversed: Vec<f32> = levels.iter().rev().copied().collect();
+    let mut after = running_min(&reversed, w);
+    after.reverse();
+    for (i, c) in classes.iter_mut().enumerate() {
+        if *c == FrameClass::Noise && levels[i] >= before[i].max(after[i]) + p.burst_rise_db {
+            *c = FrameClass::Content;
+        }
+    }
+}
+
+/// For every index the minimum of the `len` values ending there (fewer at
+/// the start). O(n) with a monotonic queue.
+fn running_min(v: &[f32], len: usize) -> Vec<f32> {
+    let mut q: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    let mut out = Vec::with_capacity(v.len());
+    for (i, &x) in v.iter().enumerate() {
+        while q.back().is_some_and(|&j| v[j] >= x) {
+            q.pop_back();
+        }
+        q.push_back(i);
+        while q.front().is_some_and(|&j| j + len <= i) {
+            q.pop_front();
+        }
+        // The queue holds `i` at least, so it is never empty here.
+        out.push(q.front().map_or(x, |&j| v[j]));
+    }
+    out
 }
 
 /// Spectral flux per frame: the mean absolute change of the band spectrum
@@ -801,6 +860,58 @@ mod tests {
     fn one_sided_min_average_takes_the_steadier_side() {
         let v = one_sided_min_average(&[4.0, 4.0, 0.0, 0.0, 4.0], 2);
         assert_eq!(v, vec![4.0, 2.0, 0.0, 0.0, 2.0]);
+    }
+
+    #[test]
+    fn running_min_looks_back_len_values() {
+        let v = running_min(&[3.0, 1.0, 4.0, 1.5, 5.0, 9.0, 2.0], 3);
+        assert_eq!(v, vec![3.0, 1.0, 1.0, 1.0, 1.5, 1.5, 2.0]);
+    }
+
+    /// Whispering: flat bursts of 0.25 s, 15 dB above the hiss between
+    /// them, four per second.
+    fn whisper(n: usize) -> Vec<f32> {
+        let syllable = (0.25 * RATE as f32) as usize;
+        let period = (0.4 * RATE as f32) as usize;
+        noise(n, 1.0, 21)
+            .into_iter()
+            .enumerate()
+            .map(|(i, x)| x * if i % period < syllable { 0.06 } else { 0.011 })
+            .collect()
+    }
+
+    #[test]
+    fn whispers_are_content() {
+        let a = music(220.0);
+        let s = recording(&[(4.0, &a), (4.0, &whisper), (4.0, &a)]);
+        let d = detect(&analyse(&s), &DetectParams::default());
+        assert!(d.regions.is_empty(), "{:?} {:?}", d.thresholds, d.regions);
+
+        // Without the burst rule, the whisper is (flat) noise.
+        let p = DetectParams {
+            burst_rise_db: f32::INFINITY,
+            ..DetectParams::default()
+        };
+        let d = detect(&analyse(&s), &p);
+        assert_eq!(d.regions.len(), 1, "{:?}", d.regions);
+        assert_eq!(d.regions[0].kind, RegionKind::Noise);
+    }
+
+    #[test]
+    fn a_pause_that_gets_louder_stays_a_pause() {
+        // Silence, then lasting hiss 20 dB louder (applause starting):
+        // a dip before, but none after, so no burst.
+        let a = music(220.0);
+        let hiss = |n| noise(n, 0.05, 4);
+        let s = recording(&[(4.0, &a), (2.0, &silence), (3.0, &hiss), (4.0, &a)]);
+        let d = detect(&analyse(&s), &DetectParams::default());
+        assert_eq!(d.regions.len(), 1, "{:?}", d.regions);
+        assert!((secs(d.regions[0].range.start) - 4.0).abs() < 0.1);
+        assert!(
+            (secs(d.regions[0].range.end) - 9.0).abs() < 0.1,
+            "{:?}",
+            d.regions
+        );
     }
 
     #[test]
