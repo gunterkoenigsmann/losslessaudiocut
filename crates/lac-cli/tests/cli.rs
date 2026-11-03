@@ -209,3 +209,66 @@ fn mp3_is_detected_and_cut_sample_exactly() {
     assert!(text.contains("0:00.500"), "{text}");
     assert!(!text.contains("warning"), "{text}");
 }
+
+/// 16-bit mono WAV at 8 kHz from samples in `-1..1`.
+fn wav_8k(samples: &[f32]) -> Vec<u8> {
+    let data: Vec<u8> = samples
+        .iter()
+        .flat_map(|&x| ((x * 32767.0).round() as i16).to_le_bytes())
+        .collect();
+    let mut f = b"RIFF".to_vec();
+    f.extend((36 + data.len() as u32).to_le_bytes());
+    f.extend(b"WAVEfmt ");
+    f.extend(16u32.to_le_bytes());
+    f.extend(1u16.to_le_bytes()); // PCM
+    f.extend(1u16.to_le_bytes()); // mono
+    f.extend(8000u32.to_le_bytes());
+    f.extend(16000u32.to_le_bytes()); // byte rate
+    f.extend(2u16.to_le_bytes()); // block align
+    f.extend(16u16.to_le_bytes()); // bits
+    f.extend(b"data");
+    f.extend((data.len() as u32).to_le_bytes());
+    f.extend(data);
+    f
+}
+
+#[test]
+fn detect_lists_pauses_and_track_starts() {
+    let d = temp_dir("detect");
+    let input = d.join("in.wav");
+    // 4 s of a harmonic tone, 3 s of silence, 4 s of another tone.
+    let tone = |f0: f32, secs: usize| {
+        (0..secs * 8000).map(move |i| {
+            let t = i as f32 / 8000.0;
+            (1..=5)
+                .map(|k| (std::f32::consts::TAU * f0 * k as f32 * t).sin() / k as f32)
+                .sum::<f32>()
+                * 0.2
+        })
+    };
+    let s: Vec<f32> = tone(220.0, 4)
+        .chain(std::iter::repeat_n(0.0, 3 * 8000))
+        .chain(tone(330.0, 4))
+        .collect();
+    std::fs::write(&input, wav_8k(&s)).expect("write input");
+    let out = lac().arg("detect").arg(&input).output().expect("run lac");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let pauses: Vec<&str> = stdout.lines().filter(|l| l.starts_with("pause ")).collect();
+    let tracks: Vec<&str> = stdout.lines().filter(|l| l.starts_with("track ")).collect();
+    assert_eq!(pauses.len(), 1, "{stdout}");
+    assert_eq!(tracks.len(), 1, "{stdout}");
+    // The pause is 4 s .. 7 s within one 32 ms analysis frame, the new
+    // track starts 0.25 s before the second tone.
+    assert!(pauses[0].starts_with("pause 0:04.0"), "{stdout}");
+    assert!(
+        pauses[0].contains(" .. 0:07.0") || pauses[0].contains(" .. 0:06.9"),
+        "{stdout}"
+    );
+    assert!(tracks[0].contains("after a pause of"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&d);
+}

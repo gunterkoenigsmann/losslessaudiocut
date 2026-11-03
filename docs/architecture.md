@@ -87,7 +87,6 @@ graph TD
     app --> peaks
     app --> play
     app --> container
-    analysis --> decode
     peaks --> decode
     play --> decode
     decode --> container
@@ -105,7 +104,7 @@ graph TD
 | `lac-decode` | Turns packets into interleaved `f32` PCM for playback, the waveform cache and analysis. Wraps FFmpeg's decoders (libavcodec only, not its demuxers): it is fed packets from *our* demuxer, so the packet index stays the single source of truth and waveform positions match cut positions exactly. Each container describes its stream as `DecodeSection`s (codec, extradata, packets, and the part of the decoder output that is timeline: encoder delay, pre-skip and padding removed); the tests check the result bit for bit against the `ffmpeg` tool *(implemented: whole-file decoding, and random access via `decode_range`: a fresh decoder starts a codec-specific pre-roll before the range and its output is placed by `DecodeSection::packet_ends`; bit-exact against the whole-file decode on all fixtures)*. `ffmpeg-next` links libavformat too, but its demuxers are never called. | `ffmpeg-next` |
 | `lac-peaks` | Per-packet min/max/RMS summary, multi-level pyramid, optional on-disk cache. Built progressively from decoded samples and queryable while it grows (`PeakBuilder`, `PeakSummary::columns`) *(implemented; stored and loaded as versioned bytes by `PeakSummary::to_bytes`/`from_bytes`, the cache directory itself is `lac_app::peak_cache`)*. | none |
 | `lac-playback` | Audio output, transport (play/pause/seek), scrubbing, position reporting for the cursor *(implemented: `Timeline` of kept ranges, `Engine` with decoder thread, `rtrb` ring buffer and generation-checked flushes, linear-interpolation rate and channel conversion, `Player` on the default `cpal` device; the decoder is supplied by `lac_app::playback` as a `PcmSource`, so this crate does not depend on FFmpeg. Grain-restart scrubbing: `scrub::Scrubber` plus 5 ms fades at every seek. Speed: `Speed` in percent steps, `stretch::Stretcher` (WSOLA) or varispeed through the converter's ratio)*. | `cpal` (directly, `rodio` is not needed), `rtrb`; later `rubato` for varispeed |
-| `lac-analysis` | Pluggable analyzers that turn PCM/summary data into labeled regions. | later: `webrtc-vad` or an ONNX model via `ort` |
+| `lac-analysis` | Suggestions where to cut: deletable pauses (quiet or only noise) and track starts, from per-frame level, spectral flatness and band spectrum (section 8). Fed decoded PCM like `lac-peaks`, so it does not depend on `lac-decode` and is tested on synthetic signals *(implemented: `FeatureExtractor`, `detect`; run from `lac_app::analysis_job::AnalysisJob` and `lac detect`)*. | `rustfft`; later: `webrtc-vad` or an ONNX model via `ort` |
 | `lac-app` | Use cases (open, select, cut, split, edit track tags, undo, export, analyse) and view models. Knows nothing about wxWidgets, so all UI logic is unit-testable *(implemented so far: `Source` open/export, `waveform`, `detail`, `peak_job`, `peak_cache`, `editor` (selection, cursor, and `Edits` = deleted ranges, split points and track names on the source timeline, undone by snapshots), `export_job` (one file, or one per track, from one opened source) and `playback`. The editor keeps split points on the source timeline rather than an `EditList` of tracks: deleting across a split then shortens both tracks without moving the split, and a track is derived as its span minus the deletions. Per-track tags (section 4) are not written yet; each track file keeps the source's tags)*. | none |
 | `lac-gui` | wxWidgets windows, waveform widget, menus, key bindings. Renders view models, forwards user events *(implemented: waveform window with zoom and scroll, fed by `lac_app::peak_job::PeakJob` and `lac_app::waveform::WaveformView`; below one packet per pixel column it draws from samples decoded in the background by `lac_app::detail::DetailLoader`, as exact per-pixel min/max and, below one sample per pixel, as a polyline; mouse selection, delete/restore with undo and export through `lac_app::editor::Editor` and `lac_app::export_job::ExportJob`; deleted parts stay on the source timeline, shaded)*. | `wxdragon` |
 | `lac-cli` | Same use cases without a GUI: `lac cut in.mp3 --keep 0:10-3:45 -o out.mp3`. Doubles as the integration-test driver. | `clap` |
@@ -489,30 +488,71 @@ result of your cuts. Two details make it feel right:
   marked as silence during skim, and snap the scrub cursor to region
   boundaries when the mouse is released.
 
-## 8. Future: silence and track detection
+## 8. Silence and track detection
 
-```rust
-/// A labeled time region proposed by an analyzer.
-pub struct Region { pub range: Range<SamplePos>, pub label: Label, pub confidence: f32 }
+*Implemented* in `lac-analysis` (features and rules), `lac_app::analysis_job`
+(background thread) and `lac detect` (command line). The GUI is to show the
+suggestions and apply the track starts with `Editor::split_at_all` (one
+undo step).
 
-pub trait Analyzer: Send {
-    /// Called with consecutive PCM blocks; may emit regions at any time.
-    fn feed(&mut self, block: &PcmBlock, out: &mut Vec<Region>);
-    fn finish(&mut self, out: &mut Vec<Region>);
-}
-```
+### Features per frame
 
-Planned analyzers, in increasing complexity:
+Decoded PCM (the mean of all channels) is cut into frames of one hop, the
+power of two at or above 20 ms (1024 sample frames at 44.1/48 kHz). Per
+frame:
 
-1. **Silence**: RMS below threshold for at least *t* seconds (works on the
-   summary cache alone, almost free).
-2. **Voice activity**: WebRTC VAD on 10/20/30 ms frames (speech vs. not).
-3. **Music/speech/noise classifier**: small pretrained model via ONNX.
-4. **Track boundaries**: combine silence gaps with a spectral novelty curve
-   (sudden change in timbre), useful for gapless live recordings.
+| Feature | Definition | Tells apart |
+|---|---|---|
+| level | RMS of the frame's samples, dBFS | quiet from loud |
+| spectral flatness | geometric / arithmetic mean of the power spectrum, 150 Hz to 6 kHz (Hann window of two hops) | noise (hiss, wind, murmur: about 0.56 for white noise) from voice and music (harmonics: below 0.1) |
+| band spectrum | power in 16 log-spaced bands, 80 Hz to 12 kHz, half-dB steps | one piece of music from the next |
 
-Results appear as a separate lane below the waveform; accepting a proposal
-turns it into an `EditList` operation, snapped like any manual cut.
+The flatness band stays below every codec's low-pass, whose empty bins
+would otherwise make everything look tonal. "RMS of the FFT versus the
+amplitude" is constant by Parseval's theorem; how *evenly* the energy is
+spread is what flatness measures. A 3 h recording needs about 12 MB of
+features.
+
+### Rules
+
+1. **Thresholds adapt to the recording**: noise floor = 10th percentile of
+   the frame levels (digital silence left out), loud = 95th percentile;
+   quiet threshold a quarter of the way from floor to loud, at least 6 dB
+   above the floor and never above −45 dBFS, so that a recording without
+   pauses keeps its quiet passages.
+2. **Classes**: quiet (at most the threshold), noise (up to 25 dB above it
+   with a smoothed flatness of at least 0.3), content (everything else).
+   Flatness is what finds a noisy pause, e.g. between songs of a live
+   recording, whose level alone looks like content.
+3. **Regions**: pauses shorter than 0.5 s inside content are content,
+   content shorter than 0.2 s between pauses (a click) is pause. Every
+   remaining pause is a deletable region.
+4. **Track starts**: after every pause of at least 2 s inside the
+   recording, 0.25 s before the content resumes; and where the mean band
+   spectrum of the 4 s before a frame differs from the 4 s after by at least
+   6 dB (spread of the per-band difference plus half its mean, so loudness
+   alone counts half), with both windows at least 90 % content (a simple
+   form of Foote's novelty, for gapless recordings). Bands more than 20 dB
+   below the quiet threshold are not compared.
+
+All numbers are `DetectParams` fields in seconds or dB, so a settings
+dialog can expose them; re-running `detect` on kept `Features` takes
+milliseconds. Positions are frame-granular (about 20 ms) and are snapped to
+packets by the cut planner like any manual cut.
+
+### Further features, not implemented yet
+
+- **Voice activity** (WebRTC VAD on 10/20/30 ms frames) to tell speech from
+  other sounds, and **4 Hz modulation energy** (syllable rate) as a cheap
+  speech cue.
+- **Stationarity** (spectral flux over a second): steady hum or a fan is
+  flat in time, content is not. Would catch loud tonal hum that flatness
+  misses.
+- **Chroma / MFCC novelty** instead of the plain band spectrum, for track
+  changes within one genre.
+- A music/speech/noise classifier (small ONNX model via `ort`).
+- Results as a separate lane below the waveform, where accepting a region
+  deletes it.
 
 ## 9. Quality strategy
 

@@ -177,6 +177,29 @@ impl Source {
         Ok((builder.finish(), report))
     }
 
+    /// Decodes the whole source once and computes its analysis features
+    /// (level, spectral flatness, band spectrum per ~20 ms), from which
+    /// [`lac_analysis::detect`] suggests deletable pauses and track starts.
+    ///
+    /// `progress` is called after every decoded chunk with the number of
+    /// sample frames analysed so far; returning [`lac_decode::Flow::Stop`]
+    /// cancels.
+    pub fn analyze(
+        &mut self,
+        mut progress: impl FnMut(SamplePos) -> lac_decode::Flow,
+    ) -> Result<(lac_analysis::Features, lac_decode::DecodeReport), lac_decode::DecodeError> {
+        let info = self.info();
+        let channels = usize::from(info.channels);
+        let mut extractor = lac_analysis::FeatureExtractor::new(info.sample_rate, channels);
+        let mut done: SamplePos = 0;
+        let report = lac_decode::decode_all(self.container.as_ref(), &mut self.reader, |chunk| {
+            extractor.push(chunk);
+            done += (chunk.len() / channels.max(1)) as SamplePos;
+            progress(done)
+        })?;
+        Ok((extractor.finish(), report))
+    }
+
     /// Decodes the sample frames in `range` (clamped to the timeline) as
     /// interleaved `f32`, without decoding from the start of the file; see
     /// [`lac_decode::decode_range`].

@@ -4,6 +4,7 @@
 //! lac info recording.wav
 //! lac cut recording.wav -o out.wav --delete 1:00..1:30 --delete 5:00..
 //! lac cut recording.wav -o out.wav --keep 0:10..3:45
+//! lac detect recording.mp3 --min-gap 3
 //! ```
 //!
 //! Supported formats: WAV, FLAC, Ogg Vorbis/Opus/Speex and MP3 (detected from the content). Besides being useful for scripting, the CLI drives the end-to-end tests.
@@ -12,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use lac_analysis::{DetectParams, RegionKind, SplitReason};
 use lac_app::{CutRequest, Source, TimeRange, format_samples};
 use lac_core::SamplePos;
 
@@ -49,6 +51,24 @@ enum Command {
         #[arg(long, value_name = "RANGE")]
         keep: Vec<TimeRange>,
     },
+    /// Suggest pauses to delete and track starts.
+    ///
+    /// Pauses are stretches that are quiet or only noise (a flat
+    /// spectrum: hiss, wind, murmur); a new track is suggested after each
+    /// long pause and where the timbre changes without a pause.
+    Detect {
+        /// The audio file.
+        file: PathBuf,
+        /// Pauses at least this long (seconds) suggest a new track.
+        #[arg(long, value_name = "SECONDS", default_value_t = DetectParams::default().min_track_gap_secs)]
+        min_gap: f32,
+        /// Pauses shorter than this (seconds) are not listed.
+        #[arg(long, value_name = "SECONDS", default_value_t = DetectParams::default().min_pause_secs)]
+        min_pause: f32,
+        /// Do not suggest track starts at changes of timbre.
+        #[arg(long)]
+        no_timbre: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -60,6 +80,24 @@ fn main() -> Result<()> {
             delete,
             keep,
         } => cut(&input, &output, &delete, &keep),
+        Command::Detect {
+            file,
+            min_gap,
+            min_pause,
+            no_timbre,
+        } => detect(
+            &file,
+            &DetectParams {
+                min_track_gap_secs: min_gap,
+                min_pause_secs: min_pause,
+                min_novelty_db: if no_timbre {
+                    f32::INFINITY
+                } else {
+                    DetectParams::default().min_novelty_db
+                },
+                ..DetectParams::default()
+            },
+        ),
     }
 }
 
@@ -120,5 +158,49 @@ fn cut(input: &Path, output: &Path, delete: &[TimeRange], keep: &[TimeRange]) ->
         output.display(),
         format_samples(out_len, rate)
     );
+    Ok(())
+}
+
+fn detect(path: &Path, params: &DetectParams) -> Result<()> {
+    let mut src = Source::open(path)?;
+    let rate = src.info().sample_rate;
+    let (features, report) = src.analyze(|_| lac_app::Flow::Continue)?;
+    for w in &report.warnings {
+        println!("warning: {w}");
+    }
+    let d = lac_analysis::detect(&features, params);
+    let t = d.thresholds;
+    println!(
+        "quiet below {:.1} dBFS (noise floor {:.1}, loud {:.1})",
+        t.quiet_db, t.floor_db, t.loud_db
+    );
+    for r in &d.regions {
+        let kind = match r.kind {
+            RegionKind::Silence => "silence",
+            RegionKind::Noise => "noise",
+        };
+        println!(
+            "pause {} .. {}  {kind}, {:.1} dBFS",
+            format_samples(r.range.start, rate),
+            format_samples(r.range.end, rate),
+            r.level_db
+        );
+    }
+    for s in &d.splits {
+        let why = match &s.reason {
+            SplitReason::Gap { gap } => format!(
+                "after a pause of {}",
+                format_samples(gap.end - gap.start, rate)
+            ),
+            SplitReason::TimbreChange { novelty_db } => {
+                format!("timbre changes by {novelty_db:.1} dB")
+            }
+        };
+        println!(
+            "track {}  {why} (confidence {:.2})",
+            format_samples(s.pos, rate),
+            s.confidence
+        );
+    }
     Ok(())
 }
