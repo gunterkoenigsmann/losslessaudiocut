@@ -416,6 +416,22 @@ fn deletes_become_chained_streams() {
     }
 }
 
+/// Regression (found by `random_deletes_copy_packets`): a kept part of a
+/// single Vorbis packet becomes a two-packet chained stream (priming packet
+/// plus that one). With both on one page, which is then the first and the
+/// last audio page, libvorbisfile dropped the whole stream from the chain.
+#[test]
+fn one_packet_vorbis_part_survives_chaining() {
+    let name = "ogg_vorbis_stereo_44k.ogg";
+    let src = fixture(name);
+    let f = open(&src);
+    let p = delete(&f, &[(39, 1969)]);
+    assert_eq!(p[0].packets.len(), 1, "the first part is a single packet");
+    let out = write(&src, &f, &p);
+    assert_packets_copied(&src, &out, &p);
+    assert_decodes_like_source(name, &src, &out, &p);
+}
+
 /// Opus: a cut inside the source's pre-skip keeps exactly the audible part.
 #[test]
 fn opus_cut_near_start_respects_pre_skip() {

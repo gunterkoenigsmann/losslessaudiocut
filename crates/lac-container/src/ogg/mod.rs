@@ -485,10 +485,13 @@ impl OggFile {
                 }
             }
             pg.push(&bytes, granule as i64);
-            if k == 1 && link.info.kind == CodecKind::Vorbis {
-                // ffmpeg mistimes a Vorbis stream whose first audio page is
-                // also its last (it then trims the end); a page break after
-                // the second packet avoids that for all but one-packet runs.
+            // Decoders mistime a Vorbis stream whose first audio page is
+            // also its last: ffmpeg then trims the end, libvorbisfile drops
+            // the whole stream from a chain. A page break after the second
+            // packet avoids that; a two-packet stream (the priming packet
+            // plus one) breaks after the first instead.
+            let break_after = if n_packets <= 2 { 0 } else { 1 };
+            if k == break_after && k + 1 < n_packets && link.info.kind == CodecKind::Vorbis {
                 pg.flush();
             }
             if k % 256 == 255 {
