@@ -7,8 +7,10 @@
 //!
 //! - **quiet**: its level is at most [`Thresholds::quiet_db`],
 //! - **noise**: louder, but at most [`DetectParams::noise_band_db`] above
-//!   the quiet threshold, and spectrally flat (smoothed flatness at least
-//!   [`DetectParams::noise_flatness`]): hiss, wind, crowd murmur, traffic,
+//!   the quiet threshold, and either spectrally flat (smoothed flatness at
+//!   least [`DetectParams::noise_flatness`]: hiss, wind, crowd murmur,
+//!   traffic) or steady (smoothed spectral flux below
+//!   [`DetectParams::steady_flux_db`]: mains hum, a fan, a fridge),
 //! - **content**: everything else (voice, music, and loud noise).
 //!
 //! The quiet threshold adapts to the recording: it lies a fraction of the
@@ -18,6 +20,10 @@
 //! a recording without any pause does not get its quiet passages removed.
 //! Flatness is what keeps a noisy pause (a live recording between songs,
 //! a phone in the wind) from counting as content although it is loud.
+//! Hum is the opposite of flat (a few harmonics of 50 or 60 Hz), but it
+//! never changes, while voice and music change their spectrum several
+//! times a second: the *spectral flux* (how much the band spectrum moves
+//! from frame to frame, weighted by where the energy is) tells them apart.
 //!
 //! ## Regions and splits
 //!
@@ -72,6 +78,15 @@ pub struct DetectParams {
     /// frame's flatness fluctuates, and fricatives ("s", "f") are briefly
     /// noise-like inside speech.
     pub flatness_smoothing_secs: f32,
+    /// Smoothed spectral flux (mean change of the band spectrum per frame
+    /// in dB, weighted by band energy) below which a frame is steady, and
+    /// noise if not loud.
+    pub steady_flux_db: f32,
+    /// Length (seconds) of the averages over the spectral flux: a frame is
+    /// steady if the flux averaged over this long before it, or after it,
+    /// is low. Long enough to span several notes or syllables, so a held
+    /// note does not count as steady.
+    pub flux_smoothing_secs: f32,
     /// Pauses shorter than this (seconds) count as content.
     pub min_pause_secs: f32,
     /// Content shorter than this (seconds) between pauses counts as pause.
@@ -101,6 +116,8 @@ impl Default for DetectParams {
             noise_band_db: 25.0,
             noise_flatness: 0.3,
             flatness_smoothing_secs: 0.25,
+            steady_flux_db: 1.0,
+            flux_smoothing_secs: 1.5,
             min_pause_secs: 0.5,
             min_content_secs: 0.2,
             min_track_gap_secs: 2.0,
@@ -229,13 +246,20 @@ pub fn classify(f: &Features, p: &DetectParams) -> (Vec<FrameClass>, Thresholds)
         frames.iter().map(|x| x.flatness),
         f.frames_for_secs(p.flatness_smoothing_secs),
     );
+    let flux = one_sided_min_average(
+        &spectral_flux(f, quiet_db - INAUDIBLE_BELOW_QUIET_DB),
+        f.frames_for_secs(p.flux_smoothing_secs),
+    );
     let classes = frames
         .iter()
         .zip(flat)
-        .map(|(x, flat)| {
+        .zip(flux)
+        .map(|((x, flat), flux)| {
             if x.level_db <= quiet_db {
                 FrameClass::Quiet
-            } else if x.level_db <= quiet_db + p.noise_band_db && flat >= p.noise_flatness {
+            } else if x.level_db <= quiet_db + p.noise_band_db
+                && (flat >= p.noise_flatness || flux < p.steady_flux_db)
+            {
                 FrameClass::Noise
             } else {
                 FrameClass::Content
@@ -243,6 +267,57 @@ pub fn classify(f: &Features, p: &DetectParams) -> (Vec<FrameClass>, Thresholds)
         })
         .collect();
     (classes, thresholds)
+}
+
+/// Spectral flux per frame: the mean absolute change of the band spectrum
+/// (dB, bands floored at `band_floor`) from the previous frame, each band
+/// weighted by its energy, so that the bands that carry the sound count,
+/// not the random fluctuation of near-empty ones. The first frame gets the
+/// second one's value.
+fn spectral_flux(f: &Features, band_floor: f32) -> Vec<f32> {
+    let frames = f.frames();
+    let bands = |i: usize| -> [f32; BANDS] {
+        std::array::from_fn(|b| frames[i].band_db(b).max(band_floor))
+    };
+    let mut out = vec![0.0; frames.len()];
+    for (i, o) in out.iter_mut().enumerate().skip(1) {
+        let (a, c) = (bands(i - 1), bands(i));
+        let (mut sum, mut weight) = (0f64, 0f64);
+        for (x, y) in a.iter().zip(&c) {
+            // Energy relative to the floor, so that the floor itself weighs 0.
+            let w = 10f64.powf(f64::from(x.max(*y) - band_floor) / 10.0) - 1.0;
+            sum += w * f64::from((y - x).abs());
+            weight += w;
+        }
+        *o = if weight > 0.0 {
+            (sum / weight) as f32
+        } else {
+            0.0
+        };
+    }
+    if out.len() > 1 {
+        out[0] = out[1];
+    }
+    out
+}
+
+/// For every index the smaller of the averages over the `len` values
+/// ending there and the `len` values starting there (shorter at the ends).
+/// A steady stretch then reaches up to its edges, while a centred average
+/// would blur half a window of the neighbouring content into it.
+fn one_sided_min_average(v: &[f32], len: usize) -> Vec<f32> {
+    let mut prefix = vec![0f64; v.len() + 1];
+    for (i, x) in v.iter().enumerate() {
+        prefix[i + 1] = prefix[i] + f64::from(*x);
+    }
+    let avg = |a: usize, b: usize| ((prefix[b] - prefix[a]) / (b - a) as f64) as f32;
+    (0..v.len())
+        .map(|i| {
+            let back = avg((i + 1).saturating_sub(len), i + 1);
+            let fwd = avg(i, (i + len).min(v.len()));
+            back.min(fwd)
+        })
+        .collect()
 }
 
 /// Centred moving average over `len` values (shorter at the ends).
@@ -473,8 +548,28 @@ mod tests {
         pos as f32 / RATE as f32
     }
 
+    /// A melody: notes of 0.3 s on a scale starting at `f0`, each decaying
+    /// like a plucked string, peak amplitude about 0.4.
     fn music(f0: f32) -> impl Fn(usize) -> Vec<f32> {
-        move |n| tone(n, RATE, f0, 10, 0.4)
+        melody(f0, 0.4)
+    }
+
+    fn melody(f0: f32, amplitude: f32) -> impl Fn(usize) -> Vec<f32> {
+        const STEPS: [f32; 8] = [1.0, 1.122, 1.26, 1.335, 1.498, 1.335, 1.26, 1.122];
+        move |n| {
+            let note = (0.3 * RATE as f32) as usize;
+            (0..n)
+                .step_by(note)
+                .enumerate()
+                .flat_map(|(k, start)| {
+                    let len = note.min(n - start);
+                    let t = tone(len, RATE, f0 * STEPS[k % 8], 10, amplitude);
+                    t.into_iter()
+                        .enumerate()
+                        .map(|(i, x)| x * (-3.0 * i as f32 / RATE as f32).exp())
+                })
+                .collect()
+        }
     }
 
     fn silence(n: usize) -> Vec<f32> {
@@ -542,12 +637,37 @@ mod tests {
         assert!((secs(d.regions[0].range.end) - 8.0).abs() < 0.1);
         assert_eq!(d.splits.len(), 1);
 
-        // The same level as a tone is content: it is the flatness, not
-        // the level, that decided.
-        let hum = |n| tone(n, RATE, 440.0, 3, 0.08);
-        let s = recording(&[(5.0, &a), (3.0, &hum), (5.0, &a)]);
+        // Music at the same level is content: it is the flatness, not the
+        // level, that decided.
+        let soft = melody(330.0, 0.1);
+        let s = recording(&[(5.0, &a), (3.0, &soft), (5.0, &a)]);
         let d = detect(&analyse(&s), &DetectParams::default());
         assert!(d.regions.is_empty(), "{:?}", d.regions);
+    }
+
+    #[test]
+    fn steady_hum_between_pieces_is_not_content() {
+        // Mains hum (50 Hz and harmonics, −27 dB RMS): tonal, so not flat,
+        // but it never changes.
+        let a = music(220.0);
+        let hum = |n| tone(n, RATE, 50.0, 6, 0.1);
+        let s = recording(&[(5.0, &a), (3.0, &hum), (5.0, &a)]);
+        let d = detect(&analyse(&s), &DetectParams::default());
+        assert_eq!(d.regions.len(), 1, "{:?} {:?}", d.thresholds, d.regions);
+        assert_eq!(d.regions[0].kind, RegionKind::Noise);
+        assert!(
+            (secs(d.regions[0].range.start) - 5.0).abs() < 0.2,
+            "{:?}",
+            d.regions
+        );
+        assert!((secs(d.regions[0].range.end) - 8.0).abs() < 0.2);
+
+        // Without the flux rule, the hum would be content.
+        let p = DetectParams {
+            steady_flux_db: 0.0,
+            ..DetectParams::default()
+        };
+        assert!(detect(&analyse(&s), &p).regions.is_empty());
     }
 
     #[test]
@@ -641,7 +761,7 @@ mod tests {
     fn quiet_threshold_is_capped_for_recordings_without_pauses() {
         // Loud music throughout with a quieter passage: nothing deletable.
         let loud = music(220.0);
-        let soft = |n| tone(n, RATE, 220.0, 10, 0.05); // 18 dB softer
+        let soft = melody(220.0, 0.05); // 18 dB softer
         let s = recording(&[(5.0, &loud), (5.0, &soft), (5.0, &loud)]);
         let d = detect(&analyse(&s), &DetectParams::default());
         assert!(
@@ -675,6 +795,12 @@ mod tests {
         let mut m = [false, true, true, false, true, true, true, false];
         close_short_runs(&mut m, false, 2);
         assert_eq!(m, [false, true, true, true, true, true, true, false]);
+    }
+
+    #[test]
+    fn one_sided_min_average_takes_the_steadier_side() {
+        let v = one_sided_min_average(&[4.0, 4.0, 0.0, 0.0, 4.0], 2);
+        assert_eq!(v, vec![4.0, 2.0, 0.0, 0.0, 2.0]);
     }
 
     #[test]
