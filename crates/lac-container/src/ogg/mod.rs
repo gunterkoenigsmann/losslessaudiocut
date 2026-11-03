@@ -190,6 +190,8 @@ impl OggFile {
                 first_sample: pos,
                 // At most one packet's samples, which fit u32.
                 n_samples: audible as u32,
+                hidden_before: 0,
+                hidden_after: 0,
                 flags: PacketFlags { independent: false },
             });
             entry_raw.push(i);
@@ -1011,6 +1013,8 @@ mod tests {
                 packets: r,
                 trim_start: 0,
                 trim_end: 0,
+                padding_before: 0,
+                padding_after: 0,
             })
             .collect();
         let mut out = Cursor::new(Vec::new());

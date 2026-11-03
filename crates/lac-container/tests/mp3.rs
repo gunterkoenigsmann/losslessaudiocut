@@ -104,7 +104,7 @@ fn assert_nothing_reencoded(src: &[u8], out: &[u8], plans: &[CutPlan]) -> Mp3Fil
         .collect();
     assert_eq!(got.len(), want.len(), "frame count");
     assert!(got == want, "frame contents differ");
-    let len: u64 = plans.iter().map(|p| p.actual.end - p.actual.start).sum();
+    let len: u64 = plans.iter().map(CutPlan::output_len).sum();
     assert_eq!(o.index().total_samples(), len, "timeline of the output");
     o
 }
@@ -141,7 +141,7 @@ fn assert_decodes_like_source(
     let (Some(s), Some(o)) = (decoder(&sp), decoder(&op)) else {
         return;
     };
-    let total: u64 = plans.iter().map(|p| p.actual.end - p.actual.start).sum();
+    let total: u64 = plans.iter().map(CutPlan::output_len).sum();
     assert_eq!(o.len() / frame, total as usize, "{name}: decoded length");
     assert_eq!(
         s.len() / frame,
@@ -150,13 +150,21 @@ fn assert_decodes_like_source(
     );
     let mut out_pos = 0;
     let mut prev_end = None;
+    // Samples of the current join window not yet skipped. The window
+    // counts from the join in the output, so a range shorter than the
+    // window passes the rest on to the range after it, even when that one
+    // continues it seamlessly in the source.
+    let mut window_left = 0;
     for p in plans {
         let r = p.actual.start as usize..p.actual.end as usize;
-        // A range continuing the previous one is no join.
-        let skip = match prev_end {
-            Some(e) if e != p.actual.start => JOIN_WINDOW.min(r.len()),
-            _ => 0,
-        };
+        // A range continuing the previous one is no new join.
+        if matches!(prev_end, Some(e) if e != p.actual.start) {
+            window_left = JOIN_WINDOW;
+        }
+        let skip = window_left.min(r.len());
+        window_left -= skip;
+        // Hidden encoder delay played in front of a join: not in the source.
+        out_pos += p.padding_before as usize;
         let want = &s[(r.start + skip) * frame..r.end * frame];
         let got = &o[(out_pos + skip) * frame..(out_pos + r.len()) * frame];
         let sample = |b: &[u8], i: usize| {
@@ -176,7 +184,7 @@ fn assert_decodes_like_source(
                 r.start + skip + i
             );
         }
-        out_pos += r.len();
+        out_pos += r.len() + p.padding_after as usize;
         prev_end = Some(p.actual.end);
     }
     let _ = std::fs::remove_file(sp);
@@ -368,6 +376,52 @@ fn inner_trims_are_rejected() {
         .collect();
     let mut out = Cursor::new(Vec::new());
     assert!(f.write_cut(&mut Cursor::new(&src), &bad, &mut out).is_err());
+}
+
+/// Regression (found by `random_deletes`): a delete inside the last frame
+/// puts that frame at a join, where the LAME tag cannot hide its encoder
+/// padding. The plan must report the padding that is played there.
+#[test]
+fn end_padding_at_a_join_is_reported() {
+    let name = FIXTURES[0].0;
+    let src = fixture(name);
+    let f = open(&src);
+    let p = delete(&f, &[(65_784, 66_132)]);
+    let last = f.index().packets().last().expect("frames");
+    assert!(last.hidden_after > 0, "fixture has end padding");
+    assert_eq!(p[0].padding_after, u64::from(last.hidden_after));
+    assert!(!p[0].is_exact(&(0..65_784)));
+    let out = write(&src, &f, &p);
+    check(name, &src, &out, &p);
+}
+
+/// The same at the start: the first frame (with the encoder delay) lands
+/// behind a join when the kept ranges are reordered.
+#[test]
+fn encoder_delay_at_a_join_is_reported() {
+    let name = FIXTURES[0].0;
+    let src = fixture(name);
+    let f = open(&src);
+    let p = plans(&f, &[40_000..50_000, 0..10_000]);
+    let first = f.index().packets()[0];
+    assert!(first.hidden_before > 0, "fixture has an encoder delay");
+    assert_eq!(p[1].padding_before, u64::from(first.hidden_before));
+    let out = write(&src, &f, &p);
+    check(name, &src, &out, &p);
+}
+
+/// Regression (found by `random_deletes`): the join transient of MPEG-2.5
+/// lasts two 576-sample frames. When the range after a join is a single
+/// frame, the window continues into the next range, even though that one
+/// continues the previous range seamlessly in the source.
+#[test]
+fn join_window_spans_short_ranges() {
+    let name = FIXTURES[3].0;
+    let src = fixture(name);
+    let f = open(&src);
+    let p = plans(&f, &[0..1152, 2304..2880, 2880..9216]);
+    let out = write(&src, &f, &p);
+    check(name, &src, &out, &p);
 }
 
 #[test]

@@ -13,7 +13,7 @@
 //!    Speex. Vorbis must match bit for bit, also across join points (every
 //!    run of kept packets becomes a chained stream that starts with its
 //!    predecessor packet as pre-roll). Opus and Speex must match bit for bit
-//!    except within [`JOIN_WINDOW`] after a join point, where their
+//!    except within [`OPUS_JOIN_WINDOW`] / [`SPEEX_JOIN_WINDOW`] after a join point, where their
 //!    predictive decoders converge.
 //! 3. That decoder's output length equals the planned length, so an
 //!    independent demuxer agrees with our granule positions.
@@ -57,11 +57,19 @@ const FIXTURES: [(&str, CodecKind, u32, u16, u64); 4] = [
     ("ogg_speex_16k.spx", CodecKind::Speex, 16_000, 1, 16_000),
 ];
 
-/// Seconds after a join point in which Opus and Speex output may differ
-/// from the source. The fixtures use a speech-like signal (see
-/// `synth_wav.py speech`) whose 80 ms pauses flush the decoder state at the
-/// latest 240 ms after any point.
-const JOIN_WINDOW: f64 = 0.25;
+/// Seconds after a join point in which Opus output may differ from the
+/// source. Each Opus part is a chained stream with its own pre-roll, so the
+/// decoder only has to converge from a nearby state.
+const OPUS_JOIN_WINDOW: f64 = 0.25;
+
+/// Seconds after a join point in which Speex output may differ from the
+/// source. Speex parts are joined inside one stream without pre-roll, and
+/// the decoder's float synthesis-filter and excitation state survives the
+/// 80 ms pauses of the speech-like fixture (`synth_wav.py speech`): it only
+/// becomes bit-identical somewhere in the second syllable after the join.
+/// Measured worst case over 60 joins: 320 ms (see `docs/architecture.md`,
+/// "Join points inside a file").
+const SPEEX_JOIN_WINDOW: f64 = 0.4;
 
 fn open(bytes: &[u8]) -> OggFile {
     OggFile::open(&mut Cursor::new(bytes)).expect("valid Ogg")
@@ -118,7 +126,7 @@ fn assert_packets_copied(src: &[u8], out: &[u8], plans: &[CutPlan]) -> OggFile {
     let got = payloads(&o, out, 0..o.index().packets().len());
     assert_eq!(got.len(), want.len(), "packet count");
     assert!(got == want, "packet payloads differ");
-    let len: u64 = plans.iter().map(|p| p.actual.end - p.actual.start).sum();
+    let len: u64 = plans.iter().map(CutPlan::output_len).sum();
     assert_eq!(o.index().total_samples(), len);
     assert_eq!(granule_length(out), len, "granule positions");
     o
@@ -175,12 +183,13 @@ fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPl
     let (Some(s), Some(o)) = (decode(f.codec(), &src_path), decode(f.codec(), &out_path)) else {
         return;
     };
-    let total: u64 = plans.iter().map(|p| p.actual.end - p.actual.start).sum();
+    let total: u64 = plans.iter().map(CutPlan::output_len).sum();
     assert_eq!(o.len() / frame, total as usize, "{name}: decoded length");
 
     let window = match f.codec() {
         CodecKind::Vorbis => 0,
-        CodecKind::Opus | CodecKind::Speex => (JOIN_WINDOW * f64::from(info.sample_rate)) as usize,
+        CodecKind::Opus => (OPUS_JOIN_WINDOW * f64::from(info.sample_rate)) as usize,
+        CodecKind::Speex => (SPEEX_JOIN_WINDOW * f64::from(info.sample_rate)) as usize,
     };
     // The source decode may lack the end padding; compare what exists.
     let src_len = s.len() / frame;
@@ -536,6 +545,19 @@ fn cut_of_cut_is_stable() {
     // Keeping everything of a chained output keeps it as it is.
     let again = write(&once, &o, &plans(&o, &[0..o.index().total_samples()]));
     assert_eq!(once, again);
+}
+
+/// Regression: a join inside a pause whose decoder state survives the next
+/// pause; it took 267 ms to become bit-identical, more than the 250 ms the
+/// tests used to allow (found by `random_deletes_copy_packets`).
+#[test]
+fn speex_join_converges_within_window() {
+    let name = "ogg_speex_16k.spx";
+    let src = fixture(name);
+    let f = open(&src);
+    let p = delete(&f, &[(1280, 3520)]);
+    let out = write(&src, &f, &p);
+    assert_decodes_like_source(name, &src, &out, &p);
 }
 
 #[test]

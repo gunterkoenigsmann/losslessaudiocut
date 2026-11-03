@@ -587,6 +587,8 @@ fn scan_frames<R: Read + Seek + ?Sized>(
                     byte_len: u32::try_from(end - pos).unwrap_or(u32::MAX),
                     first_sample: sample,
                     n_samples: h.block_size,
+                    hidden_before: 0,
+                    hidden_after: 0,
                     flags: PacketFlags { independent: true },
                 });
                 sample += u64::from(h.block_size);

@@ -400,6 +400,8 @@ fn build_index(
                 byte_len: (n * ba) as u32,
                 first_sample: first,
                 n_samples: n as u32,
+                hidden_before: 0,
+                hidden_after: 0,
                 flags: PacketFlags { independent: true },
             }
         })

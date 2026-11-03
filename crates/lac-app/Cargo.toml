@@ -1,0 +1,15 @@
+[package]
+name = "lac-app"
+description = "Use cases of losslessaudiocut shared by the command line and the GUI: opening files, time input, cutting."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+lac-core.workspace = true
+lac-container.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

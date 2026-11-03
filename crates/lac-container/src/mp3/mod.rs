@@ -190,6 +190,10 @@ impl Mp3File {
                 byte_len: f.header.frame_len() as u32,
                 first_sample: a - skip,
                 n_samples: (b - a) as u32,
+                // Encoder delay and padding inside this frame: hidden by the
+                // LAME tag, but played if the frame lands at a join.
+                hidden_before: (a - fs) as u32,
+                hidden_after: (fs + spf - b) as u32,
                 flags: PacketFlags { independent: false },
             });
             entry_frame.push(k);

@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 lac-core.workspace = true
-lac-container.workspace = true
+lac-app.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 

@@ -270,15 +270,15 @@ codecs the decoder state at the join is wrong for one or two packets:
 
 | Codec | Effect at an internal join | Mitigation |
 |---|---|---|
-| MP3 | first frame after the join may reference bit-reservoir bytes that are no longer there; its first granule overlaps with a foreign predecessor granule | the reservoir is repacked, so every frame gets exactly its own main data *(implemented)*; the remaining overlap/synthesis-filter transient lasts at most 1152 samples (one MPEG-1 frame, two MPEG-2 frames), checked by the tests |
+| MP3 | first frame after the join may reference bit-reservoir bytes that are no longer there; its first granule overlaps with a foreign predecessor granule | the reservoir is repacked, so every frame gets exactly its own main data *(implemented)*; the remaining overlap/synthesis-filter transient lasts at most 1152 samples (one MPEG-1 frame, two MPEG-2 frames), checked by the tests. The source's first and last frame hold encoder delay and padding that only the LAME tag hides; if such a frame lands at a join, that hidden part (< 1152 samples) is played. The packet index records it (`PacketInfo::hidden_before`/`hidden_after`), and the plan and the exactness report state it (`CutPlan::padding_before`/`padding_after`) |
 | AAC | MDCT overlap-add mixes the tails of two unrelated frames: a transient of one frame (~20 ms) | M4A: keep the frame and rely on the short crossfade-like overlap |
 | Vorbis | as AAC | each kept part becomes a **chained** logical stream that starts with its real predecessor packet, whose output a new stream discards: **no join window**, bit-exact *(implemented)*. Caveat: ffmpeg does not reset its Vorbis decoder at a chain boundary and plays one extra overlap (≤ 23 ms) per join; libvorbisfile-based players are exact |
 | Opus | CELT/SILK prediction state | each kept part becomes a chained stream with ≥ 80 ms pre-roll hidden by `pre_skip` (RFC 7845 4.3) and both ends trimmed to the sample *(implemented)*. The output is bit-exact again once the decoder has converged; the window depends on the content, typically < 100 ms. Caveat: when a kept part starts and ends inside the same packet (a sliver shorter than one packet, ≤ 120 ms), ffmpeg drops the rest of the pre-skip as soon as the end-trimmed packet arrives and plays up to one packet too much; the file itself is correct per RFC 7845 |
-| Speex | CELP predictor and pitch memory | none: parts are joined within one stream *(implemented)*. The output is bit-exact again once the state is flushed, at the latest after the next pause; on steady tones this can take long |
+| Speex | CELP predictor, pitch memory and the float synthesis-filter state | none: parts are joined within one stream *(implemented)*. The output is bit-exact again once the state has converged. A pause does **not** flush it: digital silence leaves the decoder state in place, so convergence happens during the following speech, measured at up to 320 ms on the speech-like fixture; on steady tones this can take longer. The deviations are float-rounding sized and inaudible |
 
 Tests use a speech-like fixture signal (syllables separated by 80 ms of
-silence) and require Opus and Speex output to be bit-exact from 250 ms after
-each join point on.
+silence) and require the output to be bit-exact from 250 ms (Opus) or
+400 ms (Speex) after each join point on.
 
 On top of that, the editor **suggests join points in quiet packets** (it has
 the per-packet RMS from the waveform cache), because most deletions remove

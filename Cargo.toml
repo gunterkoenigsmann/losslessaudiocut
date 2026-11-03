@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/lac-core", "crates/lac-container", "crates/lac-cli"]
+members = ["crates/lac-core", "crates/lac-container", "crates/lac-app", "crates/lac-cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ repository = "https://github.com/gunterkoenigsmann/losslessaudiocut"
 [workspace.dependencies]
 lac-core = { path = "crates/lac-core" }
 lac-container = { path = "crates/lac-container" }
+lac-app = { path = "crates/lac-app" }
 thiserror = "2.0.21"
 anyhow = "1"
 clap = { version = "4.6.7", features = ["derive"] }

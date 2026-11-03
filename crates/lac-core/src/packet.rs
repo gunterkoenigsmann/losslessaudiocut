@@ -32,8 +32,17 @@ pub struct PacketInfo {
     pub byte_len: u32,
     /// Presentation position of the packet's first sample frame.
     pub first_sample: SamplePos,
-    /// Number of sample frames this packet decodes to.
+    /// Number of sample frames of this packet that belong to the timeline.
     pub n_samples: u32,
+    /// Decoded sample frames in front of the timeline part that the source
+    /// hides, e.g. the encoder delay in the first MP3 frame. They become
+    /// audible when the packet is copied to a place where the output cannot
+    /// trim them (a join inside the file).
+    pub hidden_before: u32,
+    /// Decoded sample frames after the timeline part that the source hides,
+    /// e.g. the encoder padding in the last MP3 frame. See
+    /// [`PacketInfo::hidden_before`].
+    pub hidden_after: u32,
     /// Additional properties.
     pub flags: PacketFlags,
 }
@@ -146,6 +155,8 @@ mod tests {
                     byte_len: n * 4,
                     first_sample: pos,
                     n_samples: n,
+                    hidden_before: 0,
+                    hidden_after: 0,
                     flags: PacketFlags { independent: true },
                 };
                 pos += u64::from(n);
