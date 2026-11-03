@@ -103,12 +103,17 @@ fn cut(input: &Path, output: &Path, delete: &[TimeRange], keep: &[TimeRange]) ->
     let mut out_len: SamplePos = 0;
     for k in &kept {
         let exact = if k.is_exact() { "exact" } else { "widened" };
+        let padding = if k.padding > 0 {
+            format!(", plus {} sample frames of encoder padding", k.padding)
+        } else {
+            String::new()
+        };
         println!(
-            "kept {} .. {}  ({exact})",
+            "kept {} .. {}  ({exact}{padding})",
             format_samples(k.actual.start, rate),
             format_samples(k.actual.end, rate)
         );
-        out_len += k.actual.end - k.actual.start;
+        out_len += k.output_len();
     }
     println!(
         "wrote {} ({})",

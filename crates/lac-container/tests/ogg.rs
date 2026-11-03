@@ -124,7 +124,7 @@ fn assert_packets_copied(src: &[u8], out: &[u8], plans: &[CutPlan]) -> OggFile {
     let got = payloads(&o, out, 0..o.index().packets().len());
     assert_eq!(got.len(), want.len(), "packet count");
     assert!(got == want, "packet payloads differ");
-    let len: u64 = plans.iter().map(|p| p.actual.end - p.actual.start).sum();
+    let len: u64 = plans.iter().map(CutPlan::output_len).sum();
     assert_eq!(o.index().total_samples(), len);
     assert_eq!(granule_length(out), len, "granule positions");
     o
@@ -170,7 +170,7 @@ fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPl
     let (Some(s), Some(o)) = (decode(f.codec(), &src_path), decode(f.codec(), &out_path)) else {
         return;
     };
-    let total: u64 = plans.iter().map(|p| p.actual.end - p.actual.start).sum();
+    let total: u64 = plans.iter().map(CutPlan::output_len).sum();
     assert_eq!(o.len() / frame, total as usize, "{name}: decoded length");
 
     let window = match f.codec() {

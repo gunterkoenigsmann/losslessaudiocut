@@ -80,12 +80,20 @@ pub struct KeptRange {
     /// The range the file actually contains: equal to `requested`, or
     /// widened to packet boundaries where the format cannot cut exactly.
     pub actual: Range<SamplePos>,
+    /// Sample frames played around `actual` that are not part of the source
+    /// timeline (MP3 encoder delay or padding that a join cannot hide).
+    pub padding: SamplePos,
 }
 
 impl KeptRange {
     /// True if the file contains exactly the requested samples.
     pub fn is_exact(&self) -> bool {
-        self.requested == self.actual
+        self.requested == self.actual && self.padding == 0
+    }
+
+    /// Sample frames this range occupies in the output file.
+    pub fn output_len(&self) -> SamplePos {
+        self.actual.end - self.actual.start + self.padding
     }
 }
 
@@ -221,6 +229,7 @@ impl Source {
             .zip(plans)
             .map(|(requested, p)| KeptRange {
                 requested,
+                padding: p.padding_before + p.padding_after,
                 actual: p.actual,
             })
             .collect())

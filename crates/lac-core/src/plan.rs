@@ -71,6 +71,29 @@ pub struct CutPlan {
     /// The source range the listener will actually get. Contains the
     /// requested range, and equals it when the format is sample-exact.
     pub actual: Range<SamplePos>,
+    /// Decoded sample frames that are not part of the source timeline but
+    /// play right before `actual`: the hidden part of the first packet
+    /// ([`PacketInfo::hidden_before`], e.g. MP3 encoder delay) when the
+    /// start cannot be trimmed.
+    ///
+    /// [`PacketInfo::hidden_before`]: crate::PacketInfo::hidden_before
+    pub padding_before: SamplePos,
+    /// Like `padding_before`, after `actual`: the hidden end of the last
+    /// packet (e.g. MP3 encoder padding) when the end cannot be trimmed.
+    pub padding_after: SamplePos,
+}
+
+impl CutPlan {
+    /// Sample frames this plan contributes to the output: the actual range
+    /// plus any padding.
+    pub fn output_len(&self) -> SamplePos {
+        self.padding_before + (self.actual.end - self.actual.start) + self.padding_after
+    }
+
+    /// True if the output holds exactly `requested` and nothing else.
+    pub fn is_exact(&self, requested: &Range<SamplePos>) -> bool {
+        self.actual == *requested && self.padding_before == 0 && self.padding_after == 0
+    }
 }
 
 /// Errors of [`plan_cut`].
@@ -112,6 +135,8 @@ pub fn plan_cut(
             trim_start: 0,
             trim_end: 0,
             actual: range.start..range.start,
+            padding_before: 0,
+            padding_after: 0,
         });
     }
     let packets = index.packets();
@@ -123,28 +148,36 @@ pub fn plan_cut(
     let preroll_first = first.saturating_sub(caps.preroll_packets as usize);
     let preroll_len = packets[first].first_sample - packets[preroll_first].first_sample;
 
-    let (trim_start, actual_start) = if caps.exact_start() {
+    let (trim_start, actual_start, padding_before) = if caps.exact_start() {
         // Drop the pre-roll output plus the head of the first wanted packet.
         (
             preroll_len + (range.start - packets[first].first_sample),
             range.start,
+            0,
         )
     } else {
         // Without trimming the pre-roll is audible, so it belongs to the
-        // actual range.
-        (0, packets[preroll_first].first_sample)
+        // actual range, and so does whatever the source hides in front of
+        // its first sample (only the stream's first packet hides any).
+        (
+            0,
+            packets[preroll_first].first_sample,
+            SamplePos::from(packets[preroll_first].hidden_before),
+        )
     };
     let last_end = packets[last].sample_range().end;
-    let (trim_end, actual_end) = if caps.exact_end() {
-        (last_end - range.end, range.end)
+    let (trim_end, actual_end, padding_after) = if caps.exact_end() {
+        (last_end - range.end, range.end, 0)
     } else {
-        (0, last_end)
+        (0, last_end, SamplePos::from(packets[last].hidden_after))
     };
     Ok(CutPlan {
         packets: preroll_first..last + 1,
         trim_start,
         trim_end,
         actual: actual_start..actual_end,
+        padding_before,
+        padding_after,
     })
 }
 
@@ -190,6 +223,8 @@ mod tests {
                     byte_len: n,
                     first_sample: pos,
                     n_samples: n,
+                    hidden_before: 0,
+                    hidden_after: 0,
                     flags: PacketFlags::default(),
                 };
                 pos += u64::from(n);
@@ -234,6 +269,43 @@ mod tests {
         };
         let plans = plan_cuts(&idx, free, &[1500..2500, 5500..6500]).expect("ok");
         assert_eq!(plans[1].actual, 5500..6500);
+    }
+
+    /// Hidden samples of the stream's first and last packet (MP3 encoder
+    /// delay and padding) are reported as padding where a join keeps them
+    /// from being trimmed, and stay hidden at the file ends.
+    #[test]
+    fn hidden_samples_become_padding_at_joins() {
+        let mut packets = index(&[1000; 4]).packets().to_vec();
+        packets[0].hidden_before = 300;
+        packets[3].hidden_after = 200;
+        let idx = PacketIndex::new(idx_info(), packets).expect("contiguous");
+        let caps = CutCapabilities {
+            preroll_packets: 0,
+            can_trim_start: true,
+            can_trim_end: true,
+            lossless_reencode: false,
+            trims_at_file_ends_only: true,
+        };
+        // Last packet before a join, first packet after one.
+        let plans = plan_cuts(&idx, caps, &[3500..3900, 100..200]).expect("ok");
+        assert_eq!((plans[0].padding_before, plans[0].padding_after), (0, 200));
+        assert_eq!((plans[1].padding_before, plans[1].padding_after), (300, 0));
+        // 3500..4000 (end widened to the packet) plus the hidden 200.
+        assert_eq!(plans[0].output_len(), 500 + 200);
+        assert!(!plans[0].is_exact(&(3500..3900)));
+        // At the file ends they are trimmed and nothing is played.
+        #[allow(clippy::single_range_in_vec_init)] // one kept range
+        let whole = plan_cuts(&idx, caps, &[0..4000]).expect("ok");
+        assert_eq!((whole[0].padding_before, whole[0].padding_after), (0, 0));
+        assert!(whole[0].is_exact(&(0..4000)));
+    }
+
+    fn idx_info() -> AudioStreamInfo {
+        AudioStreamInfo {
+            sample_rate: 44_100,
+            channels: 1,
+        }
     }
 
     #[test]
