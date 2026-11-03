@@ -79,9 +79,12 @@ jobs:
           "$dir\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
       # lac-gui: wxdragon downloads and builds wxWidgets with CMake (already
       # on all runners); on Linux it needs GTK 3. Ninja makes that build faster.
-      - name: Install GUI build dependencies (Linux)
+      # lac-playback: cpal talks to ALSA on Linux. The tests never open a
+      # device (they drive the audio callback themselves), so no sound
+      # server is needed.
+      - name: Install GUI and audio build dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y --no-install-recommends libgtk-3-dev ninja-build
+        run: sudo apt-get install -y --no-install-recommends libgtk-3-dev ninja-build libasound2-dev
       - name: Require cross-checks
         if: runner.os == 'Linux'
         shell: bash

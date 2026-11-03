@@ -1,0 +1,16 @@
+[package]
+name = "lac-playback"
+description = "Audio playback of losslessaudiocut: plays the kept parts of a recording through the system's audio output."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+lac-core.workspace = true
+thiserror.workspace = true
+cpal.workspace = true
+rtrb.workspace = true
+
+[lints]
+workspace = true
