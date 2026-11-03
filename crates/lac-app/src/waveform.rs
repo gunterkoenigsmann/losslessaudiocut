@@ -14,6 +14,8 @@ use std::ops::Range;
 use lac_core::SamplePos;
 use lac_peaks::{Peak, PeakSummary};
 
+use crate::detail::Detail;
+
 /// Most zoomed-in view: this many pixels per sample frame.
 pub const MAX_PIXELS_PER_SAMPLE: f64 = 32.0;
 
@@ -160,6 +162,64 @@ impl WaveformView {
             .collect()
     }
 
+    /// The samples the current view needs decoded, if any: `None` while
+    /// the summary is detailed enough ([`DrawMode::MinMax`] for packets of
+    /// `packet_len` frames). Otherwise the visible range with one screen
+    /// width on either side, so that scrolling a little needs no new
+    /// decoding.
+    pub fn detail_wanted(&self, packet_len: SamplePos) -> Option<Range<SamplePos>> {
+        if self.draw_mode(packet_len) == DrawMode::MinMax {
+            return None;
+        }
+        let v = self.visible();
+        let pad = v.end - v.start;
+        Some(v.start.saturating_sub(pad)..(v.end + pad).min(self.total))
+    }
+
+    /// Like [`WaveformView::columns`], but from decoded samples: exact
+    /// min/max/RMS per pixel column. `None` unless `detail` covers the
+    /// visible range.
+    pub fn detail_columns(&self, detail: &Detail) -> Option<Vec<Option<Vec<Peak>>>> {
+        if !detail.covers(&self.visible()) {
+            return None;
+        }
+        Some(
+            (0..self.width)
+                .map(|x| {
+                    let a = self.x_to_sample(f64::from(x));
+                    let b = self
+                        .x_to_sample(f64::from(x + 1))
+                        .max(a + 1)
+                        .min(self.total);
+                    (0..detail.channels)
+                        .map(|ch| Peak::of_samples(detail.channel(ch, a..b)))
+                        .collect()
+                })
+                .collect(),
+        )
+    }
+
+    /// For [`DrawMode::Polyline`]: per channel, the points `(x, value)` of
+    /// every visible sample frame plus one on either side, so that the line
+    /// runs through the window edges. `None` unless `detail` covers them.
+    pub fn polyline(&self, detail: &Detail) -> Option<Vec<Vec<(f64, f32)>>> {
+        let v = self.visible();
+        let r = v.start.saturating_sub(1)..(v.end + 1).min(self.total);
+        if !detail.covers(&r) {
+            return None;
+        }
+        Some(
+            (0..detail.channels)
+                .map(|ch| {
+                    r.clone()
+                        .zip(detail.channel(ch, r.clone()))
+                        .map(|(pos, value)| (self.sample_to_x(pos), value))
+                        .collect()
+                })
+                .collect(),
+        )
+    }
+
     /// Largest useful zoom-out: the whole timeline fills the width.
     fn max_spp(&self) -> f64 {
         (self.total as f64 / f64::from(self.width)).max(1.0 / MAX_PIXELS_PER_SAMPLE)
@@ -254,6 +314,69 @@ mod tests {
         assert_eq!(v.draw_mode(1152), DrawMode::MinMaxCoarse);
         v.zoom_at(0.0, 1000.0); // 0.5 spp
         assert_eq!(v.draw_mode(1152), DrawMode::Polyline);
+    }
+
+    /// A mono detail whose sample n has the value n / 1000.
+    fn ramp_detail(range: Range<SamplePos>) -> Detail {
+        Detail {
+            samples: range.clone().map(|n| n as f32 / 1000.0).collect(),
+            range,
+            channels: 1,
+        }
+    }
+
+    #[test]
+    fn detail_is_wanted_only_below_packet_resolution() {
+        let mut v = WaveformView::new(1_000_000, 100); // 10 000 spp
+        assert_eq!(v.detail_wanted(1152), None);
+        v.scroll_to(0);
+        v.zoom_at(0.0, 100.0); // 100 spp, 10 000 visible
+        v.scroll_to(500_000);
+        assert_eq!(v.detail_wanted(1152), Some(490_000..520_000));
+        v.scroll_to(0);
+        assert_eq!(
+            v.detail_wanted(1152),
+            Some(0..20_000),
+            "clamped at the start"
+        );
+    }
+
+    #[test]
+    fn detail_columns_are_exact_per_pixel() {
+        let mut v = WaveformView::new(1000, 10); // 100 spp
+        assert!(
+            v.detail_columns(&ramp_detail(0..999)).is_none(),
+            "must cover the view"
+        );
+        let cols = v.detail_columns(&ramp_detail(0..1000)).expect("covered");
+        let p = cols[3].as_ref().expect("column")[0];
+        let q = |x: f32| (x * 32767.0).round() as i16;
+        assert_eq!((p.min, p.max), (q(0.3), q(0.399)));
+        v.zoom_at(0.0, 50.0); // 2 spp
+        let cols = v.detail_columns(&ramp_detail(0..1000)).expect("covered");
+        assert_eq!(cols[1].as_ref().expect("column")[0].min, q(0.002));
+    }
+
+    #[test]
+    fn polyline_runs_through_every_visible_sample() {
+        let mut v = WaveformView::new(1000, 100);
+        v.zoom_at(0.0, 1e9); // 1/32 spp: 3 or 4 samples visible
+        v.scroll_to(500);
+        let line = v.polyline(&ramp_detail(0..1000)).expect("covered");
+        let pts = &line[0];
+        assert_eq!(pts.first(), Some(&(v.sample_to_x(499), 0.499)));
+        assert!(
+            pts.windows(2)
+                .all(|w| w[1].0 - w[0].0 == MAX_PIXELS_PER_SAMPLE)
+        );
+        assert!(
+            pts.last().expect("points").0 >= 100.0,
+            "reaches past the right edge"
+        );
+        assert!(
+            v.polyline(&ramp_detail(500..1000)).is_none(),
+            "needs the sample before"
+        );
     }
 
     #[test]

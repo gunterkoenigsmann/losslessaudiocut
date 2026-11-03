@@ -59,6 +59,24 @@ impl Peak {
     pub fn rms_f32(self) -> f32 {
         f32::from(self.rms) / 65535.0
     }
+
+    /// Min, max and RMS of decoded samples (`-1.0..=1.0`), quantised like
+    /// the summary. `None` for no samples. Used where decoded samples are
+    /// at hand anyway, e.g. a zoomed-in display.
+    pub fn of_samples(samples: impl IntoIterator<Item = f32>) -> Option<Peak> {
+        let (mut min, mut max, mut sq, mut n) = (f32::INFINITY, f32::NEG_INFINITY, 0f64, 0u64);
+        for x in samples {
+            min = min.min(x);
+            max = max.max(x);
+            sq += f64::from(x).powi(2);
+            n += 1;
+        }
+        (n > 0).then(|| Peak {
+            min: to_i16(min),
+            max: to_i16(max),
+            rms: ((sq / n as f64).sqrt() * 65535.0).round().min(65535.0) as u16,
+        })
+    }
 }
 
 /// Converts a decoded sample (`-1.0..=1.0`) to the stored scale.
@@ -334,6 +352,17 @@ mod tests {
     use super::*;
     use lac_core::{AudioStreamInfo, PacketFlags, PacketInfo};
     use proptest::prelude::*;
+
+    #[test]
+    fn peak_of_samples_matches_the_summary_scale() {
+        assert_eq!(Peak::of_samples([]), None);
+        let p = Peak::of_samples([0.5, -0.25, 0.5, -0.25]).expect("samples");
+        assert_eq!((p.min, p.max), (to_i16(-0.25), to_i16(0.5)));
+        // RMS of ±(0.5, 0.25): sqrt((0.25 + 0.0625) / 2).
+        assert!((p.rms_f32() - 0.395_284_7).abs() < 1e-4, "{}", p.rms_f32());
+        let clipped = Peak::of_samples([2.0, f32::NEG_INFINITY]).expect("samples");
+        assert_eq!((clipped.min, clipped.max), (i16::MIN, i16::MAX));
+    }
 
     fn index(lengths: &[u32], channels: u16) -> PacketIndex {
         let mut pos = 0;

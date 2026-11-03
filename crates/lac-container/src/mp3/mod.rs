@@ -281,7 +281,12 @@ impl Mp3File {
             sample_rate: self.first.sample_rate(),
             channels: self.index.info().channels,
             extradata: Vec::new(),
-            packets: self.frames.len(),
+            // libavcodec emits every frame's samples as soon as it is
+            // decoded, also those of the encoder delay (they are cut away
+            // by `keep`).
+            packet_ends: crate::decode::running_ends(
+                self.frames.iter().map(|f| u64::from(f.header.samples())),
+            ),
             keep: self.decode_keep.clone(),
         }])
     }

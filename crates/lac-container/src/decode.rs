@@ -56,12 +56,38 @@ pub struct DecodeSection {
     pub channels: u16,
     /// Codec-specific setup data, see [`Codec`].
     pub extradata: Vec<u8>,
-    /// Number of packets to feed, read with
-    /// [`crate::Container::read_decode_packet`].
-    pub packets: usize,
+    /// One entry per packet to feed (read with
+    /// [`crate::Container::read_decode_packet`]): how many sample frames
+    /// of decoder output, counted like [`DecodeSection::keep`], exist once
+    /// that packet and all before it have been decoded. Non-decreasing.
+    ///
+    /// Decoders emit a packet's output right after it, so this also places
+    /// the output of a fresh decoder that starts in the middle of the
+    /// section: its last output sample after packet *j* lies just before
+    /// `packet_ends[j]`. That is what random access (`lac-decode`'s
+    /// `decode_range`) relies on.
+    pub packet_ends: Vec<u64>,
     /// The sample frames of the decoder output (counted from the first
     /// output sample of this section) that belong to the timeline.
     pub keep: Range<u64>,
+}
+
+impl DecodeSection {
+    /// Number of packets to feed.
+    pub fn packets(&self) -> usize {
+        self.packet_ends.len()
+    }
+}
+
+/// [`DecodeSection::packet_ends`] of packets that output `lens` sample
+/// frames each.
+pub(crate) fn running_ends(lens: impl IntoIterator<Item = u64>) -> Vec<u64> {
+    lens.into_iter()
+        .scan(0u64, |end, n| {
+            *end += n;
+            Some(*end)
+        })
+        .collect()
 }
 
 /// Reads index entry `entry` of `index` as one contiguous byte range: the

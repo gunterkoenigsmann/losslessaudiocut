@@ -185,3 +185,120 @@ fn sink_can_stop_decoding() {
     assert!(matches!(res, Err(lac_decode::DecodeError::Stopped)));
     assert_eq!(chunks, 3);
 }
+
+/// Every fixture with its chained and damaged variants.
+const ALL: [&str; 22] = [
+    "flac_stereo16_44k.flac",
+    "flac_mono8_8k_fixed.flac",
+    "flac_quad24_48k.flac",
+    "flac_wasted_22k.flac",
+    "flac_leftside_ffmpeg.flac",
+    "flac_rightside_ffmpeg.flac",
+    "ogg_vorbis_stereo_44k.ogg",
+    "ogg_vorbis_mono_22k.ogg",
+    "ogg_opus_stereo.opus",
+    "ogg_speex_16k.spx",
+    "mp3_cbr128_44k.mp3",
+    "mp3_vbr_44k.mp3",
+    "mp3_mpeg2_mono_22k.mp3",
+    "mp3_mpeg25_8k.mp3",
+    "mp3_ffmpeg_id3v2.mp3",
+    "ogg_vorbis_chained.ogg",
+    "ogg_opus_chained.opus",
+    "ogg_vorbis_badgranule.ogg",
+    "ogg_opus_badgranule.opus",
+    "ogg_vorbis_damaged.ogg",
+    "mp3_notag_crc.mp3",
+    "mp3_junk.mp3",
+];
+
+/// Ranges at the start, the end, around section boundaries and spread over
+/// the file, from one frame to many packets.
+fn probe_ranges(total: u64, boundaries: &[u64]) -> Vec<std::ops::Range<u64>> {
+    let mut v = vec![
+        0..1.min(total),
+        0..total.min(5000),
+        total.saturating_sub(3000)..total,
+        total - 1..total,
+    ];
+    for &b in boundaries {
+        v.push(b.saturating_sub(700)..(b + 700).min(total));
+    }
+    for k in 1..8u64 {
+        let a = total * k / 8;
+        for len in [1, 333, 4000] {
+            v.push(a..(a + len).min(total));
+        }
+    }
+    v
+}
+
+/// Largest absolute difference random access may have from a whole-file
+/// decode: none for codecs whose decoders have finite memory, a small one
+/// for the IIR state of Opus and Speex.
+fn range_tolerance(name: &str) -> f32 {
+    if name.contains("opus") || name.contains("speex") || name.ends_with(".spx") {
+        TOLERANCE_IIR
+    } else {
+        0.0
+    }
+}
+
+/// Largest difference allowed for Opus and Speex (one 16-bit LSB, as for
+/// Speex joins in issue #17), see [`range_tolerance`]. The fixtures decode
+/// bit for bit with the pre-roll of `decode_range`, but that is not
+/// guaranteed for IIR decoders.
+const TOLERANCE_IIR: f32 = 1.0 / 32768.0;
+
+#[test]
+fn decode_range_matches_decode_all() {
+    for name in ALL {
+        let mut r = BufReader::new(File::open(fixture_path(name)).expect("fixture"));
+        let c = lac_container::open(&mut r).expect("opens");
+        let ch = usize::from(c.index().info().channels);
+        let total = c.index().total_samples();
+        let (all, _) = decode_to_vec(c.as_ref(), &mut r).expect("decodes");
+        // Timeline positions where one decode section ends and the next
+        // begins (chained Ogg).
+        let mut boundaries = Vec::new();
+        let mut pos = 0;
+        for s in c.decode_sections(&mut r).expect("sections") {
+            pos += s.keep.end - s.keep.start;
+            boundaries.push(pos);
+        }
+        let tol = range_tolerance(name);
+        let mut worst = 0f32;
+        for range in probe_ranges(total, &boundaries) {
+            let got = lac_decode::decode_range(c.as_ref(), &mut r, range.clone()).expect("decodes");
+            let want = &all[range.start as usize * ch..range.end as usize * ch];
+            assert_eq!(got.len(), want.len(), "{name} {range:?}: length");
+            for (i, (g, w)) in got.iter().zip(want).enumerate() {
+                let d = (g - w).abs();
+                worst = worst.max(d);
+                assert!(
+                    d <= tol,
+                    "{name} {range:?}: frame {} channel {} is {g}, whole-file decode says {w}",
+                    range.start + (i / ch) as u64,
+                    i % ch
+                );
+            }
+        }
+        eprintln!("{name}: worst difference {worst:e}");
+    }
+}
+
+#[test]
+fn decode_range_clamps_to_the_timeline() {
+    let mut r =
+        BufReader::new(File::open(fixture_path("flac_stereo16_44k.flac")).expect("fixture"));
+    let c = lac_container::open(&mut r).expect("opens");
+    let total = c.index().total_samples();
+    let got =
+        lac_decode::decode_range(c.as_ref(), &mut r, total - 10..total + 100).expect("decodes");
+    assert_eq!(got.len(), 10 * 2);
+    assert!(
+        lac_decode::decode_range(c.as_ref(), &mut r, total + 5..total + 9)
+            .expect("decodes")
+            .is_empty()
+    );
+}

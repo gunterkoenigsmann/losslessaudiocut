@@ -285,7 +285,10 @@ impl OggFile {
                     sample_rate: l.info.sample_rate,
                     channels: l.info.channels,
                     extradata,
-                    packets: l.raw.len(),
+                    packet_ends: self.raw[l.raw.clone()]
+                        .iter()
+                        .map(|p| p.start_in_link + u64::from(p.samples))
+                        .collect(),
                     keep: l.audible.clone(),
                 })
             })
