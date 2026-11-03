@@ -1039,6 +1039,7 @@ dependencies = [
 name = "lac-gui"
 version = "0.1.0"
 dependencies = [
+ "lac-analysis",
  "lac-app",
  "lac-core",
  "lac-peaks",

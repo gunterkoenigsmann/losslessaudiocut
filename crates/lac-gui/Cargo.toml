@@ -11,6 +11,7 @@ name = "losslessaudiocut"
 path = "src/main.rs"
 
 [dependencies]
+lac-analysis.workspace = true
 lac-app.workspace = true
 lac-core.workspace = true
 lac-peaks.workspace = true

@@ -106,7 +106,7 @@ graph TD
 | `lac-playback` | Audio output, transport (play/pause/seek), scrubbing, position reporting for the cursor *(implemented: `Timeline` of kept ranges, `Engine` with decoder thread, `rtrb` ring buffer and generation-checked flushes, linear-interpolation rate and channel conversion, `Player` on the default `cpal` device; the decoder is supplied by `lac_app::playback` as a `PcmSource`, so this crate does not depend on FFmpeg. Grain-restart scrubbing: `scrub::Scrubber` plus 5 ms fades at every seek. Speed: `Speed` in percent steps, `stretch::Stretcher` (WSOLA) or varispeed through the converter's ratio)*. | `cpal` (directly, `rodio` is not needed), `rtrb`; later `rubato` for varispeed |
 | `lac-analysis` | Suggestions where to cut: deletable pauses (quiet or only noise) and track starts, from per-frame level, spectral flatness and band spectrum (section 8). Fed decoded PCM like `lac-peaks`, so it does not depend on `lac-decode` and is tested on synthetic signals *(implemented: `FeatureExtractor`, `detect`; run from `lac_app::analysis_job::AnalysisJob` and `lac detect`)*. | `rustfft`; later: `webrtc-vad` or an ONNX model via `ort` |
 | `lac-app` | Use cases (open, select, cut, split, edit track tags, undo, export, analyse) and view models. Knows nothing about wxWidgets, so all UI logic is unit-testable *(implemented so far: `Source` open/export, `waveform`, `detail`, `peak_job`, `peak_cache`, `editor` (selection, cursor, and `Edits` = deleted ranges, split points and track names on the source timeline, undone by snapshots), `export_job` (one file, or one per track, from one opened source) and `playback`. The editor keeps split points on the source timeline rather than an `EditList` of tracks: deleting across a split then shortens both tracks without moving the split, and a track is derived as its span minus the deletions. Per-track tags (section 4) are not written yet; each track file keeps the source's tags)*. | none |
-| `lac-gui` | wxWidgets windows, waveform widget, menus, key bindings. Renders view models, forwards user events *(implemented: waveform window with zoom and scroll, fed by `lac_app::peak_job::PeakJob` and `lac_app::waveform::WaveformView`; below one packet per pixel column it draws from samples decoded in the background by `lac_app::detail::DetailLoader`, as exact per-pixel min/max and, below one sample per pixel, as a polyline; mouse selection, delete/restore with undo and export through `lac_app::editor::Editor` and `lac_app::export_job::ExportJob`; deleted parts stay on the source timeline, shaded)*. | `wxdragon` |
+| `lac-gui` | wxWidgets windows, waveform widget, menus, key bindings. Renders view models, forwards user events *(implemented: waveform window with zoom and scroll, fed by `lac_app::peak_job::PeakJob` and `lac_app::waveform::WaveformView`; below one packet per pixel column it draws from samples decoded in the background by `lac_app::detail::DetailLoader`, as exact per-pixel min/max and, below one sample per pixel, as a polyline; suggested pauses and track starts from `lac_app::analysis_job::AnalysisJob`; mouse selection, delete/restore with undo and export through `lac_app::editor::Editor` and `lac_app::export_job::ExportJob`; deleted parts stay on the source timeline, shaded)*. | `wxdragon` |
 | `lac-cli` | Same use cases without a GUI: `lac cut in.mp3 --keep 0:10-3:45 -o out.mp3`. Doubles as the integration-test driver. | `clap` |
 
 ### Decoding with FFmpeg, cutting with our own code *(decided)*
@@ -491,9 +491,13 @@ result of your cuts. Two details make it feel right:
 ## 8. Silence and track detection
 
 *Implemented* in `lac-analysis` (features and rules), `lac_app::analysis_job`
-(background thread) and `lac detect` (command line). The GUI is to show the
-suggestions and apply the track starts with `Editor::split_at_all` (one
-undo step).
+(background thread), `lac detect` (command line) and the GUI. The GUI
+starts the analysis together with the waveform when a file is opened and,
+once it is done, draws each suggested pause as a strip along the bottom
+(teal: silence, amber: noise only) and each suggested track start as a tick
+at the top. *Edit > Split at suggested track starts* applies the track
+starts with `Editor::split_at_all`, *Edit > Delete suggested pauses* the
+pauses with `Editor::delete_ranges`; each is one undo step.
 
 ### Features per frame
 

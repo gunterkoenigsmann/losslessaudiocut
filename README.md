@@ -37,6 +37,13 @@ tracks, File > Export asks for a folder and writes one file per track,
 deleted entirely gets no file. The files keep the source's tags for now;
 per-track titles and numbers in the tags come later (issue #24).
 
+While the waveform loads, the file is also searched for pauses (silence or
+only noise) and track starts. Suggested pauses show as a strip along the
+bottom (teal for silence, amber for noise), suggested track starts as a tick
+at the top. *Edit > Split at suggested track starts* (Ctrl+Shift+K) and
+*Edit > Delete suggested pauses* (Ctrl+Shift+D) apply them, each as one
+undo step.
+
 Space plays and stops. Playback plays what the export will contain: the kept
 parts, with the deleted ones skipped, starting at the selection or at the
 cursor (a click without dragging puts it; Home moves it to the start).
