@@ -43,8 +43,10 @@ fn ramp_wav(frames: u16) -> Vec<u8> {
 /// same plain 44-byte header layout (our muxer writes it that way for PCM).
 fn samples(wav: &[u8]) -> Vec<u16> {
     wav[44..]
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&c| u16::from_le_bytes(c))
         .collect()
 }
 
