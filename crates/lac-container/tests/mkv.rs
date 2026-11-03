@@ -313,9 +313,12 @@ fn deletes_join_in_one_stream() {
 }
 
 /// A range inside a single packet is written correctly (our demuxer agrees
-/// on its length), but ffmpeg plays the codec delay that lies inside the
-/// packet as well. This test documents that and fails once ffmpeg handles
-/// it, so [`ffmpeg_mistrims`] can go.
+/// on its length), but ffmpeg plays too much of the packet. How much
+/// depends on the version: 6.1 forgets the codec delay once the discard
+/// padding arrives (100 + 412 samples here), newer versions on Windows CI
+/// apply the codec delay but drop the discard padding (960 - 412). Both lie
+/// within the one packet. This test documents that and fails once ffmpeg
+/// decodes exactly the 100 samples, so [`ffmpeg_mistrims`] can go.
 #[test]
 fn sliver_inside_one_packet() {
     let name = "mkv_opus_stereo.webm";
@@ -329,7 +332,8 @@ fn sliver_inside_one_packet() {
     assert_packets_copied(&src, &out, &p);
     let path = temp_file(&format!("sliver-{name}"), &out);
     if let Some(d) = ffmpeg_decode(&path, "f32le") {
-        assert_eq!(d.len() / 8, 100 + 312 + 100, "{name}");
+        let frames = d.len() / 8;
+        assert!(100 < frames && frames <= 960, "{name}: {frames}");
     }
 }
 
