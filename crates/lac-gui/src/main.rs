@@ -31,8 +31,11 @@
 //!
 //! Usage: `losslessaudiocut [FILE]`.
 
+mod icons;
 mod lanes;
 mod options;
+mod panes;
+mod toolbar;
 mod track_list;
 
 use std::cell::RefCell;
@@ -42,10 +45,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use icons::Icon;
 use lac_app::detail::{Detail, DetailLoader};
 use lac_app::editor::{Editor, Edits};
 use lac_app::export_job::{ExportJob, default_output, describe_outcomes, track_tasks};
 use lac_app::format_samples;
+use lac_app::layout::Pane;
 use lac_app::peak_cache::PeakCache;
 use lac_app::peak_job::{JobStatus, PeakJob};
 use lac_app::waveform::{DrawMode, WaveformView};
@@ -54,6 +59,8 @@ use lac_peaks::PeakSummary;
 use lac_playback::scrub::Scrubber;
 use lac_playback::{Player, Speed, Timeline};
 use options::Options;
+use panes::Panes;
+use toolbar::Tool;
 use wxdragon::prelude::*;
 
 /// Menu command ids (above wxWidgets' reserved range).
@@ -80,7 +87,75 @@ const ID_NORMAL_SPEED: Id = ID_HIGHEST + 20;
 const ID_KEEP_PITCH: Id = ID_HIGHEST + 21;
 const ID_SCRUB_SELECTING: Id = ID_HIGHEST + 22;
 const ID_ALL_TRACKS: Id = ID_HIGHEST + 23;
-const ID_TRACK_LIST: Id = ID_HIGHEST + 24;
+
+/// The toolbar: the most used menu commands. Tooltips name the shortcut,
+/// which is the faster way once known.
+const TOOLS: &[Tool] = &[
+    Tool::Button {
+        id: ID_OPEN,
+        icon: Icon::Open,
+        tip: "Open an audio file (Ctrl+O)",
+    },
+    Tool::Button {
+        id: ID_EXPORT,
+        icon: Icon::Export,
+        tip: "Export the kept parts (Ctrl+E)",
+    },
+    Tool::Gap,
+    Tool::Button {
+        id: ID_UNDO,
+        icon: Icon::Undo,
+        tip: "Undo (Ctrl+Z)",
+    },
+    Tool::Button {
+        id: ID_REDO,
+        icon: Icon::Redo,
+        tip: "Redo (Ctrl+Y)",
+    },
+    Tool::Gap,
+    Tool::Button {
+        id: ID_DELETE,
+        icon: Icon::Delete,
+        tip: "Delete the selection (Del)",
+    },
+    Tool::Button {
+        id: ID_RESTORE,
+        icon: Icon::Restore,
+        tip: "Restore deleted parts in the selection (Ctrl+R)",
+    },
+    Tool::Button {
+        id: ID_SPLIT,
+        icon: Icon::Split,
+        tip: "Start a new track here (Ctrl+K)",
+    },
+    Tool::Gap,
+    Tool::Button {
+        id: ID_TO_START,
+        icon: Icon::ToStart,
+        tip: "Cursor to the start (Home)",
+    },
+    Tool::Button {
+        id: ID_PLAY,
+        icon: Icon::Play,
+        tip: "Play or stop (Space)",
+    },
+    Tool::Gap,
+    Tool::Button {
+        id: ID_ZOOM_IN,
+        icon: Icon::ZoomIn,
+        tip: "Zoom in (Ctrl++)",
+    },
+    Tool::Button {
+        id: ID_ZOOM_OUT,
+        icon: Icon::ZoomOut,
+        tip: "Zoom out (Ctrl+-)",
+    },
+    Tool::Button {
+        id: ID_ZOOM_FIT,
+        icon: Icon::ZoomFit,
+        tip: "Show the whole file (Ctrl+0)",
+    },
+];
 
 /// Status bar fields: file and messages, then selection and edits.
 const FIELD_FILE: i32 = 0;
@@ -184,6 +259,8 @@ struct State {
     tags: Option<Arc<Tags>>,
     /// The track list under the waveform.
     grid: Option<Grid>,
+    /// The dockable panes around the waveform.
+    panes: Option<Panes>,
 }
 
 /// A scrub: dragging with the right button plays short pieces of audio
@@ -581,7 +658,10 @@ fn main() {
     let _ = wxdragon::main(|_| {
         let frame = Frame::builder()
             .with_title("losslessaudiocut")
-            .with_size(Size::new(1000, 400))
+            .with_size({
+                let g = panes::stored_geometry();
+                Size::new(g.width, g.height)
+            })
             .build();
         let status = frame.create_status_bar(3, 0, -1, "status");
         status.set_status_widths(&[-4, -4, -2]);
@@ -593,11 +673,6 @@ fn main() {
         // would flicker.
         panel.set_background_style(BackgroundStyle::Paint);
         let grid = track_list::create(&frame);
-        grid.show(options.track_list);
-        let sizer = BoxSizer::builder(Orientation::Vertical).build();
-        sizer.add(&panel, 2, SizerFlag::Expand, 0);
-        sizer.add(&grid, 1, SizerFlag::Expand, 0);
-        frame.set_sizer(sizer, true);
 
         let cache = PeakCache::default_dir().map(PeakCache::new);
         if let Some(c) = cache.clone() {
@@ -619,6 +694,18 @@ fn main() {
         bind_paint(&panel, &state);
         bind_mouse(&panel, &state);
         bind_select(&panel, &frame, &state);
+        let tools = {
+            let (state, f, p) = (Rc::clone(&state), frame, panel);
+            toolbar::create(&frame, TOOLS, move |id| {
+                command(&f, &p, &state, id, None);
+                // Keys belong to the waveform, not to the clicked button
+                // (Space would press it again rather than stop).
+                p.set_focus();
+            })
+        };
+        let panes = Panes::new(&frame, &panel, &tools, &grid);
+        panes.restore();
+        state.borrow_mut().panes = Some(panes);
         bind_menu(&frame, &panel, &state);
         bind_close(&frame, &state);
 
@@ -682,6 +769,9 @@ fn main() {
         }
         frame.show(true);
         frame.centre();
+        if panes::stored_geometry().maximized {
+            frame.maximize(true);
+        }
     });
 }
 
@@ -788,12 +878,16 @@ fn menu_bar(options: Options) -> MenuBar {
         )
         .append_item(ID_ZOOM_OUT, "Zoom &out\tCtrl+-", "Show more time")
         .append_item(ID_ZOOM_FIT, "Zoom to &fit\tCtrl+0", "Show the whole file")
-        .append_separator()
-        .append_check_item(
-            ID_TRACK_LIST,
-            "&Track list\tCtrl+L",
-            "Show the tracks and their tags under the waveform",
-        )
+        .append_separator();
+    let view = Pane::ALL
+        .into_iter()
+        .fold(view, |m, p| {
+            m.append_check_item(
+                panes::menu_id(p),
+                &panes::menu_label(p),
+                panes::menu_help(p),
+            )
+        })
         .build();
     let bar = MenuBar::builder()
         .append(file, "&File")
@@ -803,7 +897,6 @@ fn menu_bar(options: Options) -> MenuBar {
         .build();
     bar.check_item(ID_KEEP_PITCH, options.keep_pitch);
     bar.check_item(ID_SCRUB_SELECTING, options.scrub_while_selecting);
-    bar.check_item(ID_TRACK_LIST, options.track_list);
     bar
 }
 
@@ -811,115 +904,118 @@ fn menu_bar(options: Options) -> MenuBar {
 fn bind_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
     let state = Rc::clone(state);
     let (f, panel) = (*frame, *panel);
-    frame.on_menu(move |e| {
-        let id = e.get_id();
-        if id == ID_OPEN {
-            if !confirm_discard(&f, &state) {
-                return;
-            }
-            let dialog = FileDialog::builder(&f)
-                .with_message("Open an audio file")
-                .with_wildcard(WILDCARD)
-                .with_style(FileDialogStyle::Open | FileDialogStyle::FileMustExist)
-                .build();
-            if dialog.show_modal() == ID_OK
-                && let Some(path) = dialog.get_path()
-            {
-                state.borrow_mut().open(PathBuf::from(path));
-                f.set_status_text("reading…", FIELD_FILE);
-            }
-        } else if id == ID_EXPORT {
-            export(&f, &state);
-        } else if id == ID_RENAME {
-            rename_track(&f, &state);
-        } else if id == ID_ALL_TRACKS {
-            use_for_all_tracks(&f, &state);
-        } else if id == ID_TRACK_LIST {
-            let mut st = state.borrow_mut();
-            let on = e.is_checked().unwrap_or(!st.options.track_list);
-            st.options.track_list = on;
-            st.options.save();
-            if let Some(g) = &st.grid {
-                g.show(on);
-            }
-            f.layout();
-        } else if id == ID_CLEAR_CACHE {
-            let cache = state.borrow().cache.clone();
-            let msg = match cache.map(|c| c.clear()) {
-                Some(Ok(n)) => format!("waveform cache cleared ({n} entries)"),
-                Some(Err(e)) => format!("could not clear the waveform cache: {e}"),
-                None => "there is no waveform cache on this system".to_string(),
-            };
-            f.set_status_text(&msg, FIELD_FILE);
-            return;
-        } else if id == ID_EXIT {
-            f.close(false);
-            return;
-        } else if id == ID_PLAY {
-            let msg = state.borrow_mut().toggle_play();
-            if let Some(msg) = msg {
-                f.set_status_text(&msg, FIELD_FILE);
-            }
-        } else if matches!(id, ID_FASTER | ID_SLOWER | ID_NORMAL_SPEED | ID_KEEP_PITCH) {
-            let msg = {
-                let mut st = state.borrow_mut();
-                let speed = match id {
-                    ID_FASTER => st.speed.faster(),
-                    ID_SLOWER => st.speed.slower(),
-                    ID_NORMAL_SPEED => Speed::new(100, st.speed.keep_pitch),
-                    // The menu has toggled the check mark already.
-                    _ => {
-                        let keep = e.is_checked().unwrap_or(!st.speed.keep_pitch);
-                        st.options.keep_pitch = keep;
-                        st.options.save();
-                        Speed::new(st.speed.percent(), keep)
-                    }
-                };
-                st.set_speed(speed)
-            };
-            f.set_status_text(&msg, FIELD_FILE);
-        } else if id == ID_SCRUB_SELECTING {
-            let mut st = state.borrow_mut();
-            let on = e.is_checked().unwrap_or(!st.options.scrub_while_selecting);
-            st.options.scrub_while_selecting = on;
-            st.options.save();
-            return;
-        } else if id == ID_TO_START {
-            let mut st = state.borrow_mut();
-            if let Some(e) = &mut st.editor {
-                e.clear_selection();
-                e.set_cursor(0);
-            }
-            st.seek_to_cursor();
-            if let Some(v) = &mut st.view {
-                v.scroll_to(0);
-            }
-        } else if is_edit(id) {
-            // One borrow: the `if let` scrutinee's would last through the
-            // whole block.
-            let msg = {
-                let mut st = state.borrow_mut();
-                let msg = edit(&mut st, id);
-                st.sync_timeline();
-                msg
-            };
-            if let Some(msg) = msg.filter(|m| !m.is_empty()) {
-                f.set_status_text(msg, FIELD_FILE);
-            }
-        } else {
-            let mut st = state.borrow_mut();
-            let Some(v) = &mut st.view else { return };
-            let centre = f64::from(v.width()) / 2.0;
-            match id {
-                ID_ZOOM_IN => v.zoom_at(centre, ZOOM_STEP),
-                ID_ZOOM_OUT => v.zoom_at(centre, 1.0 / ZOOM_STEP),
-                ID_ZOOM_FIT => v.zoom_to_fit(),
-                _ => return,
-            }
+    frame.on_menu(move |e| command(&f, &panel, &state, e.get_id(), e.is_checked()));
+}
+
+/// Runs command `id`, from the menu or the toolbar. `checked` is the new
+/// check mark of a check item chosen from the menu; `None` toggles.
+fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked: Option<bool>) {
+    // Handles are cheap copies; the body was written for owned ones.
+    let f = *f;
+    if let Some(pane) = panes::pane_for(id) {
+        let panes = state.borrow().panes;
+        if let Some(p) = panes {
+            p.toggle(pane);
         }
-        update_chrome(&f, &state.borrow());
-        panel.refresh(false, None);
-    });
+        return;
+    }
+    if id == ID_OPEN {
+        if !confirm_discard(&f, state) {
+            return;
+        }
+        let dialog = FileDialog::builder(&f)
+            .with_message("Open an audio file")
+            .with_wildcard(WILDCARD)
+            .with_style(FileDialogStyle::Open | FileDialogStyle::FileMustExist)
+            .build();
+        if dialog.show_modal() == ID_OK
+            && let Some(path) = dialog.get_path()
+        {
+            state.borrow_mut().open(PathBuf::from(path));
+            f.set_status_text("reading…", FIELD_FILE);
+        }
+    } else if id == ID_EXPORT {
+        export(&f, state);
+    } else if id == ID_RENAME {
+        rename_track(&f, state);
+    } else if id == ID_ALL_TRACKS {
+        use_for_all_tracks(&f, state);
+    } else if id == ID_CLEAR_CACHE {
+        let cache = state.borrow().cache.clone();
+        let msg = match cache.map(|c| c.clear()) {
+            Some(Ok(n)) => format!("waveform cache cleared ({n} entries)"),
+            Some(Err(e)) => format!("could not clear the waveform cache: {e}"),
+            None => "there is no waveform cache on this system".to_string(),
+        };
+        f.set_status_text(&msg, FIELD_FILE);
+        return;
+    } else if id == ID_EXIT {
+        f.close(false);
+        return;
+    } else if id == ID_PLAY {
+        let msg = state.borrow_mut().toggle_play();
+        if let Some(msg) = msg {
+            f.set_status_text(&msg, FIELD_FILE);
+        }
+    } else if matches!(id, ID_FASTER | ID_SLOWER | ID_NORMAL_SPEED | ID_KEEP_PITCH) {
+        let msg = {
+            let mut st = state.borrow_mut();
+            let speed = match id {
+                ID_FASTER => st.speed.faster(),
+                ID_SLOWER => st.speed.slower(),
+                ID_NORMAL_SPEED => Speed::new(100, st.speed.keep_pitch),
+                // The menu has toggled the check mark already.
+                _ => {
+                    let keep = checked.unwrap_or(!st.speed.keep_pitch);
+                    st.options.keep_pitch = keep;
+                    st.options.save();
+                    Speed::new(st.speed.percent(), keep)
+                }
+            };
+            st.set_speed(speed)
+        };
+        f.set_status_text(&msg, FIELD_FILE);
+    } else if id == ID_SCRUB_SELECTING {
+        let mut st = state.borrow_mut();
+        let on = checked.unwrap_or(!st.options.scrub_while_selecting);
+        st.options.scrub_while_selecting = on;
+        st.options.save();
+        return;
+    } else if id == ID_TO_START {
+        let mut st = state.borrow_mut();
+        if let Some(e) = &mut st.editor {
+            e.clear_selection();
+            e.set_cursor(0);
+        }
+        st.seek_to_cursor();
+        if let Some(v) = &mut st.view {
+            v.scroll_to(0);
+        }
+    } else if is_edit(id) {
+        // One borrow: the `if let` scrutinee's would last through the
+        // whole block.
+        let msg = {
+            let mut st = state.borrow_mut();
+            let msg = edit(&mut st, id);
+            st.sync_timeline();
+            msg
+        };
+        if let Some(msg) = msg.filter(|m| !m.is_empty()) {
+            f.set_status_text(msg, FIELD_FILE);
+        }
+    } else {
+        let mut st = state.borrow_mut();
+        let Some(v) = &mut st.view else { return };
+        let centre = f64::from(v.width()) / 2.0;
+        match id {
+            ID_ZOOM_IN => v.zoom_at(centre, ZOOM_STEP),
+            ID_ZOOM_OUT => v.zoom_at(centre, 1.0 / ZOOM_STEP),
+            ID_ZOOM_FIT => v.zoom_to_fit(),
+            _ => return,
+        }
+    }
+    update_chrome(&f, &state.borrow());
+    panel.refresh(false, None);
 }
 
 /// Whether `id` is an Edit menu command.
@@ -1242,6 +1338,11 @@ fn bind_close(frame: &Frame, state: &Rc<RefCell<State>>) {
             f.set_status_text("finishing the export…", FIELD_FILE);
             // Usually seconds; the file would be broken otherwise.
             let _ = r.job.wait();
+        }
+        let panes = state.borrow().panes;
+        if let Some(p) = panes {
+            p.save();
+            p.uninit();
         }
         e.skip(true);
     });
@@ -1644,6 +1745,22 @@ mod tests {
         );
         assert_eq!(edit(&mut st, ID_JOIN), Some(""));
         assert_eq!(st.editor.as_ref().map(|e| e.splits().len()), Some(0));
+    }
+
+    #[test]
+    fn toolbar_buttons_run_distinct_menu_commands() {
+        let ids: Vec<Id> = TOOLS
+            .iter()
+            .filter_map(|t| match t {
+                Tool::Button { id, .. } => Some(*id),
+                Tool::Gap => None,
+            })
+            .collect();
+        for (i, id) in ids.iter().enumerate() {
+            assert!(!ids[i + 1..].contains(id), "{id} twice");
+            assert!(*id > ID_HIGHEST, "{id} is no command of ours");
+            assert_eq!(panes::pane_for(*id), None, "{id} toggles a pane");
+        }
     }
 
     #[test]

@@ -23,6 +23,8 @@
 //! - [`peak_cache`]: the on-disk cache of waveform summaries.
 //! - [`analysis_job`]: suggesting deletable pauses and track starts
 //!   (`lac-analysis`) in a background thread.
+//! - [`layout`]: the main window's dockable panes and how a stored
+//!   arrangement of them is restored.
 //! - [`detail`]: decoded samples for a zoomed-in waveform, loaded in the
 //!   background with random access.
 //!
@@ -32,6 +34,7 @@ pub mod analysis_job;
 pub mod detail;
 pub mod editor;
 pub mod export_job;
+pub mod layout;
 pub mod peak_cache;
 pub mod peak_job;
 pub mod playback;
