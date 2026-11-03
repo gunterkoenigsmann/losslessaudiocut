@@ -271,11 +271,11 @@ codecs the decoder state at the join is wrong for one or two packets:
 | AAC | MDCT overlap-add mixes the tails of two unrelated frames: a transient of one frame (~20 ms) | M4A: keep the frame and rely on the short crossfade-like overlap |
 | Vorbis | as AAC | each kept part becomes a **chained** logical stream that starts with its real predecessor packet, whose output a new stream discards: **no join window**, bit-exact *(implemented)*. Caveat: ffmpeg does not reset its Vorbis decoder at a chain boundary and plays one extra overlap (≤ 23 ms) per join; libvorbisfile-based players are exact |
 | Opus | CELT/SILK prediction state | each kept part becomes a chained stream with ≥ 80 ms pre-roll hidden by `pre_skip` (RFC 7845 4.3) *(implemented)*. The output is bit-exact again once the decoder has converged; the window depends on the content, typically < 100 ms |
-| Speex | CELP predictor and pitch memory | none: parts are joined within one stream *(implemented)*. The output is bit-exact again once the state is flushed, at the latest after the next pause; on steady tones this can take long |
+| Speex | CELP predictor, pitch memory and the float synthesis-filter state | none: parts are joined within one stream *(implemented)*. The output is bit-exact again once the state has converged. A pause does **not** flush it: digital silence leaves the decoder state in place, so convergence happens during the following speech, measured at up to 320 ms on the speech-like fixture; on steady tones this can take longer. The deviations are float-rounding sized and inaudible |
 
 Tests use a speech-like fixture signal (syllables separated by 80 ms of
-silence) and require Opus and Speex output to be bit-exact from 250 ms after
-each join point on.
+silence) and require the output to be bit-exact from 250 ms (Opus) or
+400 ms (Speex) after each join point on.
 
 On top of that, the editor **suggests join points in quiet packets** (it has
 the per-packet RMS from the waveform cache), because most deletions remove
