@@ -16,7 +16,7 @@ jobs:
     # Typically under 15 s.
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -36,7 +36,7 @@ jobs:
     # waiting for a runner is not affected.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
