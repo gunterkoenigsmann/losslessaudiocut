@@ -9,10 +9,11 @@
 //! One job writes one file, or one file per track ([`track_tasks`]); the
 //! source is opened once for all of them.
 //!
-//! Each file gets the source's tags with the task's [`TagEdits`] applied.
-//! Track files are numbered among the files written (`track_number` 1..n,
+//! Each file gets the source's tags with the task's [`TagEdits`] applied:
+//! the track's changes from the editor. Unless the user set them, track
+//! files are numbered among the files written (`track_number` 1..n,
 //! `track_total` n), so a track that is deleted entirely leaves no gap in
-//! a player's numbering, and a named track gets its name as its title.
+//! a player's numbering.
 //!
 //! An export cannot be cancelled: stopping half way would leave a broken
 //! file. Dropping the job only stops listening; the files are still
@@ -110,14 +111,43 @@ pub fn track_output(dir: &Path, source: &Path, track: &Track, count: usize) -> P
 }
 
 /// The task for exporting all of `editor`'s kept audio as one file:
-/// the source's tags, with the title the user gave the one track.
+/// the source's tags with the changes made to the one track (none:
+/// `tags` is `None` and the source's tags are copied as they are).
 pub fn single_task(editor: &Editor, output: impl Into<PathBuf>) -> ExportTask {
-    let name = editor.tracks().into_iter().next().and_then(|t| t.name);
+    let tags = editor
+        .tracks()
+        .into_iter()
+        .next()
+        .map(|t| t.tags)
+        .filter(|t| !t.is_empty());
     ExportTask {
         request: editor.cut_request(),
         output: output.into(),
-        tags: name.map(|n| [(TagField::Title, n)].into_iter().collect()),
+        tags,
     }
+}
+
+/// The track numbers that files will get: (number, total) of each track
+/// of `editor`, `None` for a track deleted entirely. Numbers count the
+/// files written; a number or total the user set wins.
+pub fn track_numbers(editor: &Editor) -> Vec<Option<(String, String)>> {
+    let tracks = editor.tracks();
+    let files = tracks.iter().filter(|t| !t.kept.is_empty()).count();
+    let mut n = 0;
+    tracks
+        .iter()
+        .map(|t| {
+            if t.kept.is_empty() {
+                return None;
+            }
+            n += 1;
+            let get = |f, auto: usize| t.tags.get(f).map_or_else(|| auto.to_string(), String::from);
+            Some((
+                get(TagField::TrackNumber, n),
+                get(TagField::TrackTotal, files),
+            ))
+        })
+        .collect()
 }
 
 /// One task per track of `editor` that keeps anything, writing into `dir`
@@ -128,28 +158,24 @@ pub fn single_task(editor: &Editor, output: impl Into<PathBuf>) -> ExportTask {
 pub fn track_tasks(editor: &Editor, source: &Path, dir: &Path) -> (Vec<ExportTask>, Vec<usize>) {
     let tracks = editor.tracks();
     let count = tracks.len();
-    let (kept, skipped): (Vec<Track>, Vec<Track>) =
-        tracks.into_iter().partition(|t| !t.kept.is_empty());
-    let files = kept.len();
-    let tasks = kept
-        .into_iter()
-        .enumerate()
-        .map(|(i, t)| {
-            let mut tags = TagEdits::new();
-            // Numbers are valid values, so these cannot fail.
-            let _ = tags.set(TagField::TrackNumber, &(i + 1).to_string());
-            let _ = tags.set(TagField::TrackTotal, &files.to_string());
-            if let Some(n) = &t.name {
-                let _ = tags.set(TagField::Title, n);
-            }
-            ExportTask {
-                output: track_output(dir, source, &t, count),
-                request: CutRequest::Keep(t.kept),
-                tags: Some(tags),
-            }
-        })
-        .collect();
-    (tasks, skipped.into_iter().map(|t| t.number).collect())
+    let mut tasks = Vec::new();
+    let mut skipped = Vec::new();
+    for (t, numbers) in tracks.into_iter().zip(track_numbers(editor)) {
+        let Some((number, total)) = numbers else {
+            skipped.push(t.number);
+            continue;
+        };
+        let mut tags = t.tags.clone();
+        // Valid numbers (counted, or set by the user and checked then).
+        let _ = tags.set(TagField::TrackNumber, &number);
+        let _ = tags.set(TagField::TrackTotal, &total);
+        tasks.push(ExportTask {
+            output: track_output(dir, source, &t, count),
+            request: CutRequest::Keep(t.kept),
+            tags: Some(tags),
+        });
+    }
+    (tasks, skipped)
 }
 
 /// A one-line report of an export for the status bar: for one file what
@@ -329,6 +355,7 @@ mod tests {
             span: 0..1,
             kept: vec![],
             name: name.map(String::from),
+            tags: TagEdits::new(),
         };
         let src = Path::new("/rec/show.mp3");
         let out = Path::new("/out");

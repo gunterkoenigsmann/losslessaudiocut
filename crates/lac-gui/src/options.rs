@@ -11,6 +11,8 @@ use wxdragon::config::{Config, ConfigStyle};
 const KEEP_PITCH: &str = "/Playback/KeepPitch";
 /// Key of [`Options::scrub_while_selecting`].
 const SCRUB_WHILE_SELECTING: &str = "/Playback/ScrubWhileSelecting";
+/// Key of [`Options::track_list`].
+const TRACK_LIST: &str = "/View/TrackList";
 
 /// The remembered options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +22,8 @@ pub struct Options {
     /// Play > Scrub while selecting: dragging a selection plays the edge
     /// being dragged.
     pub scrub_while_selecting: bool,
+    /// View > Track list: the track list is shown under the waveform.
+    pub track_list: bool,
 }
 
 impl Default for Options {
@@ -27,6 +31,7 @@ impl Default for Options {
         Options {
             keep_pitch: true,
             scrub_while_selecting: true,
+            track_list: true,
         }
     }
 }
@@ -39,6 +44,7 @@ impl Options {
         Options {
             keep_pitch: c.read_bool(KEEP_PITCH, d.keep_pitch),
             scrub_while_selecting: c.read_bool(SCRUB_WHILE_SELECTING, d.scrub_while_selecting),
+            track_list: c.read_bool(TRACK_LIST, d.track_list),
         }
     }
 
@@ -48,6 +54,7 @@ impl Options {
         let c = config();
         c.write_bool(KEEP_PITCH, self.keep_pitch);
         c.write_bool(SCRUB_WHILE_SELECTING, self.scrub_while_selecting);
+        c.write_bool(TRACK_LIST, self.track_list);
         c.flush(false);
     }
 }
@@ -68,7 +75,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn both_options_are_on_by_default() {
+    fn all_options_are_on_by_default() {
         // Decided with the user: hearing the dragged edge is what the tool
         // is for, and speech should stay intelligible at other speeds.
         assert_eq!(
@@ -76,6 +83,7 @@ mod tests {
             Options {
                 keep_pitch: true,
                 scrub_while_selecting: true,
+                track_list: true,
             }
         );
     }

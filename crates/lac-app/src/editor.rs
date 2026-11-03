@@ -14,6 +14,12 @@
 //! deleting or restoring around them never moves them. A track is the
 //! source span between two split points, minus what is deleted in it.
 //!
+//! Tag changes ([`TagEdits`]) are kept on two levels: changes for all
+//! tracks (album, artist, ...) and changes per track, keyed by where the
+//! track starts. A track's changes are both, the per-track ones winning;
+//! the export applies them to the source's tags. A track's title is its
+//! name: it names the file too.
+//!
 //! Undo and redo keep whole snapshots of the [`Edits`]; they are small (one
 //! entry per deletion or split), so this is simpler and safer than inverse
 //! operations.
@@ -21,9 +27,9 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-use lac_core::SamplePos;
+use lac_core::{SamplePos, TagField, TagValueError};
 
-use crate::{CutRequest, KeptRange, format_samples, ranges};
+use crate::{CutRequest, KeptRange, TagEdits, format_samples, ranges};
 
 /// Everything the user changed, as one undoable value.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -32,8 +38,11 @@ pub struct Edits {
     pub deleted: Vec<Range<SamplePos>>,
     /// Where new tracks start, sorted, strictly inside the recording.
     pub splits: Vec<SamplePos>,
-    /// Track names, keyed by where the track starts (0 for the first).
-    pub names: BTreeMap<SamplePos, String>,
+    /// Tag changes that apply to every track.
+    pub all_tags: TagEdits,
+    /// Tag changes per track, keyed by where the track starts (0 for the
+    /// first); they win over [`Edits::all_tags`].
+    pub track_tags: BTreeMap<SamplePos, TagEdits>,
 }
 
 /// One track: a stretch of the source between split points.
@@ -45,8 +54,10 @@ pub struct Track {
     pub span: Range<SamplePos>,
     /// What the track's file will contain: the span minus deletions.
     pub kept: Vec<Range<SamplePos>>,
-    /// The name the user gave it.
+    /// The name the user gave it: its title, if not empty.
     pub name: Option<String>,
+    /// Its tag changes: those for all tracks, overridden by its own.
+    pub tags: TagEdits,
 }
 
 impl Track {
@@ -210,9 +221,30 @@ impl Editor {
                     .map(|k| k.start.max(a)..k.end.min(b))
                     .filter(|k| k.start < k.end)
                     .collect(),
-                name: self.edits.names.get(&a).cloned(),
+                tags: self.track_edits(a),
+                name: None,
+            })
+            .map(|mut t| {
+                t.name = t
+                    .tags
+                    .get(TagField::Title)
+                    .filter(|n| !n.is_empty())
+                    .map(String::from);
+                t
             })
             .collect()
+    }
+
+    /// The tag changes of the track starting at `start`.
+    fn track_edits(&self, start: SamplePos) -> TagEdits {
+        let mut t = self.edits.all_tags.clone();
+        if let Some(own) = self.edits.track_tags.get(&start) {
+            for (f, v) in own.iter() {
+                // Stored values are valid, so this cannot fail.
+                let _ = t.set(f, v);
+            }
+        }
+        t
     }
 
     /// Index (0-based) of the track containing source frame `pos`.
@@ -260,22 +292,81 @@ impl Editor {
         }
         let mut next = self.edits.clone();
         let at = next.splits.remove(index - 1);
-        next.names.remove(&at);
+        next.track_tags.remove(&at);
         self.commit(next)
     }
 
-    /// Names track `index` (0-based); an empty or blank name removes it.
+    /// Names track `index` (0-based), i.e. sets its title; an empty or
+    /// blank name removes the name, so the title is the source's again.
     /// Returns false if nothing changed.
     pub fn rename_track(&mut self, index: usize, name: &str) -> bool {
-        let Some(track) = self.tracks().into_iter().nth(index) else {
+        if name.trim().is_empty() {
+            return self.reset_track_tag(index, TagField::Title);
+        }
+        self.set_track_tag(index, TagField::Title, name)
+            .unwrap_or(false)
+    }
+
+    /// Sets tag `field` of track `index` (0-based) to `value`; an empty
+    /// value clears the field. Returns whether anything changed (false
+    /// also for an index out of range), or an error for a numeric field
+    /// that is not a number.
+    pub fn set_track_tag(
+        &mut self,
+        index: usize,
+        field: TagField,
+        value: &str,
+    ) -> Result<bool, TagValueError> {
+        let Some(start) = self.track_start(index) else {
+            return Ok(false);
+        };
+        let mut next = self.edits.clone();
+        next.track_tags
+            .entry(start)
+            .or_default()
+            .set(field, value)?;
+        Ok(self.commit(next))
+    }
+
+    /// Makes tag `field` of track `index` the source's (or the all-tracks
+    /// value) again. Returns whether anything changed.
+    pub fn reset_track_tag(&mut self, index: usize, field: TagField) -> bool {
+        let Some(start) = self.track_start(index) else {
             return false;
         };
         let mut next = self.edits.clone();
-        match name.trim() {
-            "" => next.names.remove(&track.span.start),
-            n => next.names.insert(track.span.start, n.to_string()),
-        };
+        if let Some(t) = next.track_tags.get_mut(&start) {
+            t.reset(field);
+            if t.is_empty() {
+                next.track_tags.remove(&start);
+            }
+        }
         self.commit(next)
+    }
+
+    /// Sets tag `field` of every track to `value` (empty clears it),
+    /// replacing their own values, in one undoable step. Tracks added
+    /// later get it too. Returns whether anything changed.
+    pub fn set_all_tracks_tag(
+        &mut self,
+        field: TagField,
+        value: &str,
+    ) -> Result<bool, TagValueError> {
+        let mut next = self.edits.clone();
+        next.all_tags.set(field, value)?;
+        for t in next.track_tags.values_mut() {
+            t.reset(field);
+        }
+        next.track_tags.retain(|_, t| !t.is_empty());
+        Ok(self.commit(next))
+    }
+
+    /// Where track `index` starts, if it exists.
+    fn track_start(&self, index: usize) -> Option<SamplePos> {
+        match index {
+            0 => Some(0),
+            i => self.edits.splits.get(i - 1).copied(),
+        }
     }
 
     /// The parts that will be exported, in order (the complement of
@@ -359,7 +450,7 @@ impl Editor {
         !self.redo.is_empty()
     }
 
-    /// Undoes the last change (delete, restore, split, join, rename).
+    /// Undoes the last change (delete, restore, split, join, tag change).
     pub fn undo(&mut self) -> bool {
         let Some(prev) = self.undo.pop() else {
             return false;
@@ -698,6 +789,42 @@ mod tests {
         e.select(600, 1000);
         e.delete_selection();
         assert!(e.tracks()[2].kept.is_empty());
+    }
+
+    #[test]
+    fn track_tags_override_the_all_tracks_tags() {
+        let mut e = Editor::new(1000);
+        e.split_at(500);
+        assert_eq!(e.set_all_tracks_tag(TagField::Album, "Live"), Ok(true));
+        assert_eq!(e.set_track_tag(1, TagField::Artist, "Guest"), Ok(true));
+        assert_eq!(e.set_track_tag(1, TagField::Album, "Bonus"), Ok(true));
+        assert_eq!(e.set_track_tag(1, TagField::Album, "Bonus"), Ok(false));
+        assert!(e.set_track_tag(0, TagField::TrackNumber, "x").is_err());
+        assert_eq!(e.set_track_tag(7, TagField::Title, "x"), Ok(false));
+        let t = e.tracks();
+        assert_eq!(t[0].tags.get(TagField::Album), Some("Live"));
+        assert_eq!(t[0].tags.get(TagField::Artist), None);
+        assert_eq!(t[1].tags.get(TagField::Album), Some("Bonus"));
+        assert_eq!(t[1].tags.get(TagField::Artist), Some("Guest"));
+
+        // A new track gets the all-tracks values.
+        e.split_at(800);
+        assert_eq!(e.tracks()[2].tags.get(TagField::Album), Some("Live"));
+        // Resetting brings the all-tracks value back.
+        assert!(e.reset_track_tag(1, TagField::Album));
+        assert_eq!(e.tracks()[1].tags.get(TagField::Album), Some("Live"));
+        assert!(!e.reset_track_tag(1, TagField::Album), "nothing to reset");
+        // Setting for all tracks replaces the tracks' own values.
+        assert_eq!(e.set_all_tracks_tag(TagField::Artist, ""), Ok(true));
+        assert!(
+            e.tracks()
+                .iter()
+                .all(|t| t.tags.get(TagField::Artist) == Some(""))
+        );
+        assert!(e.edits().track_tags.is_empty());
+        // One undo step each.
+        assert!(e.undo());
+        assert_eq!(e.tracks()[1].tags.get(TagField::Artist), Some("Guest"));
     }
 
     #[test]

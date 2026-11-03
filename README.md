@@ -6,8 +6,8 @@ or split it into tracks, without ever re-encoding lossy audio.
 Status: early development. WAV, FLAC, Ogg (Vorbis, Opus, Speex), MP3 and
 Matroska/WebM (Opus) cutting work from the command line and in the
 wxWidgets GUI (waveform, zoom, select, delete, split into tracks, undo,
-export, playback of the result, scrubbing, playback speed, per-track tags);
-a track list for editing all tags and AAC follow. See
+export, playback of the result, scrubbing, playback speed, a track list
+with per-track tags); AAC follows. See
 [`docs/architecture.md`](docs/architecture.md) for the design.
 
 ## GUI
@@ -37,6 +37,15 @@ tracks, File > Export asks for a folder and writes one file per track,
 deleted entirely gets no file. Each file gets the source's tags with its
 track number (counting the files written), the number of tracks, and the
 track's name as title.
+
+The track list under the waveform (View > Track list, Ctrl+L) shows every
+track with the tags its file will get: title, artist, album, album artist,
+track number and count, date, genre and comment. Click a cell and type to
+change it (the title is the track's name); changed values are shown in
+bold blue, and typing the original value back undoes the change. Edit > Use
+for all tracks (Ctrl+Shift+A) gives every track the value of the selected
+cell, e.g. the album. Selecting a row moves the cursor to that track. Tag
+changes are undone with Ctrl+Z like any other edit.
 
 Space plays and stops. Playback plays what the export will contain: the kept
 parts, with the deleted ones skipped, starting at the selection or at the
