@@ -41,9 +41,9 @@ completions`, see `packaging/shell-integration.sh`):
 - The AppImage has them under `usr/share/` as well.
 
 File associations: the program registers as *a* handler for the audio
-types it opens (MP3, Ogg Vorbis, Opus, Speex, FLAC, WAV, AIFF, Matroska audio;
-WebM audio on Linux), offered under "Open with", but never takes over the
-default program:
+types it opens (MP3, M4A, Ogg Vorbis, Opus, Speex, FLAC, WAV, AIFF,
+Matroska audio; WebM audio on Linux), offered under "Open with", but never
+takes over the default program:
 
 - Linux: `MimeType=` in the desktop file (AppImage and snap).
 - macOS: `CFBundleDocumentTypes` with `LSHandlerRank` *Alternate* in

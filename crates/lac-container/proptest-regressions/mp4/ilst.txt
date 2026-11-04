@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a62a45b8c11ad5f6c1233dd5fa1073e40e9054f09d812a288247285306556473 # shrinks to tags = Tags { title: None, artist: None, album: None, album_artist: None, track_number: None, track_total: None, date: None, genre: None, comment: None, extra: [("A_", "\t")] }

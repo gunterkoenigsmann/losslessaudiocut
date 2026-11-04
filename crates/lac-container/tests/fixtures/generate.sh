@@ -90,3 +90,23 @@ $og -i "$tmp/aj.wav" -fflags +bitexact -c:a pcm_s24be aiff_s24_48k_mono.aif
 $synth "$tmp/ak.wav" 22050 2 16 0.4
 $og -i "$tmp/ak.wav" -fflags +bitexact -c:a pcm_s16le -f aiff aifc_sowt_22k.aifc
 $og -i "$tmp/ak.wav" -fflags +bitexact -c:a pcm_f32be -f aiff aifc_fl32_22k.aifc
+
+# MP4/M4A with AAC, encoded by ffmpeg's native AAC encoder (AAC-LC): with
+# tags and moov after mdat (ffmpeg's default); speech-like mono with moov
+# first (+faststart); without an edit list, so the priming samples are
+# part of the timeline; and with a video track in front of the audio, as
+# a phone camera writes it. Perceptual noise substitution is off ("-aac_pns
+# 0"): its noise comes from a random generator that runs from the start of
+# the stream, so a cut decodes it differently (see tests/mp4.rs). The last
+# file keeps it on to test exactly that.
+ma="-fflags +bitexact -c:a aac -aac_pns 0"
+$synth "$tmp/ma.wav" 44100 2 16 1.5
+$og -i "$tmp/ma.wav" $ma -b:a 128k -metadata title=Fixture \
+    -metadata artist=losslessaudiocut mp4_aac_stereo_44k.m4a
+$synth "$tmp/mb.wav" 48000 1 16 1.0 0 speech
+$og -i "$tmp/mb.wav" $ma -b:a 64k -movflags +faststart mp4_aac_mono_48k.m4a
+$synth "$tmp/mc.wav" 22050 2 16 1.0
+$og -i "$tmp/mc.wav" $ma -b:a 64k -use_editlist 0 mp4_aac_noedit_22k.m4a
+$og -f lavfi -i "color=c=gray:s=16x16:r=5:d=1" -i "$tmp/mb.wav" -fflags +bitexact \
+    -c:v mjpeg $ma -b:a 64k mp4_aac_with_video.mp4
+$og -i "$tmp/ma.wav" -fflags +bitexact -c:a aac -b:a 96k mp4_aac_pns_44k.m4a

@@ -62,6 +62,7 @@ const SYSTEM_UTIS: &[&str] = &[
     "public.mp3",
     "com.microsoft.waveform-audio",
     "public.aiff-audio",
+    "public.mpeg-4-audio",
 ];
 
 #[test]

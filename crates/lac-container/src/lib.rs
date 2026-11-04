@@ -8,7 +8,8 @@
 //! [`lac_core::CutPlan`]s. Lossy audio is never decoded or re-encoded here.
 //!
 //! Supported so far: [`wav`], [`aiff`], [`flac`], [`ogg`] (Vorbis, Opus, Speex),
-//! [`mp3`] and [`mkv`] (Matroska/WebM with Opus). [`open`] detects the format
+//! [`mp3`], [`mkv`] (Matroska/WebM with Opus) and [`mp4`] (MP4/M4A with
+//! AAC or ALAC). [`open`] detects the format
 //! from the file's content and returns it behind the common [`Container`]
 //! interface. Each format also reads and writes its tags; the shared tag
 //! formats live in [`tags`].
@@ -19,6 +20,7 @@ pub mod decode;
 pub mod flac;
 pub mod mkv;
 pub mod mp3;
+pub mod mp4;
 pub mod ogg;
 pub mod tags;
 pub mod wav;
@@ -344,6 +346,50 @@ impl Container for mkv::MkvFile {
     }
 }
 
+impl Container for mp4::Mp4File {
+    fn format_name(&self) -> &'static str {
+        "MP4"
+    }
+    fn details(&self) -> String {
+        match self.other_tracks() {
+            0 => self.codec().name().into(),
+            n => format!("{}, {n} other track(s) ignored", self.codec().name()),
+        }
+    }
+    fn index(&self) -> &PacketIndex {
+        mp4::Mp4File::index(self)
+    }
+    fn capabilities(&self) -> CutCapabilities {
+        mp4::Mp4File::capabilities(self)
+    }
+    fn warnings(&self) -> &[String] {
+        mp4::Mp4File::warnings(self)
+    }
+    fn tags(&self) -> &Tags {
+        mp4::Mp4File::tags(self)
+    }
+    fn write_cut(
+        &self,
+        r: &mut dyn ReadSeek,
+        plans: &[CutPlan],
+        tags: Option<&Tags>,
+        w: &mut dyn WriteSeek,
+    ) -> Result<()> {
+        mp4::Mp4File::write_cut(self, r, plans, tags, w)
+    }
+    fn decode_sections(&self, r: &mut dyn ReadSeek) -> Result<Vec<DecodeSection>> {
+        mp4::Mp4File::decode_sections(self, r)
+    }
+    fn read_decode_packet(
+        &self,
+        r: &mut dyn ReadSeek,
+        section: usize,
+        packet: usize,
+    ) -> Result<Vec<u8>> {
+        mp4::Mp4File::read_decode_packet(self, r, section, packet)
+    }
+}
+
 /// Detects the container format from the first bytes of `r` and opens it.
 pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
     let mut head = [0u8; 12];
@@ -379,12 +425,17 @@ pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
     if head.starts_with(b"OggS") {
         return Ok(Box::new(ogg::OggFile::open(r)?));
     }
+    // ISO/IEC 14496-12 4.3: ftyp comes first; old QuickTime files may
+    // start with moov, or with mdat, wide or free before it.
+    if head.len() >= 8 && matches!(&head[4..8], b"ftyp" | b"moov" | b"mdat" | b"wide" | b"free") {
+        return Ok(Box::new(mp4::Mp4File::open(r)?));
+    }
     // RFC 8794 8: the EBML header ID.
     if head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
         return Ok(Box::new(mkv::MkvFile::open(r)?));
     }
     Err(ContainerError::Unsupported(
-        "unknown file format (supported: WAV, AIFF, FLAC, Ogg, MP3, Matroska/WebM)".into(),
+        "unknown file format (supported: WAV, AIFF, FLAC, Ogg, MP3, Matroska/WebM, MP4/M4A)".into(),
     ))
 }
 

@@ -24,8 +24,9 @@ use clap::{CommandFactory, Parser, ValueHint};
                   deletes parts of it or splits it into tracks without \
                   re-encoding: what is kept decodes to exactly the same \
                   samples as the original.\n\n\
-                  Supported formats: WAV, AIFF, FLAC, Ogg Vorbis/Opus/Speex, MP3 \
-                  and Matroska/WebM Opus, detected from the content. The \
+                  Supported formats: WAV, AIFF, FLAC, Ogg Vorbis/Opus/Speex, \
+                  MP3, MP4/M4A (AAC) and Matroska/WebM Opus, detected from \
+                  the content. The \
                   command line tool lac(1) does the same cuts without a \
                   window."
 )]

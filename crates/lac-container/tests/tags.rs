@@ -14,7 +14,8 @@ use lac_container::Container;
 use lac_core::{CutPlan, Tags, plan_cuts};
 
 /// Every format, with a fixture and its file extension.
-const FIXTURES: [&str; 10] = [
+const FIXTURES: [&str; 11] = [
+    "mp4_aac_stereo_44k.m4a",
     "aiff_s16_44k.aiff",
     "aifc_sowt_22k.aifc",
     "flac_wasted_22k.flac",
