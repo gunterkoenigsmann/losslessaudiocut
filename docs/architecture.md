@@ -639,9 +639,15 @@ packets in the same state. This gives:
   `.icns` and Linux icons from it, and the snap uses it as its icon (a
   byte-identical copy in `snap/gui/`). It uses plain shapes only, because
   wxWidgets renders it with NanoSVG.
-- Release packaging: Linux has a snap (`snap/snapcraft.yaml`, built in CI
-  and published weekly to edge and stable, see [`snap.md`](snap.md)). An
-  `.app` in a `.dmg` and an installer or zip for Windows come later.
+- Release packaging: a `vX.Y.Z` tag makes `.github/workflows/release.yml`
+  build a zip and an Inno Setup installer for Windows (x64, arm64), a `.dmg`
+  for macOS (arm64, x86_64) and an AppImage for Linux (x86_64, aarch64),
+  smoke-test each and attach them to the GitHub release; see
+  [`release.md`](release.md). FFmpeg's shared libraries are bundled with
+  each package; wxWidgets is linked statically. Linux also has a snap
+  (`snap/snapcraft.yaml`, built in CI and published weekly to edge and
+  stable, see [`snap.md`](snap.md)); the release workflow starts its
+  publishing right after a release.
 
 ## 11. Decisions so far
 

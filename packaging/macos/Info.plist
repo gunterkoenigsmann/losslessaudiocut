@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Bundle description of losslessaudiocut.app. packaging/macos/dmg.sh
+     replaces @VERSION@ (the full version, e.g. 1.2.0 or
+     0.1.0-dev.20261104.b46df06) and @SHORT_VERSION@ (only X.Y.Z, the form
+     macOS expects in CFBundleShortVersionString and CFBundleVersion). -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>losslessaudiocut</string>
+    <key>CFBundleExecutable</key>
+    <string>losslessaudiocut</string>
+    <key>CFBundleIconFile</key>
+    <string>losslessaudiocut</string>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.gunterkoenigsmann.losslessaudiocut</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>losslessaudiocut</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@SHORT_VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@SHORT_VERSION@</string>
+    <key>CFBundleGetInfoString</key>
+    <string>losslessaudiocut @VERSION@</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.music</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>GPL-3.0-or-later</string>
+</dict>
+</plist>

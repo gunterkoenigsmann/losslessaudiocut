@@ -27,6 +27,11 @@ The snap can open files in your home directory; for USB sticks and other
 drives run `sudo snap connect losslessaudiocut:removable-media`. Packaging
 and release steps: [`docs/snap.md`](docs/snap.md).
 
+For Windows (zip or installer), macOS (DMG) and Linux (AppImage), download
+the package for your system from the
+[releases page](https://github.com/gunterkoenigsmann/losslessaudiocut/releases);
+see [`docs/release.md`](docs/release.md) for what each contains.
+
 ## GUI
 
 ```sh
@@ -172,6 +177,10 @@ Some tests cross-check results with `ffmpeg`, `flac`, `oggdec`
 (vorbis-tools) and `mpg123` if they are installed; set `LAC_REQUIRE_TOOLS=1` to make missing tools an error.
 Test fixtures are regenerated with `crates/lac-container/tests/fixtures/generate.sh`. See
 [`AGENTS.md`](AGENTS.md) for conventions.
+
+Release packages (Windows zip and installer, macOS DMG, Linux AppImage) are
+built by CI when a version tag is pushed; see
+[`docs/release.md`](docs/release.md).
 
 ## License
 
