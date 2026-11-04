@@ -65,18 +65,22 @@ pub fn run_tool(program: &str, args: &[&std::ffi::OsStr]) -> Option<Output> {
 /// Decodes `file` with ffmpeg to interleaved raw samples of `raw_format`
 /// (e.g. `"s32le"`), or `None` if ffmpeg is unavailable.
 pub fn ffmpeg_decode(file: &Path, raw_format: &str) -> Option<Vec<u8>> {
-    let o = run_tool(
-        "ffmpeg",
-        &[
-            "-v".as_ref(),
-            "error".as_ref(),
-            "-i".as_ref(),
-            file.as_os_str(),
-            "-f".as_ref(),
-            raw_format.as_ref(),
-            "-".as_ref(),
-        ],
-    )?;
+    ffmpeg_decode_with(file, raw_format, &[])
+}
+
+/// Like [`ffmpeg_decode`], with decoder options (e.g. `["-cons_noisegen",
+/// "1"]`) placed before the input.
+pub fn ffmpeg_decode_with(file: &Path, raw_format: &str, input_opts: &[&str]) -> Option<Vec<u8>> {
+    let mut args: Vec<&std::ffi::OsStr> = vec!["-v".as_ref(), "error".as_ref()];
+    args.extend(input_opts.iter().map(std::ffi::OsStr::new));
+    args.extend([
+        "-i".as_ref(),
+        file.as_os_str(),
+        "-f".as_ref(),
+        raw_format.as_ref(),
+        "-".as_ref(),
+    ]);
+    let o = run_tool("ffmpeg", &args)?;
     assert!(
         o.status.success(),
         "ffmpeg failed: {}",

@@ -193,6 +193,9 @@ fn preroll(codec: lac_container::Codec, sample_rate: u32) -> (usize, u64) {
         // ISO/IEC 14496-3 4.6.11); one more frame for HE-AAC's SBR filter
         // bank, as lac_container::mp4 writes it.
         Codec::Aac => (2, 0),
+        // The first block's IMDCT output overlaps with the previous
+        // frame's last block (A/52 7.9.4.2); nothing reaches further back.
+        Codec::Ac3 => (1, 0),
         // RFC 7845 4.6 recommends at least 80 ms of pre-roll; measured on
         // the fixtures, the output is bit-exact again about 140 ms later.
         // Decoding 250 ms more is cheap and leaves a margin.
@@ -310,5 +313,6 @@ fn codec_name(c: lac_container::Codec) -> &'static str {
         Codec::Mp3 => "MP3",
         Codec::Aac => "AAC",
         Codec::Alac => "ALAC",
+        Codec::Ac3 => "AC-3",
     }
 }

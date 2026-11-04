@@ -70,6 +70,20 @@ impl Decoder {
                 (*ptr).extradata = buf;
                 (*ptr).extradata_size = len as i32;
             }
+            if let Codec::Ac3 = section.codec {
+                // Seed the dither generator from each frame's content, not
+                // once per stream, so that a cut decodes like the source
+                // (see lac_container::ac3). Failing to set it only costs
+                // that exactness, so the result is ignored. The flag's
+                // integer type depends on the bindgen target.
+                #[allow(clippy::unnecessary_cast)]
+                let _ = ff::ffi::av_opt_set_int(
+                    ptr.cast(),
+                    c"cons_noisegen".as_ptr(),
+                    1,
+                    ff::ffi::AV_OPT_SEARCH_CHILDREN as i32,
+                );
+            }
         }
         let inner = ctx.decoder().audio()?;
         Ok(Decoder {
@@ -127,6 +141,7 @@ fn codec_id(section: &DecodeSection) -> Result<(Id, i32), FfmpegError> {
         Codec::Mp3 => (Id::MP3, 0),
         Codec::Aac => (Id::AAC, 0),
         Codec::Alac => (Id::ALAC, 0),
+        Codec::Ac3 => (Id::AC3, 0),
         Codec::Pcm {
             encoding,
             block_align,

@@ -28,6 +28,7 @@
             <array>
                 <string>public.mp3</string>
                 <string>public.mpeg-4-audio</string>
+                <string>public.ac3-audio</string>
                 <string>org.xiph.ogg-audio</string>
                 <string>org.xiph.opus</string>
                 <string>org.xiph.speex</string>
@@ -39,7 +40,7 @@
         </dict>
     </array>
     <!-- Types macOS itself may not define (public.mp3 and the MPEG-4
-         audio, WAV and AIFF types it does). An imported declaration only applies where no
+         audio, AC-3, WAV and AIFF types it does). An imported declaration only applies where no
          other app or the system declares the type. -->
     <key>UTImportedTypeDeclarations</key>
     <array>
