@@ -27,6 +27,7 @@
             <key>LSItemContentTypes</key>
             <array>
                 <string>public.mp3</string>
+                <string>public.mpeg-4-audio</string>
                 <string>org.xiph.ogg-audio</string>
                 <string>org.xiph.opus</string>
                 <string>org.xiph.speex</string>
@@ -37,8 +38,8 @@
             </array>
         </dict>
     </array>
-    <!-- Types macOS itself may not define (public.mp3 and the WAV and
-         AIFF types it does). An imported declaration only applies where no
+    <!-- Types macOS itself may not define (public.mp3 and the MPEG-4
+         audio, WAV and AIFF types it does). An imported declaration only applies where no
          other app or the system declares the type. -->
     <key>UTImportedTypeDeclarations</key>
     <array>

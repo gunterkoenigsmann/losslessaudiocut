@@ -44,6 +44,12 @@ pub enum Codec {
     Opus,
     /// Speex; the extradata is the 80-byte Speex header packet.
     Speex,
+    /// MPEG-4 AAC; the extradata is the AudioSpecificConfig (ISO/IEC
+    /// 14496-3 1.6.2.1). Packets are raw AAC frames (no ADTS header).
+    Aac,
+    /// Apple Lossless; the extradata is the 36-byte `alac` box of the MP4
+    /// sample description (size, type, version, ALACSpecificConfig).
+    Alac,
     /// MPEG-1/2/2.5 audio layer III; no extradata. Packets are whole
     /// frames, fed in file order so that the decoder can follow the bit
     /// reservoir itself.

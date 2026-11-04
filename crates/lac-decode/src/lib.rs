@@ -140,9 +140,10 @@ pub fn decode_to_vec(
 /// fed up to the packet that completes `range`. Its output is placed by
 /// [`lac_container::DecodeSection::packet_ends`]: the last sample after
 /// packet *j* lies just before `packet_ends[j]`, for a fresh decoder as for
-/// one that decoded the whole section. PCM, FLAC, MP3 and Vorbis decode bit
-/// for bit like [`decode_all`] after their pre-roll; the IIR state of Opus
-/// and Speex converges only approximately (inaudible, invisible). Parts
+/// one that decoded the whole section. PCM, FLAC, ALAC, MP3, Vorbis and AAC
+/// decode bit for bit like [`decode_all`] after their pre-roll; the IIR
+/// state of Opus and Speex converges only approximately (inaudible,
+/// invisible), and AAC's noise substitution draws other random noise. Parts
 /// that cannot be decoded are silence, as in [`decode_all`].
 pub fn decode_range(
     source: &dyn Container,
@@ -180,7 +181,7 @@ fn preroll(codec: lac_container::Codec, sample_rate: u32) -> (usize, u64) {
     use lac_container::Codec;
     let ms = |m: u64| u64::from(sample_rate) * m / 1000;
     match codec {
-        Codec::Pcm { .. } | Codec::Flac => (0, 0),
+        Codec::Pcm { .. } | Codec::Flac | Codec::Alac => (0, 0),
         // The bit reservoir reaches up to 511 bytes back (ISO/IEC 11172-3
         // 2.4.1.7: main_data_begin), five frames at 32 kbit/s; one more
         // frame for the IMDCT overlap and the 512-tap synthesis filter.
@@ -188,6 +189,10 @@ fn preroll(codec: lac_container::Codec, sample_rate: u32) -> (usize, u64) {
         // A Vorbis packet's output needs the previous packet's window half
         // (Vorbis I 1.3.2); the first packet of a decoder only primes it.
         Codec::Vorbis => (2, 0),
+        // An AAC frame's output overlaps with its predecessor's (MDCT,
+        // ISO/IEC 14496-3 4.6.11); one more frame for HE-AAC's SBR filter
+        // bank, as lac_container::mp4 writes it.
+        Codec::Aac => (2, 0),
         // RFC 7845 4.6 recommends at least 80 ms of pre-roll; measured on
         // the fixtures, the output is bit-exact again about 140 ms later.
         // Decoding 250 ms more is cheap and leaves a margin.
@@ -303,5 +308,7 @@ fn codec_name(c: lac_container::Codec) -> &'static str {
         Codec::Opus => "Opus",
         Codec::Speex => "Speex",
         Codec::Mp3 => "MP3",
+        Codec::Aac => "AAC",
+        Codec::Alac => "ALAC",
     }
 }

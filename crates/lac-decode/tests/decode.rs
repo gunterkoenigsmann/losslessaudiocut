@@ -174,6 +174,31 @@ fn chained_files_decode_like_their_links() {
     }
 }
 
+/// MP4 files with AAC: ffmpeg honours the edit list's start but decodes
+/// the last frame whole, so its output is ours plus the hidden tail (less
+/// than one 1024-sample frame). The rest agrees bit for bit.
+#[test]
+fn mp4_decodes_like_ffmpeg_up_to_its_untrimmed_end() {
+    for name in MP4 {
+        let (pcm, report, total, channels) = ours(name);
+        assert!(report.warnings.is_empty(), "{name}: {:?}", report.warnings);
+        assert_eq!(pcm.len() as u64, total * u64::from(channels), "{name}");
+        let Some(want) = ffmpeg(name) else { return };
+        let ch = usize::from(channels);
+        assert!(want.len() >= pcm.len(), "{name}: ffmpeg is shorter");
+        assert!(want.len() - pcm.len() < 1024 * ch, "{name}: tail too long");
+        assert_bit_identical(name, &pcm, &want[..pcm.len()], channels);
+    }
+}
+
+/// The MP4 fixtures without perceptual noise substitution.
+const MP4: [&str; 4] = [
+    "mp4_aac_stereo_44k.m4a",
+    "mp4_aac_mono_48k.m4a",
+    "mp4_aac_noedit_22k.m4a",
+    "mp4_aac_with_video.mp4",
+];
+
 /// Files where our timeline deliberately differs from ffmpeg's (random
 /// granule positions, chained streams, damage) still decode to exactly the
 /// length of the packet index, so waveform and cut positions agree.
@@ -187,6 +212,7 @@ fn every_fixture_decodes_to_the_index_length() {
         "ogg_vorbis_damaged.ogg",
         "mp3_notag_crc.mp3",
         "mp3_junk.mp3",
+        "mp4_aac_pns_44k.m4a",
     ] {
         let (pcm, report, total, channels) = ours(name);
         assert_eq!(report.frames, total, "{name}");
@@ -247,7 +273,11 @@ fn sink_can_stop_decoding() {
 }
 
 /// Every fixture with its chained and damaged variants.
-const ALL: [&str; 31] = [
+const ALL: [&str; 35] = [
+    "mp4_aac_stereo_44k.m4a",
+    "mp4_aac_mono_48k.m4a",
+    "mp4_aac_noedit_22k.m4a",
+    "mp4_aac_with_video.mp4",
     "aiff_s16_44k.aiff",
     "aiff_s24_48k_mono.aif",
     "aifc_sowt_22k.aifc",

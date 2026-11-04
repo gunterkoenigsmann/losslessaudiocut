@@ -7,7 +7,7 @@ Exec=losslessaudiocut %f
 Icon=losslessaudiocut
 Terminal=false
 Categories=AudioVideo;Audio;AudioVideoEditing;
-Keywords=audio;cut;trim;split;lossless;mp3;ogg;opus;flac;wav;aiff;speex;
+Keywords=audio;cut;trim;split;lossless;mp3;aac;m4a;alac;ogg;opus;flac;wav;aiff;speex;
 # The MIME types must equal lac_app::file_types::desktop_mime_types();
 # crates/lac-app/tests/packaging.rs checks it.
-MimeType=audio/mpeg;audio/ogg;audio/x-vorbis+ogg;audio/x-opus+ogg;audio/x-speex;audio/x-speex+ogg;audio/flac;audio/x-flac;audio/x-wav;audio/wav;audio/vnd.wave;audio/x-aiff;audio/x-aifc;audio/x-matroska;audio/webm;
+MimeType=audio/mpeg;audio/mp4;audio/x-m4a;audio/ogg;audio/x-vorbis+ogg;audio/x-opus+ogg;audio/x-speex;audio/x-speex+ogg;audio/flac;audio/x-flac;audio/x-wav;audio/wav;audio/vnd.wave;audio/x-aiff;audio/x-aifc;audio/x-matroska;audio/webm;

@@ -125,6 +125,8 @@ fn codec_id(section: &DecodeSection) -> Result<(Id, i32), FfmpegError> {
         Codec::Opus => (Id::OPUS, 0),
         Codec::Speex => (Id::SPEEX, 0),
         Codec::Mp3 => (Id::MP3, 0),
+        Codec::Aac => (Id::AAC, 0),
+        Codec::Alac => (Id::ALAC, 0),
         Codec::Pcm {
             encoding,
             block_align,

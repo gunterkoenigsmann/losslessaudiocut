@@ -37,7 +37,7 @@ pub struct FileType {
 
 /// Everything the program opens, in the order of the open dialog.
 ///
-/// AAC is not supported yet, so neither `.aac` nor `.m4a` is here.
+/// Raw AAC in ADTS (`.aac`) is not supported yet, so it is not here.
 pub const FILE_TYPES: &[FileType] = &[
     FileType {
         name: "MP3 audio",
@@ -45,6 +45,15 @@ pub const FILE_TYPES: &[FileType] = &[
         mime_types: &["audio/mpeg"],
         by_extension: true,
         uti: "public.mp3",
+    },
+    FileType {
+        name: "MPEG-4 audio (AAC, ALAC)",
+        extensions: &["m4a", "m4b"],
+        // audio/x-m4a is the older name, still used by some systems.
+        mime_types: &["audio/mp4", "audio/x-m4a"],
+        by_extension: true,
+        // System-defined; it covers .m4a and .m4b.
+        uti: "public.mpeg-4-audio",
     },
     FileType {
         name: "Ogg Vorbis audio",
@@ -113,6 +122,14 @@ pub const FILE_TYPES: &[FileType] = &[
         by_extension: false,
         uti: "org.matroska.mkv",
     },
+    FileType {
+        name: "MP4 video (audio track only)",
+        extensions: &["mp4"],
+        // video/mp4 would offer the program for every film.
+        mime_types: &[],
+        by_extension: false,
+        uti: "public.mpeg-4",
+    },
 ];
 
 /// All MIME types, in the form of a desktop file's `MimeType=` value
@@ -178,7 +195,7 @@ mod tests {
                 assert!(m.starts_with("audio/"), "{m} of {}", t.name);
             }
         }
-        assert!(desktop_mime_types().starts_with("audio/mpeg;audio/ogg;"));
+        assert!(desktop_mime_types().starts_with("audio/mpeg;audio/mp4;audio/x-m4a;audio/ogg;"));
         assert!(desktop_mime_types().ends_with("audio/webm;"));
     }
 
@@ -186,14 +203,14 @@ mod tests {
     fn video_containers_are_not_associated_by_extension() {
         let e = associated_extensions();
         assert!(e.contains(&"mp3") && e.contains(&"opus") && e.contains(&"mka"));
-        assert!(!e.contains(&"webm") && !e.contains(&"mkv"));
+        assert!(!e.contains(&"webm") && !e.contains(&"mkv") && !e.contains(&"mp4"));
     }
 
     #[test]
     fn wildcard_lists_everything_first() {
         let w = dialog_wildcard();
         assert!(w.starts_with(
-            "Audio files|*.mp3;*.ogg;*.oga;*.opus;*.spx;*.flac;*.wav;*.aiff;*.aif;*.aifc;*.mka;*.webm;*.mkv|MP3 audio|*.mp3|"
+            "Audio files|*.mp3;*.m4a;*.m4b;*.ogg;*.oga;*.opus;*.spx;*.flac;*.wav;*.aiff;*.aif;*.aifc;*.mka;*.webm;*.mkv;*.mp4|MP3 audio|*.mp3|"
         ));
         assert!(w.ends_with("|All files|*"));
         // Description and pattern alternate, so the count is even.

@@ -8,7 +8,7 @@ name: losslessaudiocut
 title: losslessaudiocut
 summary: Cut audio recordings without re-encoding them
 description: |
-  losslessaudiocut deletes parts of AAC, MP3, Ogg (Vorbis, Opus, Speex),
+  losslessaudiocut deletes parts of AAC (M4A), MP3, Ogg (Vorbis, Opus, Speex),
   Matroska/WebM Opus, WAV, AIFF and FLAC recordings and splits them into tracks,
   without decoding and re-encoding the lossy audio: what is kept sounds
   exactly like the original.
