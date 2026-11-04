@@ -493,3 +493,49 @@ fn manpages_cover_every_visible_command() {
         );
     }
 }
+
+/// Files whose codec generates noise get a note in `info` and after a
+/// cut; others do not.
+#[test]
+fn codec_noise_is_noted() {
+    let d = temp_dir("notes");
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../lac-container/tests/fixtures");
+    for (name, note) in [
+        ("mp4_aac_pns_44k.m4a", Some("perceptual noise substitution")),
+        ("ac3_stereo_44k.ac3", Some("dither noise")),
+        ("mp4_aac_stereo_44k.m4a", None),
+    ] {
+        let input = fixtures.join(name);
+        let info = lac().arg("info").arg(&input).output().expect("run lac");
+        let text = String::from_utf8_lossy(&info.stdout);
+        let output = d.join(name);
+        let cut = lac()
+            .arg("cut")
+            .arg(&input)
+            .arg("-o")
+            .arg(&output)
+            .args(["--delete", "0.2..0.4"])
+            .output()
+            .expect("run lac");
+        assert!(
+            cut.status.success(),
+            "{}",
+            String::from_utf8_lossy(&cut.stderr)
+        );
+        let report = String::from_utf8_lossy(&cut.stdout);
+        match note {
+            Some(n) => {
+                assert!(text.contains("note:") && text.contains(n), "{name}: {text}");
+                assert!(
+                    report.contains("note:") && report.contains(n),
+                    "{name}: {report}"
+                );
+            }
+            None => assert!(
+                !text.contains("note:") && !report.contains("note:"),
+                "{name}"
+            ),
+        }
+    }
+}

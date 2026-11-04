@@ -60,6 +60,7 @@
 //! iTunes-style metadata in `moov/udta/meta/ilst`, see [`ilst`]. Chapter
 //! lists and other `udta` content are not copied.
 
+pub mod aac;
 pub mod boxes;
 pub mod ilst;
 
@@ -321,6 +322,34 @@ impl Mp4File {
             .get(entry)
             .ok_or_else(|| ContainerError::InvalidPlan(format!("no packet {entry}")))?;
         read_raw(r, &self.raw[*raw])
+    }
+
+    /// Whether the AAC stream codes any band with perceptual noise
+    /// substitution (see [`aac`]), judged from the first channel of each
+    /// frame. Reads every frame, stopping at the first such band; `false`
+    /// for ALAC and for AAC object types other than LC and HE-AAC (whose
+    /// core is LC).
+    pub fn uses_noise_substitution<R: Read + Seek + ?Sized>(&self, r: &mut R) -> Result<bool> {
+        let Mp4Codec::Aac { asc } = &self.codec else {
+            return Ok(false);
+        };
+        // ISO/IEC 14496-3 1.6.2.1: audioObjectType, 5 bits (2 LC, 5 SBR,
+        // 29 PS); escape value 31 is not used by these.
+        if !matches!(asc.first().map(|b| b >> 3), Some(2 | 5 | 29)) {
+            return Ok(false);
+        }
+        // The element header, ics_info and section data of the first
+        // channel take well under 128 bytes (49 bands of at most 9 bits
+        // each, plus 49 M/S bits).
+        let mut head = [0u8; 128];
+        for raw in &self.raw {
+            let n = (raw.len as usize).min(head.len());
+            read_exact_at(r, raw.offset, &mut head[..n])?;
+            if aac::first_channel(&head[..n]).is_some_and(|c| c.uses_noise_substitution()) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Sample-exact at the start and end of the output file (edit list);

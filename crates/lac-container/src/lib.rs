@@ -58,6 +58,15 @@ pub trait Container: Send {
     fn warnings(&self) -> &[String];
     /// The source's tags, as far as [`Tags`] can hold them.
     fn tags(&self) -> &Tags;
+    /// Notes that apply to every cut of this file, for the export report:
+    /// where a cut decodes differently in some players although every
+    /// packet is copied verbatim (codec noise from a random generator, see
+    /// [`mp4::aac`] and [`ac3`]). Reads from `r` where that needs the
+    /// packets.
+    fn cut_notes(&self, r: &mut dyn ReadSeek) -> Result<Vec<String>> {
+        let _ = r;
+        Ok(Vec::new())
+    }
     /// Writes a new file containing the `actual` ranges of `plans`, joined.
     ///
     /// With `tags`, the new file carries them in the format's native tag
@@ -369,6 +378,13 @@ impl Container for mp4::Mp4File {
     fn tags(&self) -> &Tags {
         mp4::Mp4File::tags(self)
     }
+    fn cut_notes(&self, r: &mut dyn ReadSeek) -> Result<Vec<String>> {
+        Ok(if self.uses_noise_substitution(r)? {
+            vec![mp4::aac::NOISE_NOTE.to_owned()]
+        } else {
+            Vec::new()
+        })
+    }
     fn write_cut(
         &self,
         r: &mut dyn ReadSeek,
@@ -409,6 +425,13 @@ impl Container for ac3::Ac3File {
     }
     fn tags(&self) -> &Tags {
         ac3::Ac3File::tags(self)
+    }
+    fn cut_notes(&self, r: &mut dyn ReadSeek) -> Result<Vec<String>> {
+        Ok(if self.uses_dither(r)? {
+            vec![ac3::DITHER_NOTE.to_owned()]
+        } else {
+            Vec::new()
+        })
     }
     fn write_cut(
         &self,

@@ -145,6 +145,17 @@ impl Source {
         self.container.warnings()
     }
 
+    /// Notes that apply to every cut of this file, for the export report:
+    /// where players may decode a cut differently although every packet
+    /// is copied verbatim (generated codec noise, see
+    /// [`lac_container::Container::cut_notes`]). Reads the packets it
+    /// needs; a read error only means there is nothing to say.
+    pub fn cut_notes(&mut self) -> Vec<String> {
+        self.container
+            .cut_notes(&mut self.reader)
+            .unwrap_or_default()
+    }
+
     /// The packet index, the single source of truth for positions.
     pub fn index(&self) -> &PacketIndex {
         self.container.index()

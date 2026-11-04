@@ -25,7 +25,9 @@
 //! generator that libavcodec runs from the start of the stream, so a
 //! decoder that starts anywhere else, as after any cut, draws different
 //! noise of the same spectral envelope. The packets are still copied
-//! verbatim; [`noise_substitution_differs_only_in_noise`] covers that case.
+//! verbatim; [`noise_substitution_differs_only_in_noise`] covers that case,
+//! and `lac-decode/tests/pns.rs` checks in the transform domain that only
+//! the noise bands change, keeping their energy (issue #72).
 
 // Lists of kept ranges often hold a single range here.
 #![allow(clippy::single_range_in_vec_init)]
@@ -472,4 +474,30 @@ proptest! {
         assert_samples_copied(&src, &out, &p);
         assert_decodes_like_source(name, &src, &out, &p);
     }
+}
+
+/// Noise substitution is found in the fixture encoded with it, and only
+/// there; the report notes it for any cut.
+#[test]
+fn noise_substitution_is_detected() {
+    for (name, ..) in FIXTURES {
+        let src = fixture(name);
+        let f = open(&src);
+        let pns = f
+            .uses_noise_substitution(&mut Cursor::new(&src))
+            .expect("reads");
+        assert!(!pns, "{name}");
+    }
+    for name in ["mp4_aac_pns_mono_44k.m4a", "mp4_aac_pns_44k.m4a"] {
+        let src = fixture(name);
+        let f = open(&src);
+        let pns = f
+            .uses_noise_substitution(&mut Cursor::new(&src))
+            .expect("reads");
+        assert!(pns, "{name}");
+    }
+    let src = fixture("mp4_aac_pns_44k.m4a");
+    let c = lac_container::open(&mut Cursor::new(&src)).expect("opens");
+    let notes = c.cut_notes(&mut Cursor::new(&src)).expect("reads");
+    assert_eq!(notes, vec![lac_container::mp4::aac::NOISE_NOTE.to_owned()]);
 }
