@@ -91,6 +91,17 @@ jobs:
       - run: cargo build --release --locked -p lac-gui -p lac-cli
       - name: Package
         run: packaging/linux/appimage.sh "${{ needs.version.outputs.version }}" dist
+      # Manpages and shell completions (bash, zsh, fish) as one tarball for
+      # every Unix; they are text, so one architecture builds it. Its
+      # share/ directory unpacks into ~/.local or /usr/local.
+      - name: Manpages and shell completions
+        if: matrix.arch == 'x86_64'
+        run: |
+          stage="$(mktemp -d)"
+          packaging/shell-integration.sh target/release/lac "$stage"
+          tarball="dist/losslessaudiocut-${{ needs.version.outputs.version }}-man-and-completions.tar.gz"
+          tar -czf "$tarball" -C "$stage" share
+          tar -tzvf "$tarball"
       # The CLI from inside the AppImage (it finds the bundled libraries by
       # its rpath), then the GUI: it must come up and keep running until
       # `timeout` ends it with status 124. Both run in a scratch directory
@@ -110,6 +121,9 @@ jobs:
           squashfs-root/usr/bin/lac info cut.mp3
           squashfs-root/usr/bin/lac detect "$fixture"
           squashfs-root/usr/bin/lac detect "$speex"
+          test -s squashfs-root/usr/share/man/man1/losslessaudiocut.1
+          test -s squashfs-root/usr/share/bash-completion/completions/lac
+          grep -q '^MimeType=audio/mpeg;' squashfs-root/losslessaudiocut.desktop
           set +e
           APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a timeout 20 "$image"
           status=$?
@@ -164,6 +178,8 @@ jobs:
           "$app/lac" info cut.mp3
           "$app/lac" detect "$fixture"
           "$app/lac" detect "$speex"
+          test -s "$app/../Resources/share/man/man1/lac.1"
+          plutil -extract CFBundleDocumentTypes.0.LSItemContentTypes xml1 -o - "$app/../Info.plist"
           # The GUI must still be running after 15 s (macOS has no
           # `timeout`): a missing library or a crash ends it earlier.
           "$app/losslessaudiocut" &
@@ -276,6 +292,11 @@ jobs:
           $installDir = Join-Path $env:RUNNER_TEMP installed
           Start-Process -Wait -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$installDir"
           if (-not (Test-Path "$installDir\losslessaudiocut.exe")) { throw "installer did not install to $installDir" }
+          # The "Open with" task is on by default. The runner is admin, so
+          # the installation is per machine: HKLM.
+          $openWith = Get-ItemProperty 'HKLM:\Software\Classes\.mp3\OpenWithProgids'
+          if ($null -eq $openWith.'losslessaudiocut.audio') { throw "no Open with entry for .mp3" }
+          Get-ItemProperty 'HKLM:\Software\Classes\losslessaudiocut.audio\shell\open\command'
 
           foreach ($dir in @($zipDir, $installDir)) {
             Write-Host "--- $dir"
@@ -287,6 +308,8 @@ jobs:
             # detect decodes: the bundled FFmpeg must have these decoders.
             & "$dir\lac.exe" detect $fixture; if ($LASTEXITCODE -ne 0) { throw "lac detect (MP3) failed" }
             & "$dir\lac.exe" detect $speex; if ($LASTEXITCODE -ne 0) { throw "lac detect (Speex) failed" }
+            # The completion script must load and register a completer.
+            . "$dir\lac-completion.ps1"
             Remove-Item cut.mp3
             Pop-Location
             # The GUI must still be running after 15 s: a crash at start-up
