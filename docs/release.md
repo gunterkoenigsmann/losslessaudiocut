@@ -110,9 +110,11 @@ development version such as `0.1.0-dev.20261104.b46df06`.
    A tag that does not match `Cargo.toml` fails the workflow before
    anything is built.
 3. The workflow creates the GitHub release with notes generated from the
-   merged pull requests. To write the notes yourself, create the release
-   for the tag first (it may be a draft); the workflow then only adds the
-   files.
+   merged pull requests. Hand-written notes (highlights, known
+   limitations) go into `docs/release-notes/vX.Y.Z.md`, best in the
+   version PR of step 1; they are put in front of the generated list.
+   Alternatively create the release for the tag yourself first (it may be
+   a draft); the workflow then keeps its text and only adds the files.
 4. A tag with a suffix, such as `v1.2.0-rc1`, becomes a pre-release. It does
    not count as the latest release, so the snap's stable channel ignores
    it.
