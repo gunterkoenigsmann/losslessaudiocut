@@ -457,15 +457,19 @@ impl Mp4File {
         W: Write + Seek + ?Sized,
     {
         let packets: Vec<&RawPacket> = order.iter().map(|&i| &self.raw[i]).collect();
-        // Sample durations: the decoder output, the last one shortened by
-        // the discarded tail (as ffmpeg writes it).
+        // Sample durations: the decoder output. For AAC, whose frames all
+        // decode to the same length, the last one is shortened by the
+        // discarded tail, as ffmpeg writes it. An ALAC frame's duration is
+        // its real length (a reader takes it as such, see `parse_track`),
+        // so there only the edit list states the trim.
         let mut durations: Vec<u32> = packets.iter().map(|p| p.out).collect();
-        if let Some(d) = durations.last_mut() {
+        let decoded: u64 = durations.iter().map(|&d| u64::from(d)).sum();
+        if let (Some(d), Mp4Codec::Aac { .. }) = (durations.last_mut(), &self.codec) {
             // discard < out: the last packet keeps at least one sample.
             *d -= discard as u32;
         }
         let media_duration: u64 = durations.iter().map(|&d| u64::from(d)).sum();
-        let duration = media_duration - media_time;
+        let duration = decoded - media_time - discard;
         let data_len: u64 = packets.iter().map(|p| u64::from(p.len)).sum();
         let udta = ilst::udta(&ilst::write(tags, &self.ilst_other));
 
