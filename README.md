@@ -70,6 +70,13 @@ dockable panes: drag them by their gripper or title to another edge of the
 window, float them, resize or close them; the View menu shows and hides each
 one. Their arrangement and the window size are remembered between runs.
 
+While the waveform loads, the file is also searched for pauses (silence or
+only noise) and track starts. Suggested pauses show as a strip along the
+bottom (teal for silence, amber for noise), suggested track starts as a tick
+at the top. *Edit > Split at suggested track starts* (Ctrl+Shift+K) and
+*Edit > Delete suggested pauses* (Ctrl+Shift+D) apply them, each as one
+undo step.
+
 Space plays and stops. Playback plays what the export will contain: the kept
 parts, with the deleted ones skipped, starting at the selection or at the
 cursor (a click without dragging puts it; Home moves it to the start).

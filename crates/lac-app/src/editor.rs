@@ -416,6 +416,32 @@ impl Editor {
         self.commit(next)
     }
 
+    /// Deletes all of `ranges` in one undoable step, e.g. the pauses
+    /// suggested by `lac_analysis::detect`. Parts beyond the end are
+    /// clipped. Returns how many sample frames were newly deleted (0 if
+    /// everything was deleted already, and then nothing is recorded).
+    pub fn delete_ranges(
+        &mut self,
+        ranges: impl IntoIterator<Item = Range<SamplePos>>,
+    ) -> SamplePos {
+        let before = self.deleted_len();
+        let mut next = self.edits.clone();
+        next.deleted.extend(
+            ranges
+                .into_iter()
+                .map(|r| r.start.min(self.total)..r.end.min(self.total))
+                .filter(|r| r.start < r.end),
+        );
+        ranges::normalize(&mut next.deleted);
+        self.commit(next);
+        self.deleted_len() - before
+    }
+
+    /// Sample frames deleted in total.
+    fn deleted_len(&self) -> SamplePos {
+        self.edits.deleted.iter().map(|r| r.end - r.start).sum()
+    }
+
     /// Restores (un-deletes) everything inside the selection. Returns false
     /// if nothing in it was deleted.
     pub fn restore_selection(&mut self) -> bool {
@@ -588,6 +614,31 @@ pub fn describe_export(kept: &[KeptRange], rate: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delete_ranges_is_one_undo_step_and_counts_only_new_frames() {
+        let mut e = Editor::new(1000);
+        e.select(100, 200);
+        e.delete_selection();
+        // Overlapping, out of order, partly beyond the end.
+        assert_eq!(
+            e.delete_ranges([900..1200, 150..300, 500..600]),
+            100 + 100 + 100
+        );
+        assert_eq!(e.deleted(), [100..300, 500..600, 900..1000]);
+        assert_eq!(
+            e.delete_ranges(std::iter::once(120..280)),
+            0,
+            "deleted already"
+        );
+        assert!(e.undo());
+        assert_eq!(
+            e.deleted(),
+            std::slice::from_ref(&(100..200)),
+            "the whole batch at once"
+        );
+        assert_eq!(e.delete_ranges(std::iter::empty()), 0);
+    }
 
     #[test]
     fn split_at_all_is_one_undo_step_and_skips_invalid_positions() {

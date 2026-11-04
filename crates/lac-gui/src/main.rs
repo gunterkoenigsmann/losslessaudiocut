@@ -49,6 +49,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use icons::Icon;
+use lac_analysis::{DetectParams, Detection, RegionKind};
+use lac_app::analysis_job::{AnalysisJob, AnalysisStatus};
 use lac_app::detail::{Detail, DetailLoader};
 use lac_app::editor::{Editor, Edits};
 use lac_app::export_job::{ExportJob, default_output, describe_outcomes, track_tasks};
@@ -93,6 +95,8 @@ const ID_KEEP_PITCH: Id = ID_HIGHEST + 21;
 const ID_SCRUB_SELECTING: Id = ID_HIGHEST + 22;
 const ID_ALL_TRACKS: Id = ID_HIGHEST + 23;
 const ID_RULER: Id = ID_HIGHEST + 24;
+const ID_SUGGESTED_SPLITS: Id = ID_HIGHEST + 25;
+const ID_SUGGESTED_PAUSES: Id = ID_HIGHEST + 26;
 
 /// The toolbar: the most used menu commands. Tooltips name the shortcut,
 /// which is the faster way once known.
@@ -217,6 +221,14 @@ const RULER_MINOR: i32 = 3;
 const RULER_PADDING: i32 = 7;
 /// The position being played.
 const PLAYHEAD: Colour = Colour::rgb(0x6c, 0xe0, 0x7c);
+/// Strip under a suggested pause that is silent.
+const SUGGESTED_SILENCE: Colour = Colour::rgb(0x5c, 0x9c, 0x8c);
+/// Strip under a suggested pause that is only noise.
+const SUGGESTED_NOISE: Colour = Colour::rgb(0xc0, 0x90, 0x50);
+/// Tick at a suggested track start (a dimmer [`TRACK`]).
+const SUGGESTED_SPLIT: Colour = Colour::rgb(0x90, 0x60, 0xa8);
+/// Height of the suggestion strip and ticks, in pixels.
+const SUGGESTION_MARK: i32 = 6;
 
 /// An export in progress.
 struct RunningExport {
@@ -246,6 +258,16 @@ struct State {
     detail_loader: Option<DetailLoader>,
     /// Generation of the last result taken from `detail_loader`.
     detail_seen: Option<u64>,
+    /// Looks for pauses and track starts; dropping it cancels.
+    analysis: Option<AnalysisJob>,
+    /// Generation of the last status taken from `analysis`.
+    analysis_seen: Option<u64>,
+    /// How far the analysis is, in percent, while it runs.
+    analysis_percent: u64,
+    /// Why the analysis failed, if it did.
+    analysis_error: Option<String>,
+    /// The suggested pauses and track starts, once the analysis is done.
+    detection: Option<Arc<Detection>>,
     /// The latest decoded samples.
     detail: Option<Arc<Detail>>,
     /// Where waveform summaries are kept between runs (`None` if the
@@ -307,6 +329,7 @@ impl State {
     fn open(&mut self, path: PathBuf) {
         self.job = Some(PeakJob::start(&path, PUBLISH_INTERVAL, self.cache.clone()));
         self.detail_loader = Some(DetailLoader::start(&path));
+        let path_for_analysis = path.clone();
         self.path = Some(path);
         self.seen = None;
         self.peaks = None;
@@ -319,6 +342,14 @@ impl State {
         self.player = None;
         self.timeline = Timeline::default();
         self.scrub = None;
+        self.analysis = Some(AnalysisJob::start(
+            &path_for_analysis,
+            DetectParams::default(),
+        ));
+        self.analysis_seen = None;
+        self.analysis_percent = 0;
+        self.analysis_error = None;
+        self.detection = None;
         self.tags = None;
     }
 
@@ -640,6 +671,67 @@ impl State {
         }
     }
 
+    /// Takes the analysis result when it is there. Returns a message for
+    /// the status bar when the analysis ends.
+    fn poll_analysis(&mut self) -> Option<String> {
+        let (g, status) = self.analysis.as_ref()?.poll(self.analysis_seen)?;
+        self.analysis_seen = Some(g);
+        match status {
+            AnalysisStatus::Running { done, total } => {
+                self.analysis_percent = (done * 100).checked_div(total).unwrap_or(0);
+                None
+            }
+            AnalysisStatus::Done { detection, .. } => {
+                self.analysis = None;
+                let msg = format!(
+                    "found {} pause(s), {} track start(s) (Edit menu)",
+                    detection.regions.len(),
+                    detection.splits.len()
+                );
+                self.detection = Some(detection);
+                Some(msg)
+            }
+            AnalysisStatus::Failed(e) => {
+                self.analysis = None;
+                let msg = format!("could not look for pauses and track starts: {e}");
+                self.analysis_error = Some(e);
+                Some(msg)
+            }
+        }
+    }
+
+    /// Edit > Split at suggested track starts / Delete suggested pauses,
+    /// each one undoable step. Returns the message for the status bar.
+    fn apply_suggestions(&mut self, id: Id) -> String {
+        let Some(e) = &mut self.editor else {
+            return "open a file first".to_string();
+        };
+        let Some(d) = &self.detection else {
+            return match &self.analysis_error {
+                Some(err) => format!("no suggestions: {err}"),
+                None => format!(
+                    "still looking for pauses and track starts ({} %)",
+                    self.analysis_percent
+                ),
+            };
+        };
+        if id == ID_SUGGESTED_SPLITS {
+            match e.split_at_all(d.splits.iter().map(|s| s.pos)) {
+                0 => "no new track starts suggested".to_string(),
+                n => format!("added {n} track start(s); Ctrl+Z takes them back"),
+            }
+        } else {
+            match e.delete_ranges(d.regions.iter().map(|r| r.range.clone())) {
+                0 => "no suggested pauses left to delete".to_string(),
+                n => format!(
+                    "deleted {} of pauses; Ctrl+Z takes them back",
+                    self.rate
+                        .map_or_else(|| format!("{n} samples"), |r| format_samples(n, r))
+                ),
+            }
+        }
+    }
+
     /// Takes new data from the job. Returns the status line to show if
     /// anything changed.
     fn poll(&mut self) -> Option<String> {
@@ -782,13 +874,14 @@ fn main() {
         {
             let state = Rc::clone(&state);
             timer.on_tick(move |_| {
-                let (status, detail, export, playing) = {
+                let (status, detail, export, playing, analysis) = {
                     let mut st = state.borrow_mut();
                     (
                         st.poll(),
                         st.poll_detail(),
                         st.poll_export(),
                         st.poll_player(),
+                        st.poll_analysis(),
                     )
                 };
                 if playing {
@@ -808,10 +901,13 @@ fn main() {
                 if let Some(s) = &export {
                     report(&frame, s);
                 }
+                if let Some(s) = &analysis {
+                    frame.set_status_text(s, FIELD_FILE);
+                }
                 if status.is_some() || export.is_some() {
                     update_chrome(&frame, &state.borrow());
                 }
-                if status.is_some() || detail || playing {
+                if status.is_some() || detail || playing || analysis.is_some() {
                     panel.refresh(false, None);
                 }
             });
@@ -885,6 +981,17 @@ fn menu_bar(options: Options) -> MenuBar {
             ID_ALL_TRACKS,
             "Use for all trac&ks\tCtrl+Shift+A",
             "Give every track the value of the selected cell of the track list",
+        )
+        .append_separator()
+        .append_item(
+            ID_SUGGESTED_SPLITS,
+            "Split at suggested &track starts\tCtrl+Shift+K",
+            "Start new tracks where the analysis found pauses or changes of sound",
+        )
+        .append_item(
+            ID_SUGGESTED_PAUSES,
+            "Delete suggested &pauses\tCtrl+Shift+D",
+            "Delete the silent and noise-only stretches the analysis found",
         )
         .append_separator()
         .append_item(
@@ -1060,6 +1167,14 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
         if let Some(v) = &mut st.view {
             v.scroll_to(0);
         }
+    } else if id == ID_SUGGESTED_SPLITS || id == ID_SUGGESTED_PAUSES {
+        let msg = {
+            let mut st = state.borrow_mut();
+            let msg = st.apply_suggestions(id);
+            st.sync_timeline();
+            msg
+        };
+        f.set_status_text(&msg, FIELD_FILE);
     } else if is_edit(id) {
         // One borrow: the `if let` scrutinee's would last through the
         // whole block.
@@ -1768,6 +1883,36 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
                 }
             }
         }
+        // Suggestions: a strip along the bottom of the lanes (just above
+        // the time ruler, if shown) under each suggested pause, and a tick
+        // at the top of each suggested track start not split at yet.
+        if let Some(d) = &st.detection {
+            for r in &d.regions {
+                let Some(span) = view.pixel_span(&r.range) else {
+                    continue;
+                };
+                let colour = match r.kind {
+                    RegionKind::Silence => SUGGESTED_SILENCE,
+                    RegionKind::Noise => SUGGESTED_NOISE,
+                };
+                dc.set_pen(colour, 1, PenStyle::Solid);
+                dc.set_brush(colour, BrushStyle::Solid);
+                dc.draw_rectangle(
+                    px(span.start),
+                    size.height - ruler_height - SUGGESTION_MARK,
+                    px(span.end - span.start),
+                    SUGGESTION_MARK,
+                );
+            }
+            let split = editor.map_or(&[][..], Editor::splits);
+            dc.set_pen(SUGGESTED_SPLIT, 2, PenStyle::Solid);
+            for s in d.splits.iter().filter(|s| !split.contains(&s.pos)) {
+                let x = view.sample_to_x(s.pos).round();
+                if (0.0..f64::from(view.width())).contains(&x) {
+                    dc.draw_line(x as i32, 0, x as i32, 2 * SUGGESTION_MARK);
+                }
+            }
+        }
         // Track boundaries (dashed) and labels at the top of each track.
         if let Some(e) = editor.filter(|e| !e.splits().is_empty()) {
             let width = f64::from(view.width());
@@ -1941,6 +2086,65 @@ fn px(x: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suggestions_apply_as_one_undo_step_each() {
+        use lac_analysis::{Region, SplitReason, SplitSuggestion, Thresholds};
+        let mut st = State::default();
+        assert_eq!(
+            st.apply_suggestions(ID_SUGGESTED_SPLITS),
+            "open a file first"
+        );
+        st.editor = Some(Editor::new(10_000));
+        st.rate = Some(1000);
+        st.analysis_percent = 42;
+        assert_eq!(
+            st.apply_suggestions(ID_SUGGESTED_PAUSES),
+            "still looking for pauses and track starts (42 %)"
+        );
+        st.detection = Some(Arc::new(Detection {
+            thresholds: Thresholds {
+                floor_db: -80.0,
+                loud_db: -10.0,
+                quiet_db: -60.0,
+            },
+            regions: vec![
+                Region {
+                    range: 1000..1500,
+                    kind: RegionKind::Silence,
+                    level_db: -70.0,
+                },
+                Region {
+                    range: 6000..7000,
+                    kind: RegionKind::Noise,
+                    level_db: -50.0,
+                },
+            ],
+            splits: vec![SplitSuggestion {
+                pos: 7000,
+                reason: SplitReason::Gap { gap: 6000..7000 },
+                confidence: 0.8,
+            }],
+        }));
+        assert_eq!(
+            st.apply_suggestions(ID_SUGGESTED_SPLITS),
+            "added 1 track start(s); Ctrl+Z takes them back"
+        );
+        assert_eq!(
+            st.apply_suggestions(ID_SUGGESTED_SPLITS),
+            "no new track starts suggested"
+        );
+        assert_eq!(
+            st.apply_suggestions(ID_SUGGESTED_PAUSES),
+            "deleted 0:01.500 of pauses; Ctrl+Z takes them back"
+        );
+        let e = st.editor.as_mut().expect("the editor was set above");
+        assert_eq!(e.deleted(), [1000..1500, 6000..7000]);
+        assert_eq!(e.splits(), [7000]);
+        assert!(e.undo());
+        assert!(e.deleted().is_empty(), "pauses come back in one step");
+        assert_eq!(e.splits(), [7000]);
+    }
 
     #[test]
     fn edit_commands_explain_why_nothing_happened() {
