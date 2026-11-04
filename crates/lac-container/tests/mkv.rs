@@ -9,9 +9,11 @@
 //!    yields exactly the kept source packets, byte for byte, and the
 //!    planned length. This holds without external tools.
 //! 2. ffmpeg (an independent demuxer and decoder) decodes the output like
-//!    the source restricted to the plans' actual ranges, bit for bit,
-//!    except within [`JOIN_WINDOW`] after a join point: Matroska joins the
-//!    parts in one stream without pre-roll, so the decoder has to converge.
+//!    the source restricted to the plans' actual ranges: bit for bit up to
+//!    the first join point; after a join, anything goes within
+//!    [`JOIN_WINDOW`] and from then on each sample stays within
+//!    [`JOIN_TOLERANCE`]. Matroska joins the parts in one stream without
+//!    pre-roll, so the decoder has to converge (issue #54).
 //! 3. ffmpeg's output length equals the planned length, so it honours our
 //!    codec delay and discard padding.
 
@@ -39,12 +41,21 @@ const FIXTURES: [(&str, &str, u16, u64); 4] = [
 ];
 
 /// Seconds after a join point in which the output may differ from the
-/// source (see oracle 2). Without pre-roll the decoder starts the part
-/// after a join from the state of the part before it; on the speech-like
-/// fixtures it becomes bit-identical again within at most 330 ms (measured
-/// over 36 joins; the 10 ms SILK frames of the mono fixture converge
-/// slowest), as for Ogg Speex.
+/// source by any amount (see oracle 2). Without pre-roll the decoder starts
+/// the part after a join from the state of the part before it; on the
+/// speech-like fixtures it usually becomes bit-identical again within
+/// 330 ms (measured over 36 joins; the 10 ms SILK frames of the mono
+/// fixture converge slowest), as for Ogg Speex.
 const JOIN_WINDOW: f64 = 0.4;
+
+/// Largest difference allowed after [`JOIN_WINDOW`]: one 16-bit LSB
+/// (2^-15). Bit-exactness after a join is no fixed-time property: one join
+/// after a part of a single packet only became bit-identical about 410 ms
+/// after the join ([`join_after_one_packet`], issue #54). As for Speex
+/// (issue #17) the tests therefore require bit-exactness only up to the
+/// first join and a difference below one LSB after the window; wrong
+/// packets or offsets differ by orders of magnitude more.
+const JOIN_TOLERANCE: f32 = 1.0 / 32768.0;
 
 fn open(bytes: &[u8]) -> MkvFile {
     MkvFile::open(&mut Cursor::new(bytes)).expect("valid Matroska")
@@ -103,6 +114,25 @@ fn assert_packets_copied(src: &[u8], out: &[u8], plans: &[CutPlan]) -> MkvFile {
     o
 }
 
+/// Whether two decoded f32le frames agree: bit for bit when `tolerance` is
+/// 0, otherwise each sample within `tolerance`.
+fn frames_match(want: &[u8], got: &[u8], tolerance: f32) -> bool {
+    if tolerance == 0.0 {
+        return want == got;
+    }
+    let f = |b: &[u8]| -> Vec<f32> {
+        b.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&x| f32::from_le_bytes(x))
+            .collect()
+    };
+    f(want)
+        .iter()
+        .zip(f(got))
+        .all(|(w, g)| (w - g).abs() <= tolerance)
+}
+
 /// Whether ffmpeg decodes the output of `plans` too long: when it holds a
 /// single packet whose head is hidden by the codec delay and whose tail by
 /// discard padding, ffmpeg forgets the rest of the codec delay when the
@@ -147,21 +177,30 @@ fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPl
     let mut out_pos = 0usize;
     let mut prev_end = 0u64;
     let mut window_end = 0usize;
+    // All parts share one decoder, so the state of a join carries into
+    // every later part, even contiguous ones.
+    let mut after_join = false;
     for p in plans {
         let r = p.actual.start as usize..p.actual.end as usize;
         // Padding is decoder output the source hides; nothing to compare.
         out_pos += p.padding_before as usize;
         if r.start as u64 != prev_end || p.padding_before > 0 {
             window_end = r.start + window;
+            after_join = true;
         }
+        let tolerance = if after_join { JOIN_TOLERANCE } else { 0.0 };
         let a = window_end.max(r.start).min(r.end);
         if a < r.end {
             let want = &s[a * frame..r.end * frame];
             let got_at = out_pos + (a - r.start);
             let got = &o[got_at * frame..(got_at + r.end - a) * frame];
-            if let Some(i) = (0..r.end - a)
-                .find(|&i| want[i * frame..(i + 1) * frame] != got[i * frame..(i + 1) * frame])
-            {
+            if let Some(i) = (0..r.end - a).find(|&i| {
+                !frames_match(
+                    &want[i * frame..(i + 1) * frame],
+                    &got[i * frame..(i + 1) * frame],
+                    tolerance,
+                )
+            }) {
                 panic!(
                     "{name}: range {r:?} differs at source sample {} ({i} samples after the allowed window)",
                     a + i
@@ -319,6 +358,23 @@ fn deletes_join_in_one_stream() {
 /// apply the codec delay but drop the discard padding (960 - 412). Both lie
 /// within the one packet. This test documents that and fails once ffmpeg
 /// decodes exactly the 100 samples, so [`ffmpeg_mistrims`] can go.
+/// Regression test for issue #54, found by [`random_deletes_copy_packets`]:
+/// on the 10 ms SILK fixture a join after a kept part of one packet
+/// (`0..168`, then `1128..`) is bit-identical only about 410 ms after the
+/// join, past [`JOIN_WINDOW`], but within [`JOIN_TOLERANCE`] from there on.
+#[test]
+fn join_after_one_packet() {
+    let name = "mkv_opus_mono_10ms.mka";
+    let src = fixture(name);
+    let f = open(&src);
+    let p = delete(&f, &[(88, 1394)]);
+    let actual: Vec<_> = p.iter().map(|q| q.actual.clone()).collect();
+    assert_eq!(actual, [0..168, 1128..48_000]);
+    let out = write(&src, &f, &p);
+    assert_packets_copied(&src, &out, &p);
+    assert_decodes_like_source(name, &src, &out, &p);
+}
+
 #[test]
 fn sliver_inside_one_packet() {
     let name = "mkv_opus_stereo.webm";
