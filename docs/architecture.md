@@ -633,6 +633,11 @@ packets in the same state. This gives:
   `windows-latest` for build and tests. Format equivalence tests run on all
   three, because endianness-independent parsing and path handling are exactly
   what breaks between platforms.
+- **Logo**: one SVG, `packaging/icons/losslessaudiocut.svg` (a strip of film
+  cut in two, with a waveform across the cut). The GUI embeds it as its window
+  icon (`lac-gui/src/logo.rs`); the release packaging renders the `.ico`,
+  `.icns` and Linux icons from it, and the snap uses it as its icon. It uses
+  plain shapes only, because wxWidgets renders it with NanoSVG.
 - Release packaging (AppImage or `.deb`, `.app` in a `.dmg`, an installer or
   zip for Windows) comes later in its own PR.
 
