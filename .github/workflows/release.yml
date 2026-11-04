@@ -344,6 +344,8 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       PRERELEASE: ${{ needs.version.outputs.prerelease }}
     steps:
+      # For the hand-written notes in docs/release-notes/.
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v7
         with:
           path: dist
@@ -353,9 +355,10 @@ jobs:
         run: |
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
-      # A release that someone already created for the tag (e.g. with
-      # hand-written notes) keeps its text and only gets the files;
-      # otherwise it is created with notes generated from the merged PRs.
+      # A release that someone already created for the tag keeps its text
+      # and only gets the files. Otherwise it is created with notes
+      # generated from the merged PRs; if docs/release-notes/<tag>.md
+      # exists, its text comes first and the generated list is appended.
       - name: Publish
         run: |
           if gh release view "$TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
@@ -363,6 +366,8 @@ jobs:
           else
             flags=()
             if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+            notes="docs/release-notes/$TAG.md"
+            if [ -f "$notes" ]; then flags+=(--notes-file "$notes"); fi
             gh release create "$TAG" -R "$GITHUB_REPOSITORY" --verify-tag \
               --title "losslessaudiocut $VERSION" --generate-notes "${flags[@]}" dist/*
           fi
