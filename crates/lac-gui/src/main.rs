@@ -34,6 +34,7 @@
 mod icons;
 mod lanes;
 mod log_pane;
+mod logo;
 mod minimap;
 mod options;
 mod panes;
@@ -790,6 +791,7 @@ fn main() {
                 Size::new(g.width, g.height)
             })
             .build();
+        logo::set_window_icon(&frame);
         let status = frame.create_status_bar(3, 0, -1, "status");
         status.set_status_widths(&[-4, -4, -2]);
         let options = Options::load();

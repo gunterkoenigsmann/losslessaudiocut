@@ -106,6 +106,7 @@ The packages are not code-signed yet, so the systems warn on first start:
   version of the build runner or newer, and both bundle more of FFmpeg than
   we use; an own minimal FFmpeg build would fix all three:
   [#61](https://github.com/gunterkoenigsmann/losslessaudiocut/issues/61).
-- The GUI does not open files given on the command line, so there are no
-  file associations yet, and `losslessaudiocut.exe` has no embedded icon:
+- No file associations yet ("Open with", double-click on an audio file),
+  the macOS app does not yet handle Finder's open-documents event, and
+  `losslessaudiocut.exe` has no embedded icon:
   [#62](https://github.com/gunterkoenigsmann/losslessaudiocut/issues/62).

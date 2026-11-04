@@ -624,10 +624,20 @@ packets in the same state. This gives:
   ship a minimal FFmpeg built with only the needed decoders (LGPL build, which
   also keeps the binaries small).
 - **Audio output**: `cpal` (ALSA/PulseAudio/PipeWire, CoreAudio, WASAPI).
+- **Dependencies**: a weekly `cargo update` (`.github/workflows/cargo-update.yml`,
+  Saturdays) refreshes every crate in `Cargo.lock`, transitive ones included,
+  as a PR that runs the full CI and merges itself when green, so security
+  fixes reach the weekly builds. Dependabot handles major crate bumps and
+  the GitHub Actions.
 - **CI**: GitHub Actions matrix on `ubuntu-latest`, `macos-latest` and
   `windows-latest` for build and tests. Format equivalence tests run on all
   three, because endianness-independent parsing and path handling are exactly
   what breaks between platforms.
+- **Logo**: one SVG, `packaging/icons/losslessaudiocut.svg` (a strip of film
+  cut in two, with a waveform across the cut). The GUI embeds it as its window
+  icon (`lac-gui/src/logo.rs`); the release packaging renders the `.ico`,
+  `.icns` and Linux icons from it, and the snap uses it as its icon. It uses
+  plain shapes only, because wxWidgets renders it with NanoSVG.
 - Release packaging: a `vX.Y.Z` tag makes `.github/workflows/release.yml`
   build a zip and an Inno Setup installer for Windows (x64, arm64), a `.dmg`
   for macOS (arm64, x86_64) and an AppImage for Linux (x86_64, aarch64),
