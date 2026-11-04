@@ -1,6 +1,6 @@
 //! The main window's dockable panes, arranged by wxWidgets' AUI manager:
-//! the waveform in the centre, the toolbar, the position bar and the
-//! track list around it.
+//! the waveform in the centre, the toolbar, the minimap, the position bar
+//! and the track list around it.
 //! The user can drag panes to another edge, float them, resize and close
 //! them; the View menu shows and hides each one.
 //!
@@ -50,6 +50,7 @@ pub fn menu_label(pane: Pane) -> String {
     match pane {
         Pane::Toolbar => "Tool&bar".to_string(),
         Pane::Positions => "&Selection and clock".to_string(),
+        Pane::Minimap => "&Minimap".to_string(),
         // The shortcut the track list had before it was a pane.
         Pane::TrackList => "&Track list\tCtrl+L".to_string(),
     }
@@ -60,6 +61,7 @@ pub fn menu_help(pane: Pane) -> &'static str {
     match pane {
         Pane::Toolbar => "Show the buttons for the most used commands",
         Pane::Positions => "Show the selection's start, end and length, and the play clock",
+        Pane::Minimap => "Show the whole recording, with the part in the window framed",
         Pane::TrackList => "Show the tracks and their tags",
     }
 }
@@ -87,13 +89,14 @@ pub struct Panes {
 }
 
 impl Panes {
-    /// Puts `waveform` in the centre of `frame`, docks `toolbar` at the
-    /// top, and `track_list` and, under it, `positions` at the bottom.
-    /// Call [`Panes::restore`] next.
+    /// Puts `waveform` in the centre of `frame`, docks `toolbar` and
+    /// under it `minimap` at the top, and `track_list` and under it
+    /// `positions` at the bottom. Call [`Panes::restore`] next.
     pub fn new(
         frame: &Frame,
         waveform: &Panel,
         toolbar: &Panel,
+        minimap: &Panel,
         positions: &Panel,
         track_list: &Grid,
     ) -> Panes {
@@ -114,6 +117,16 @@ impl Panes {
                 .toolbar_pane()
                 .top()
                 .best_size(tb.width, tb.height),
+        );
+        aui.add_pane_with_info(
+            minimap,
+            PaneInfo::new()
+                .with_name(Pane::Minimap.name())
+                .with_caption(Pane::Minimap.caption())
+                .top()
+                .best_size(600, 56)
+                .min_size(100, 24)
+                .close_button(true),
         );
         let pb = positions.get_best_size();
         aui.add_pane_with_info(

@@ -33,6 +33,7 @@
 
 mod icons;
 mod lanes;
+mod minimap;
 mod options;
 mod panes;
 mod position_bar;
@@ -52,6 +53,7 @@ use lac_app::editor::{Editor, Edits};
 use lac_app::export_job::{ExportJob, default_output, describe_outcomes, track_tasks};
 use lac_app::format_samples;
 use lac_app::layout::Pane;
+use lac_app::minimap::Minimap;
 use lac_app::peak_cache::PeakCache;
 use lac_app::peak_job::{JobStatus, PeakJob};
 use lac_app::waveform::{DrawMode, WaveformView};
@@ -277,6 +279,12 @@ struct State {
     panes: Option<Panes>,
     /// Selection fields and play clock.
     position_bar: Option<PositionBar>,
+    /// The minimap's view model; exists together with `view`.
+    minimap: Option<Minimap>,
+    /// Width of the minimap pane, remembered for minimaps created later.
+    minimap_width: u32,
+    /// The minimap pane, redrawn whenever the waveform is.
+    minimap_panel: Option<Panel>,
 }
 
 /// A scrub: dragging with the right button plays short pieces of audio
@@ -302,6 +310,7 @@ impl State {
         self.seen = None;
         self.peaks = None;
         self.view = None;
+        self.minimap = None;
         self.detail_seen = None;
         self.detail = None;
         self.editor = None;
@@ -644,6 +653,7 @@ impl State {
         if let Some(p) = u.peaks {
             if self.view.is_none() {
                 self.view = Some(WaveformView::new(p.total_samples(), self.width));
+                self.minimap = Some(Minimap::new(p.total_samples(), self.minimap_width));
                 self.editor = Some(Editor::new(p.total_samples()));
             }
             self.peaks = Some(p);
@@ -698,6 +708,7 @@ fn main() {
         panel.set_background_style(BackgroundStyle::Paint);
         let grid = track_list::create(&frame);
 
+        let map = minimap::create(&frame);
         let cache = PeakCache::default_dir().map(PeakCache::new);
         if let Some(c) = cache.clone() {
             // Startup eviction (orphans, old and excess entries) off the
@@ -708,6 +719,8 @@ fn main() {
         }
         let state = Rc::new(RefCell::new(State {
             width: 1,
+            minimap_width: 1,
+            minimap_panel: Some(map),
             cache,
             speed: Speed::new(100, options.keep_pitch),
             options,
@@ -733,7 +746,8 @@ fn main() {
                 type_position(&f, &p, &state, field, &text);
             })
         };
-        let panes = Panes::new(&frame, &panel, &tools, &bar.panel(), &grid);
+        bind_minimap(&map, &panel, &state);
+        let panes = Panes::new(&frame, &panel, &tools, &map, &bar.panel(), &grid);
         panes.restore();
         {
             let mut st = state.borrow_mut();
@@ -1662,6 +1676,11 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
         dc.set_background(BACKGROUND);
         dc.clear();
         let st = state.borrow();
+        // Whatever moved the waveform (zoom, scroll, edits, playback)
+        // moves the minimap's frame too.
+        if let Some(m) = st.minimap_panel {
+            m.refresh(false, None);
+        }
         let (Some(view), Some(peaks)) = (&st.view, &st.peaks) else {
             return;
         };
@@ -1778,6 +1797,97 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
             }
         }
     });
+}
+
+/// The minimap pane: painting, resizing, and dragging its frame to scroll
+/// the waveform (`waveform`, which is redrawn after a scroll; its paint
+/// handler redraws the minimap in turn).
+fn bind_minimap(map: &Panel, waveform: &Panel, state: &Rc<RefCell<State>>) {
+    let (m, w) = (*map, *waveform);
+    {
+        let state = Rc::clone(state);
+        map.on_paint(move |_| {
+            let dc = AutoBufferedPaintDC::new(&m);
+            let size = m.get_client_size();
+            let st = state.borrow();
+            if let (Some(map), Some(peaks), Some(view)) = (&st.minimap, &st.peaks, &st.view) {
+                let scene = minimap::Scene {
+                    map,
+                    peaks,
+                    editor: st.editor.as_ref(),
+                    visible: view.visible(),
+                    playhead: st.playhead(),
+                };
+                minimap::draw(&dc, size, &scene);
+            } else {
+                dc.set_background(BACKGROUND);
+                dc.clear();
+            }
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        map.on_size(move |e| {
+            if let WindowEventData::Size(s) = &e
+                && let Some(size) = s.get_size()
+            {
+                let mut st = state.borrow_mut();
+                st.minimap_width = u32::try_from(size.width).unwrap_or(1).max(1);
+                let w = st.minimap_width;
+                if let Some(map) = &mut st.minimap {
+                    map.set_width(w);
+                }
+            }
+            m.refresh(false, None);
+            e.skip(true);
+        });
+    }
+    // Moves the waveform to start at what the minimap says.
+    let scroll = move |st: &mut State, start: Option<SamplePos>| {
+        if let (Some(start), Some(v)) = (start, &mut st.view) {
+            v.scroll_to(start);
+            w.refresh(false, None);
+        }
+    };
+    {
+        let state = Rc::clone(state);
+        map.on_mouse_left_down(move |e| {
+            let Some((_, x)) = mouse_event(&e) else {
+                return;
+            };
+            let mut guard = state.borrow_mut();
+            let st = &mut *guard;
+            let (Some(map), Some(v)) = (&mut st.minimap, &st.view) else {
+                return;
+            };
+            let start = map.press(x, &v.visible());
+            scroll(st, Some(start));
+            m.capture_mouse();
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        map.on_mouse_motion(move |e| {
+            let Some((_, x)) = mouse_event(&e) else {
+                return;
+            };
+            let mut guard = state.borrow_mut();
+            let st = &mut *guard;
+            let start = st.minimap.as_mut().and_then(|map| map.drag(x));
+            scroll(st, start);
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        map.on_mouse_left_up(move |_| {
+            if m.has_capture() {
+                m.release_mouse();
+            }
+            if let Some(map) = &mut state.borrow_mut().minimap {
+                map.release();
+            }
+        });
+    }
 }
 
 /// Draws the time ruler into the bottom `height` rows of the waveform
