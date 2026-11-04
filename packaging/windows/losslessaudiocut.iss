@@ -83,6 +83,9 @@ Root: HKA; Subkey: "Software\Classes\.opus\OpenWithProgids"; ValueType: string; 
 Root: HKA; Subkey: "Software\Classes\.spx\OpenWithProgids"; ValueType: string; ValueName: "losslessaudiocut.audio"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\.flac\OpenWithProgids"; ValueType: string; ValueName: "losslessaudiocut.audio"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\.wav\OpenWithProgids"; ValueType: string; ValueName: "losslessaudiocut.audio"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.aiff\OpenWithProgids"; ValueType: string; ValueName: "losslessaudiocut.audio"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.aif\OpenWithProgids"; ValueType: string; ValueName: "losslessaudiocut.audio"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.aifc\OpenWithProgids"; ValueType: string; ValueName: "losslessaudiocut.audio"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\.mka\OpenWithProgids"; ValueType: string; ValueName: "losslessaudiocut.audio"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".mp3"; ValueData: ""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".ogg"; ValueData: ""; Tasks: openwith
@@ -91,6 +94,9 @@ Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\Supported
 Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".spx"; ValueData: ""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".flac"; ValueData: ""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".wav"; ValueData: ""; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".aiff"; ValueData: ""; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".aif"; ValueData: ""; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".aifc"; ValueData: ""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".mka"; ValueData: ""; Tasks: openwith
 
 [Icons]

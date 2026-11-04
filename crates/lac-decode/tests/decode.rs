@@ -65,7 +65,11 @@ fn ffmpeg_file(path: &Path) -> Option<Vec<f32>> {
 }
 
 /// Fixtures whose timeline ffmpeg reproduces exactly.
-const EXACT: [&str; 18] = [
+const EXACT: [&str; 22] = [
+    "aiff_s16_44k.aiff",
+    "aiff_s24_48k_mono.aif",
+    "aifc_sowt_22k.aifc",
+    "aifc_fl32_22k.aifc",
     "flac_stereo16_44k.flac",
     "flac_mono8_8k_fixed.flac",
     "flac_quad24_48k.flac",
@@ -243,7 +247,11 @@ fn sink_can_stop_decoding() {
 }
 
 /// Every fixture with its chained and damaged variants.
-const ALL: [&str; 27] = [
+const ALL: [&str; 31] = [
+    "aiff_s16_44k.aiff",
+    "aiff_s24_48k_mono.aif",
+    "aifc_sowt_22k.aifc",
+    "aifc_fl32_22k.aifc",
     "flac_stereo16_44k.flac",
     "flac_mono8_8k_fixed.flac",
     "flac_quad24_48k.flac",

@@ -37,6 +37,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "aiff"
+path = "fuzz_targets/aiff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "flac"
 path = "fuzz_targets/flac.rs"
 test = false

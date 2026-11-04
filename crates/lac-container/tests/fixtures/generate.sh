@@ -78,3 +78,15 @@ lame --quiet -b 160 -t -p --id3v1-only --tt Fixture "$tmp/p.wav" mp3_notag_crc.m
 $og -i "$tmp/p.wav" -fflags +bitexact -c:a libmp3lame -b:a 96k -metadata title=Fixture mp3_ffmpeg_id3v2.mp3
 # Junk in the middle, as left by a broken download.
 python3 mp3_damage.py mp3_cbr128_44k.mp3 mp3_junk.mp3
+
+# AIFF and AIFF-C, written by ffmpeg: big-endian 16 and 24 bit with tags
+# in text chunks and an ID3 chunk, and the AIFF-C types sowt (little-endian)
+# and fl32 (float).
+$synth "$tmp/ai.wav" 44100 2 16 0.5
+$og -i "$tmp/ai.wav" -fflags +bitexact -c:a pcm_s16be -metadata title=Fixture \
+    -metadata artist=losslessaudiocut -write_id3v2 1 aiff_s16_44k.aiff
+$synth "$tmp/aj.wav" 48000 1 24 0.4
+$og -i "$tmp/aj.wav" -fflags +bitexact -c:a pcm_s24be aiff_s24_48k_mono.aif
+$synth "$tmp/ak.wav" 22050 2 16 0.4
+$og -i "$tmp/ak.wav" -fflags +bitexact -c:a pcm_s16le -f aiff aifc_sowt_22k.aifc
+$og -i "$tmp/ak.wav" -fflags +bitexact -c:a pcm_f32be -f aiff aifc_fl32_22k.aifc

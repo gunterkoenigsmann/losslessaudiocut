@@ -88,7 +88,8 @@ const SUBFORMAT_GUID_TAIL: [u8; 14] = [
 /// How samples are encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SampleEncoding {
-    /// Signed integer PCM (unsigned for 8 bit, per the WAV convention).
+    /// Signed integer PCM (unsigned for 8 bit in WAV, per the WAV
+    /// convention; signed in AIFF).
     Pcm,
     /// IEEE 754 floating point.
     Float,
@@ -296,6 +297,8 @@ impl WavFile {
                 encoding: self.encoding,
                 bits_per_sample: self.bits_per_sample,
                 block_align: self.block_align,
+                big_endian: false,
+                signed_8bit: false,
             },
             sample_rate: self.info().sample_rate,
             channels: self.info().channels,
@@ -523,7 +526,7 @@ fn parse_fmt(p: &[u8], pos: u64) -> Result<Fmt> {
 }
 
 /// Groups `frames` sample frames into index entries of [`BLOCK_FRAMES`].
-fn build_index(
+pub(crate) fn build_index(
     info: AudioStreamInfo,
     frames: u64,
     block_align: u16,

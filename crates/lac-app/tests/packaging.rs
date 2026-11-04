@@ -58,7 +58,11 @@ fn plist_strings_after<'a>(text: &'a str, start: &str) -> Vec<&'a str> {
 }
 
 /// UTIs that macOS defines itself, so `Info.plist` does not import them.
-const SYSTEM_UTIS: &[&str] = &["public.mp3", "com.microsoft.waveform-audio"];
+const SYSTEM_UTIS: &[&str] = &[
+    "public.mp3",
+    "com.microsoft.waveform-audio",
+    "public.aiff-audio",
+];
 
 #[test]
 fn macos_document_types_match() {
