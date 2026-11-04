@@ -1032,8 +1032,10 @@ fn parse_stsz(b: &[u8], max: usize) -> Option<Vec<u32>> {
     let table = r.bytes(n.checked_mul(4)?)?;
     Some(
         table
-            .chunks_exact(4)
-            .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&c| u32::from_be_bytes(c))
             .collect(),
     )
 }
@@ -1064,8 +1066,10 @@ fn parse_stz2(b: &[u8]) -> Option<Vec<u32>> {
         8 => Some(rest.get(..n)?.iter().map(|&s| u32::from(s)).collect()),
         16 => Some(
             rest.get(..n.checked_mul(2)?)?
-                .chunks_exact(2)
-                .map(|c| u32::from(u16::from_be_bytes([c[0], c[1]])))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&c| u32::from(u16::from_be_bytes(c)))
                 .collect(),
         ),
         _ => None,
