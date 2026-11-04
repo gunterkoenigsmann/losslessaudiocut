@@ -30,6 +30,7 @@
 //! - [`ruler`]: ticks and labels of the time ruler under the waveform.
 //! - [`minimap`]: the whole recording in one strip, with the visible
 //!   part framed and draggable.
+//! - [`log`]: the log pane, keeping the status bar's messages.
 //! - [`detail`]: decoded samples for a zoomed-in waveform, loaded in the
 //!   background with random access.
 //!
@@ -40,6 +41,7 @@ pub mod detail;
 pub mod editor;
 pub mod export_job;
 pub mod layout;
+pub mod log;
 pub mod minimap;
 pub mod peak_cache;
 pub mod peak_job;

@@ -33,6 +33,7 @@
 
 mod icons;
 mod lanes;
+mod log_pane;
 mod minimap;
 mod options;
 mod panes;
@@ -839,7 +840,8 @@ fn main() {
             })
         };
         bind_minimap(&map, &panel, &state);
-        let panes = Panes::new(&frame, &panel, &tools, &map, &bar.panel(), &grid);
+        let log = log_pane::create(&frame);
+        let panes = Panes::new(&frame, &panel, &tools, &map, &bar.panel(), &grid, &log);
         panes.restore();
         {
             let mut st = state.borrow_mut();
@@ -888,10 +890,16 @@ fn main() {
                     st.show_positions();
                 }
                 if let Some(s) = &status {
-                    frame.set_status_text(s, FIELD_FILE);
+                    // Progress ("reading… 40 %") only goes to the status
+                    // bar; the log gets how reading ended.
+                    if state.borrow().job.is_some() {
+                        frame.set_status_text(s, FIELD_FILE);
+                    } else {
+                        report(&frame, s);
+                    }
                 }
                 if let Some(s) = &export {
-                    frame.set_status_text(s, FIELD_FILE);
+                    report(&frame, s);
                 }
                 if let Some(s) = &analysis {
                     frame.set_status_text(s, FIELD_FILE);
@@ -1095,7 +1103,7 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
             && let Some(path) = dialog.get_path()
         {
             state.borrow_mut().open(PathBuf::from(path));
-            f.set_status_text("reading…", FIELD_FILE);
+            report(&f, "reading…");
         }
     } else if id == ID_EXPORT {
         export(&f, state);
@@ -1110,7 +1118,7 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
             Some(Err(e)) => format!("could not clear the waveform cache: {e}"),
             None => "there is no waveform cache on this system".to_string(),
         };
-        f.set_status_text(&msg, FIELD_FILE);
+        report(&f, &msg);
         return;
     } else if id == ID_EXIT {
         f.close(false);
@@ -1118,7 +1126,7 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
     } else if id == ID_PLAY {
         let msg = state.borrow_mut().toggle_play();
         if let Some(msg) = msg {
-            f.set_status_text(&msg, FIELD_FILE);
+            report(&f, &msg);
         }
     } else if matches!(id, ID_FASTER | ID_SLOWER | ID_NORMAL_SPEED | ID_KEEP_PITCH) {
         let msg = {
@@ -1137,7 +1145,7 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
             };
             st.set_speed(speed)
         };
-        f.set_status_text(&msg, FIELD_FILE);
+        report(&f, &msg);
     } else if id == ID_SCRUB_SELECTING {
         let mut st = state.borrow_mut();
         let on = checked.unwrap_or(!st.options.scrub_while_selecting);
@@ -1177,7 +1185,7 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
             msg
         };
         if let Some(msg) = msg.filter(|m| !m.is_empty()) {
-            f.set_status_text(msg, FIELD_FILE);
+            report(&f, msg);
         }
     } else {
         let mut st = state.borrow_mut();
@@ -1243,6 +1251,13 @@ fn edit(st: &mut State, id: Id) -> Option<&'static str> {
     })
 }
 
+/// Shows `msg` in the status bar's message field and keeps it in the log
+/// pane.
+fn report(frame: &Frame, msg: &str) {
+    frame.set_status_text(msg, FIELD_FILE);
+    log_pane::append(msg);
+}
+
 /// Title and edit field of the status bar, after anything that may have
 /// changed them.
 fn update_chrome(frame: &Frame, st: &State) {
@@ -1286,7 +1301,7 @@ fn type_position(
         result
     };
     if let Some(msg) = &error {
-        frame.set_status_text(msg, FIELD_FILE);
+        report(frame, msg);
     }
     // Back to the waveform, whose keys (Space, Del) the field would eat;
     // also lets the field show the accepted (or the old) value again.
@@ -1324,13 +1339,13 @@ fn export(frame: &Frame, state: &Rc<RefCell<State>>) {
     let (source, editor) = {
         let st = state.borrow();
         if st.export.is_some() {
-            frame.set_status_text("an export is still running", FIELD_FILE);
+            report(frame, "an export is still running");
             return;
         }
         match (&st.path, &st.editor) {
             (Some(p), Some(e)) => (p.clone(), e.clone()),
             _ => {
-                frame.set_status_text("open a file first", FIELD_FILE);
+                report(frame, "open a file first");
                 return;
             }
         }
@@ -1398,7 +1413,7 @@ fn export(frame: &Frame, state: &Rc<RefCell<State>>) {
         (tasks, skipped)
     };
     if tasks.is_empty() {
-        frame.set_status_text("everything is deleted; nothing to export", FIELD_FILE);
+        report(frame, "everything is deleted; nothing to export");
         return;
     }
     let mut msg = match tasks.as_slice() {
@@ -1409,7 +1424,7 @@ fn export(frame: &Frame, state: &Rc<RefCell<State>>) {
         let list: Vec<String> = skipped.iter().map(ToString::to_string).collect();
         msg += &format!(" (track {} deleted entirely, no file)", list.join(", "));
     }
-    frame.set_status_text(&msg, FIELD_FILE);
+    report(frame, &msg);
     let job = ExportJob::start_all(&source, tasks);
     state.borrow_mut().export = Some(RunningExport {
         job,
@@ -1425,7 +1440,7 @@ fn rename_track(frame: &Frame, state: &Rc<RefCell<State>>) {
         let name = e.tracks().get(i).and_then(|t| t.name.clone());
         (i, name.unwrap_or_default())
     }) else {
-        frame.set_status_text("open a file first", FIELD_FILE);
+        report(frame, "open a file first");
         return;
     };
     // No borrow while the dialog runs the event loop.
@@ -1468,7 +1483,7 @@ fn bind_track_list(grid: &Grid, frame: &Frame, panel: &Panel, state: &Rc<RefCell
                     .map(|e| e.to_string())
             };
             if let Some(m) = &msg {
-                f.set_status_text(m, FIELD_FILE);
+                report(&f, m);
             }
             // Puts the accepted value back, or the old one after an error.
             update_chrome(&f, &state.borrow());
@@ -1530,7 +1545,7 @@ fn use_for_all_tracks(frame: &Frame, state: &Rc<RefCell<State>>) {
         }
     };
     if let Some(m) = msg {
-        frame.set_status_text(&m, FIELD_FILE);
+        report(frame, &m);
     }
 }
 
@@ -1552,7 +1567,7 @@ fn bind_close(frame: &Frame, state: &Rc<RefCell<State>>) {
         }
         let running = state.borrow_mut().export.take();
         if let Some(r) = running {
-            f.set_status_text("finishing the export…", FIELD_FILE);
+            report(&f, "finishing the export…");
             // Usually seconds; the file would be broken otherwise.
             let _ = r.job.wait();
         }
@@ -1660,7 +1675,7 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
                 }
             };
             if let Some(msg) = error {
-                f.set_status_text(&msg, FIELD_FILE);
+                report(&f, &msg);
             }
             show(&state);
         });
@@ -1727,7 +1742,7 @@ fn bind_scrub(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
                 st.begin_scrub(pos, false)
             };
             match error {
-                Some(msg) => f.set_status_text(&msg, FIELD_FILE),
+                Some(msg) => report(&f, &msg),
                 None => p.capture_mouse(),
             }
             update_chrome(&f, &state.borrow());

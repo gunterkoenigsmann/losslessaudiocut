@@ -1,6 +1,6 @@
 //! The main window's dockable panes, arranged by wxWidgets' AUI manager:
-//! the waveform in the centre, the toolbar, the minimap, the position bar
-//! and the track list around it.
+//! the waveform in the centre, the toolbar, the minimap, the position bar,
+//! the track list and the log around it.
 //! The user can drag panes to another edge, float them, resize and close
 //! them; the View menu shows and hides each one.
 //!
@@ -51,6 +51,7 @@ pub fn menu_label(pane: Pane) -> String {
         Pane::Toolbar => "Tool&bar".to_string(),
         Pane::Positions => "&Selection and clock".to_string(),
         Pane::Minimap => "&Minimap".to_string(),
+        Pane::Log => "&Log".to_string(),
         // The shortcut the track list had before it was a pane.
         Pane::TrackList => "&Track list\tCtrl+L".to_string(),
     }
@@ -62,6 +63,7 @@ pub fn menu_help(pane: Pane) -> &'static str {
         Pane::Toolbar => "Show the buttons for the most used commands",
         Pane::Positions => "Show the selection's start, end and length, and the play clock",
         Pane::Minimap => "Show the whole recording, with the part in the window framed",
+        Pane::Log => "Show every message of the status bar, with the time",
         Pane::TrackList => "Show the tracks and their tags",
     }
 }
@@ -91,7 +93,8 @@ pub struct Panes {
 impl Panes {
     /// Puts `waveform` in the centre of `frame`, docks `toolbar` and
     /// under it `minimap` at the top, and `track_list` and under it
-    /// `positions` at the bottom. Call [`Panes::restore`] next.
+    /// `positions` at the bottom; `log` goes right of the track list.
+    /// Call [`Panes::restore`] next.
     pub fn new(
         frame: &Frame,
         waveform: &Panel,
@@ -99,6 +102,7 @@ impl Panes {
         minimap: &Panel,
         positions: &Panel,
         track_list: &Grid,
+        log: &TextCtrl,
     ) -> Panes {
         let aui = AuiManager::builder(frame).build();
         aui.add_pane_with_info(
@@ -148,6 +152,18 @@ impl Panes {
                 .bottom()
                 .best_size(600, 160)
                 .min_size(200, 60)
+                .close_button(true)
+                .maximize_button(true),
+        );
+        aui.add_pane_with_info(
+            log,
+            PaneInfo::new()
+                .with_name(Pane::Log.name())
+                .with_caption(Pane::Log.caption())
+                .bottom()
+                .position(1)
+                .best_size(400, 160)
+                .min_size(150, 60)
                 .close_button(true)
                 .maximize_button(true),
         );
