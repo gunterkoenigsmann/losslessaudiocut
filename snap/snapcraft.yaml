@@ -55,6 +55,9 @@ apps:
       ALSA_CONFIG_PATH: $SNAP/etc/asound.conf
   cli:
     command: bin/lac
+    # Tab completion in bash, generated at build time (see override-build
+    # of the losslessaudiocut part). Snaps cannot install manpages.
+    completer: completions/losslessaudiocut.cli.bash
     # Not for GTK: the extension also puts the staged FFmpeg and ALSA
     # libraries on the library path, the same way as for the GUI.
     extensions: [gnome]
@@ -97,6 +100,13 @@ parts:
     rust-path:
       - crates/lac-gui
       - crates/lac-cli
+    override-build: |
+      craftctl default
+      # The bash completion of `losslessaudiocut.cli`: lac generates it
+      # itself, for the name the snap gives it.
+      mkdir -p "$CRAFT_PART_INSTALL/completions"
+      "$CRAFT_PART_INSTALL/bin/lac" completions bash --bin-name losslessaudiocut.cli \
+        > "$CRAFT_PART_INSTALL/completions/losslessaudiocut.cli.bash"
     override-pull: |
       craftctl default
       # Inside the LXD build the project is owned by another user, which

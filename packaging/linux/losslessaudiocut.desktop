@@ -3,8 +3,11 @@ Type=Application
 Name=losslessaudiocut
 GenericName=Audio cutter
 Comment=Cut audio recordings without re-encoding them
-Exec=losslessaudiocut
+Exec=losslessaudiocut %f
 Icon=losslessaudiocut
 Terminal=false
 Categories=AudioVideo;Audio;AudioVideoEditing;
-Keywords=audio;cut;trim;split;lossless;mp3;aac;ogg;opus;flac;wav;speex;
+Keywords=audio;cut;trim;split;lossless;mp3;ogg;opus;flac;wav;speex;
+# The MIME types must equal lac_app::file_types::desktop_mime_types();
+# crates/lac-app/tests/packaging.rs checks it.
+MimeType=audio/mpeg;audio/ogg;audio/x-vorbis+ogg;audio/x-opus+ogg;audio/x-speex;audio/x-speex+ogg;audio/flac;audio/x-flac;audio/x-wav;audio/wav;audio/vnd.wave;audio/x-matroska;audio/webm;

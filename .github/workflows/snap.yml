@@ -72,6 +72,9 @@ jobs:
           losslessaudiocut.cli info "$fixtures/mp3_cbr128_44k.mp3"
           losslessaudiocut.cli cut "$fixtures/mp3_cbr128_44k.mp3" -o "$HOME/cut.mp3" --delete 0.5..1
           losslessaudiocut.cli info "$HOME/cut.mp3"
+          # The completer must load and register for the snap's command name.
+          bash -c 'source /snap/losslessaudiocut/current/completions/losslessaudiocut.cli.bash && complete -p losslessaudiocut.cli'
+          grep -q '^MimeType=audio/mpeg;' /snap/losslessaudiocut/current/meta/gui/losslessaudiocut.desktop
       # The GUI must come up and keep running; `timeout` ends it after 20 s
       # with exit status 124, which is the success case. A missing library,
       # GTK runtime or a crash at start-up gives any other status.

@@ -43,6 +43,10 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 
 # --- AppDir ----------------------------------------------------------------
 appdir="$work/AppDir"
+# Manpages and shell completions under usr/share, for tools that integrate
+# AppImages and for `--appimage-extract`; the release also has them as a
+# separate tarball for installing.
+"$root/packaging/shell-integration.sh" "$target_dir/release/lac" "$appdir/usr"
 icons="$appdir/usr/share/icons/hicolor"
 mkdir -p "$icons/scalable/apps" "$icons/256x256/apps"
 cp "$root/packaging/icons/losslessaudiocut.svg" "$icons/scalable/apps/"

@@ -152,6 +152,10 @@ Manpages: `lac manpages DIR` writes `lac.1`, `lac-cut.1` and one page per
 command into `DIR` (for packagers; `man -l DIR/lac.1` shows one without
 installing).
 
+The packages ship both: the snap's `losslessaudiocut.cli` completes in bash
+out of the box, and each release has the manpages and completions as a
+tarball (see [docs/release.md](docs/release.md)).
+
 ## Development
 
 Building needs the FFmpeg development files (FFmpeg 5.1 or newer: libavcodec,
