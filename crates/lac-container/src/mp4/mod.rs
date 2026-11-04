@@ -203,7 +203,9 @@ impl Mp4File {
                 }
                 _ => {}
             }
-            pos = end;
+            // A box running past the end (its size may be up to 2^64 - 1)
+            // ends the scan.
+            pos = end.min(len);
         }
         let moov = moov.ok_or_else(|| {
             ContainerError::Unsupported(
@@ -1171,6 +1173,16 @@ fn malformed(offset: u64, reason: &str) -> ContainerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fuzzer find: a top-level box with a 64-bit size of 2^64 - 1
+    /// overflowed the scan position.
+    #[test]
+    fn huge_box_size_is_an_error_not_a_panic() {
+        let b: &[u8] = &[
+            0, 0, 0, 1, 5, 0, b'o', b'k', 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        ];
+        assert!(Mp4File::open(&mut std::io::Cursor::new(b)).is_err());
+    }
 
     #[test]
     fn esds_and_channels() {
