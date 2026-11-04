@@ -114,6 +114,19 @@ Times are seconds (`90.5`), `m:ss`, `h:mm:ss` or `@N` for sample frame N.
 artist, album, album_artist, track, tracktotal, date, genre, comment; an
 empty value removes it), the others are copied from the input.
 
+Tab completion: `lac completions SHELL` prints a script for bash, zsh, fish,
+PowerShell or elvish, e.g.
+
+```sh
+lac completions bash > ~/.local/share/bash-completion/completions/lac
+lac completions zsh > ~/.zfunc/_lac      # a directory in $fpath
+lac completions fish > ~/.config/fish/completions/lac.fish
+```
+
+Manpages: `lac manpages DIR` writes `lac.1`, `lac-cut.1` and one page per
+command into `DIR` (for packagers; `man -l DIR/lac.1` shows one without
+installing).
+
 ## Development
 
 Building needs the FFmpeg development files (FFmpeg 5.1 or newer: libavcodec,

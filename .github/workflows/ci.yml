@@ -96,11 +96,12 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       # ffmpeg, the reference flac tool, oggdec (libvorbisfile) and mpg123
-      # are the independent decoders for cross-checks. They are installed (and therefore required) on Linux;
+      # are the independent decoders for cross-checks; groff checks the
+      # generated manpages. They are installed (and therefore required) on Linux;
       # on macOS and Windows the cross-checks skip themselves to keep CI fast.
       - name: Install reference tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg flac vorbis-tools mpg123
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg flac vorbis-tools mpg123 groff-base
       # lac-decode links FFmpeg's libraries (decoders only, see AGENTS.md);
       # ffmpeg-sys-next generates its bindings with bindgen (libclang).
       - name: Install FFmpeg development files (Linux)
