@@ -319,3 +319,177 @@ fn detect_lists_pauses_and_track_starts() {
     assert!(tracks[0].contains("after a pause of"), "{stdout}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Runs an external tool, or returns `None` if it is not installed (fatal
+/// when `LAC_REQUIRE_TOOLS` is set, as in the Linux CI job).
+fn run_tool(cmd: &mut Command) -> Option<std::process::Output> {
+    match cmd.output() {
+        Ok(o) => Some(o),
+        Err(_) if std::env::var_os("LAC_REQUIRE_TOOLS").is_some() => {
+            panic!("{cmd:?}: tool required (LAC_REQUIRE_TOOLS is set) but not installed")
+        }
+        Err(_) => {
+            eprintln!("{cmd:?}: tool not installed, skipping");
+            None
+        }
+    }
+}
+
+/// The output of `lac completions SHELL [extra args]`.
+fn completion_script(shell: &str, extra: &[&str]) -> String {
+    let out = lac()
+        .args(["completions", shell])
+        .args(extra)
+        .output()
+        .expect("run lac");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).expect("UTF-8 script")
+}
+
+/// Asks the generated bash completion what it offers for `line` (the
+/// command line typed so far, completing its last word), the way bash
+/// calls a completion function on Tab.
+#[cfg(unix)]
+fn bash_complete(script: &str, line: &str) -> Option<Vec<String>> {
+    let d = temp_dir(&format!("bash-{}", line.len()));
+    let path = d.join("completion.bash");
+    std::fs::write(&path, script).expect("write script");
+    let words: Vec<&str> = line.split(' ').collect();
+    let quoted: Vec<String> = words.iter().map(|w| format!("'{w}'")).collect();
+    let program = format!(
+        "source '{}'\n\
+         COMP_WORDS=({})\n\
+         COMP_CWORD={}\n\
+         COMP_LINE='{line}'\n\
+         COMP_POINT={}\n\
+         func=$(complete -p '{}' | sed -n 's/.*-F \\([^ ]*\\).*/\\1/p')\n\
+         \"$func\" '{}' '{}' '{}'\n\
+         printf '%s\\n' \"${{COMPREPLY[@]}}\"",
+        path.display(),
+        quoted.join(" "),
+        words.len() - 1,
+        line.len(),
+        words[0],
+        words[0],
+        words[words.len() - 1],
+        words[words.len().saturating_sub(2)],
+    );
+    let out = run_tool(Command::new("bash").args(["--norc", "-c", &program]))?;
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn bash_completion_offers_subcommands_and_options() {
+    let script = completion_script("bash", &[]);
+    let Some(subs) = bash_complete(&script, "lac c") else {
+        return;
+    };
+    assert!(subs.contains(&"cut".to_string()), "{subs:?}");
+    assert!(subs.contains(&"completions".to_string()), "{subs:?}");
+    // The hidden packager command is not offered.
+    assert!(!subs.iter().any(|s| s == "manpages"), "{subs:?}");
+
+    let opts = bash_complete(&script, "lac cut in.wav --d").expect("bash ran before");
+    assert_eq!(opts, ["--delete"]);
+    let shells = bash_complete(&script, "lac completions f").expect("bash ran before");
+    assert_eq!(shells, ["fish"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn bash_completion_works_under_another_name() {
+    // The snap calls the CLI `losslessaudiocut.cli`.
+    let script = completion_script("bash", &["--bin-name", "losslessaudiocut.cli"]);
+    let Some(subs) = bash_complete(&script, "losslessaudiocut.cli de") else {
+        return;
+    };
+    assert_eq!(subs, ["detect"]);
+}
+
+#[test]
+fn completions_exist_for_other_shells() {
+    for (shell, marker) in [
+        ("zsh", "#compdef lac"),
+        ("fish", "complete -c lac"),
+        ("powershell", "Register-ArgumentCompleter"),
+        ("elvish", "edit:completion:arg-completer[lac]"),
+    ] {
+        let script = completion_script(shell, &[]);
+        assert!(script.contains(marker), "{shell}: {marker:?} missing");
+        // fish names long options without dashes (`-l delete`).
+        assert!(script.contains("delete"), "{shell}: options missing");
+    }
+}
+
+#[test]
+fn manpages_cover_every_visible_command() {
+    let d = temp_dir("man");
+    let out = lac().arg("manpages").arg(&d).output().expect("run lac");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut names: Vec<String> = std::fs::read_dir(&d)
+        .expect("read dir")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "lac-completions.1",
+            "lac-cut.1",
+            "lac-detect.1",
+            "lac-info.1",
+            "lac.1",
+            "losslessaudiocut.1",
+        ]
+    );
+    let main = std::fs::read_to_string(d.join("lac.1")).expect("lac.1");
+    assert!(main.contains(".TH lac 1"), "title");
+    assert!(main.contains(".SH EXAMPLES"));
+    assert!(main.contains("lac\\-cut(1)"), "SEE ALSO and SUBCOMMANDS");
+    assert!(!main.contains("manpages"), "hidden command leaked");
+    let cut = std::fs::read_to_string(d.join("lac-cut.1")).expect("lac-cut.1");
+    assert!(cut.contains("\\-\\-delete"));
+    let gui = std::fs::read_to_string(d.join("losslessaudiocut.1")).expect("GUI page");
+    assert!(gui.contains(".TH losslessaudiocut 1"), "title");
+    assert!(gui.contains("lac(1)"), "points to the command line tool");
+    assert!(
+        main.contains("losslessaudiocut(1)"),
+        "lac.1 points to the GUI"
+    );
+
+    // Every page must format without groff warnings.
+    for name in &names {
+        let Some(o) = run_tool(
+            Command::new("groff")
+                .args(["-man", "-Tutf8", "-ww", "-z"])
+                .arg(d.join(name)),
+        ) else {
+            return;
+        };
+        assert!(
+            o.status.success() && o.stderr.is_empty(),
+            "{name}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+}

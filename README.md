@@ -12,11 +12,36 @@ export, playback of the result, scrubbing, playback speed, a track list
 with per-track tags); AAC follows. See
 [`docs/architecture.md`](docs/architecture.md) for the design.
 
+## Install
+
+On Linux, from the Snap Store (development builds on the edge channel
+until the first release):
+
+```sh
+sudo snap install losslessaudiocut --edge
+losslessaudiocut              # the GUI
+losslessaudiocut.cli --help   # the command line tool (`lac` below)
+```
+
+The snap can open files in your home directory; for USB sticks and other
+drives run `sudo snap connect losslessaudiocut:removable-media`. Packaging
+and release steps: [`docs/snap.md`](docs/snap.md).
+
+For Windows (zip or installer), macOS (DMG) and Linux (AppImage), download
+the package for your system from the
+[releases page](https://github.com/gunterkoenigsmann/losslessaudiocut/releases);
+see [`docs/release.md`](docs/release.md) for what each contains.
+
 ## GUI
 
 ```sh
 cargo run --bin losslessaudiocut -- recording.mp3
 ```
+
+The file argument is optional (`--help` and `--version` work too); on macOS
+files opened from the Finder arrive as an "open documents" event, which the
+program handles the same way. If edits are not exported yet, it asks before
+switching to the new file.
 
 Mouse wheel zooms at the pointer, Shift + wheel (or a horizontal wheel)
 scrolls; View menu: zoom in (Ctrl++), out (Ctrl+-), to fit (Ctrl+0).
@@ -113,6 +138,19 @@ Times are seconds (`90.5`), `m:ss`, `h:mm:ss` or `@N` for sample frame N.
 `info` shows the tags; `--tag FIELD=VALUE` changes one in the output (title,
 artist, album, album_artist, track, tracktotal, date, genre, comment; an
 empty value removes it), the others are copied from the input.
+
+Tab completion: `lac completions SHELL` prints a script for bash, zsh, fish,
+PowerShell or elvish, e.g.
+
+```sh
+lac completions bash > ~/.local/share/bash-completion/completions/lac
+lac completions zsh > ~/.zfunc/_lac      # a directory in $fpath
+lac completions fish > ~/.config/fish/completions/lac.fish
+```
+
+Manpages: `lac manpages DIR` writes `lac.1`, `lac-cut.1` and one page per
+command into `DIR` (for packagers; `man -l DIR/lac.1` shows one without
+installing).
 
 ## Development
 

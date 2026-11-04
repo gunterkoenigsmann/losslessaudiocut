@@ -3,8 +3,9 @@
 A release is a git tag `vX.Y.Z`. Pushing it starts
 [`release.yml`](../.github/workflows/release.yml), which builds, tests and
 publishes the packages below to the GitHub release of that tag. The snap is
-built separately (see `snap-publish.yml` and `snap.md` once the snap is
-merged); `release.yml` starts the snap publishing when it is done.
+built separately ([`snap-publish.yml`](../.github/workflows/snap-publish.yml),
+see [`snap.md`](snap.md)); `release.yml` starts the snap publishing when it
+is done.
 
 ## Packages
 
