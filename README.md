@@ -10,6 +10,21 @@ export, playback of the result, scrubbing, playback speed, a track list
 with per-track tags); AAC follows. See
 [`docs/architecture.md`](docs/architecture.md) for the design.
 
+## Install
+
+On Linux, from the Snap Store (development builds on the edge channel
+until the first release):
+
+```sh
+sudo snap install losslessaudiocut --edge
+losslessaudiocut              # the GUI
+losslessaudiocut.cli --help   # the command line tool (`lac` below)
+```
+
+The snap can open files in your home directory; for USB sticks and other
+drives run `sudo snap connect losslessaudiocut:removable-media`. Packaging
+and release steps: [`docs/snap.md`](docs/snap.md).
+
 ## GUI
 
 ```sh
