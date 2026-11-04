@@ -14,6 +14,7 @@ lac-peaks.workspace = true
 lac-analysis.workspace = true
 lac-playback.workspace = true
 thiserror.workspace = true
+clap.workspace = true
 directories.workspace = true
 
 [lints]

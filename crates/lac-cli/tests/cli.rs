@@ -458,7 +458,8 @@ fn manpages_cover_every_visible_command() {
             "lac-cut.1",
             "lac-detect.1",
             "lac-info.1",
-            "lac.1"
+            "lac.1",
+            "losslessaudiocut.1",
         ]
     );
     let main = std::fs::read_to_string(d.join("lac.1")).expect("lac.1");
@@ -468,6 +469,13 @@ fn manpages_cover_every_visible_command() {
     assert!(!main.contains("manpages"), "hidden command leaked");
     let cut = std::fs::read_to_string(d.join("lac-cut.1")).expect("lac-cut.1");
     assert!(cut.contains("\\-\\-delete"));
+    let gui = std::fs::read_to_string(d.join("losslessaudiocut.1")).expect("GUI page");
+    assert!(gui.contains(".TH losslessaudiocut 1"), "title");
+    assert!(gui.contains("lac(1)"), "points to the command line tool");
+    assert!(
+        main.contains("losslessaudiocut(1)"),
+        "lac.1 points to the GUI"
+    );
 
     // Every page must format without groff warnings.
     for name in &names {

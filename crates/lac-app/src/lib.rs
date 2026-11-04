@@ -33,6 +33,9 @@
 //! - [`log`]: the log pane, keeping the status bar's messages.
 //! - [`detail`]: decoded samples for a zoomed-in waveform, loaded in the
 //!   background with random access.
+//! - [`file_types`]: the audio file types the program opens, for the open
+//!   dialog and the packages' file associations.
+//! - [`launch`]: the GUI program's command line.
 //!
 //! See `docs/architecture.md` in the repository for how this crate fits in.
 
@@ -40,6 +43,8 @@ pub mod analysis_job;
 pub mod detail;
 pub mod editor;
 pub mod export_job;
+pub mod file_types;
+pub mod launch;
 pub mod layout;
 pub mod log;
 pub mod minimap;
