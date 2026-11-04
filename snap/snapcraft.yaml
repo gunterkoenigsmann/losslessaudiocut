@@ -114,6 +114,9 @@ parts:
       # present); GTK 3 comes from the gnome extension's SDK.
       - cmake
       - ninja-build
+      # wxdragon-sys's build script downloads wxWidgets with reqwest and
+      # native-tls (openssl-sys); build time only, nothing ends up in the snap.
+      - libssl-dev
       - g++
       # bindgen (wxdragon-sys, ffmpeg-sys-next) needs libclang.
       - clang
