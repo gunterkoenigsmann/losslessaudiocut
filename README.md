@@ -62,11 +62,13 @@ end, an end or a length keeps the start; without a selection, a start moves
 the cursor. Times are seconds, `m:ss`, `h:mm:ss` (all with optional
 decimals) or `@frames`.
 
-The toolbar, the minimap, the selection bar and the track list are dockable
-panes: drag them by their
-gripper or title to another edge of the window, float them, resize or close
-them; the View menu shows and hides each one. Their arrangement and the
-window size are remembered between runs.
+View > Log opens a pane that keeps every message of the status bar with
+its time, so a warning that flashed by can be read again.
+
+The toolbar, the minimap, the selection bar, the track list and the log are
+dockable panes: drag them by their gripper or title to another edge of the
+window, float them, resize or close them; the View menu shows and hides each
+one. Their arrangement and the window size are remembered between runs.
 
 Space plays and stops. Playback plays what the export will contain: the kept
 parts, with the deleted ones skipped, starting at the selection or at the
