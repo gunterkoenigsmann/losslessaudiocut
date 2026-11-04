@@ -165,6 +165,23 @@ fn check(name: &str, src: &[u8]) {
     let Some(probed) = ffprobe_tags(&tagged_file) else {
         return;
     };
+    // An ID3v2 tag in front of raw AC-3 is a convention, not a standard:
+    // ffmpeg 6.1 reports it, ffmpeg 9 ignores it (no tags at all). Our own
+    // reader checked the tags above; the audio is still compared below.
+    let ignored = name.ends_with(".ac3") && probed.is_empty();
+    if !ignored {
+        check_probed(name, &probed);
+    }
+    if let (Some(a), Some(b)) = (
+        common::ffmpeg_decode(&tagged_file, "s32le"),
+        common::ffmpeg_decode(&plain_file, "s32le"),
+    ) {
+        assert_eq!(a, b, "{name}: ffmpeg decodes the same audio");
+    }
+}
+
+/// Checks the tags ffprobe read from the file `check` wrote.
+fn check_probed(name: &str, probed: &BTreeMap<String, String>) {
     let get = |k: &str| probed.get(k).map(String::as_str);
     assert_eq!(get("title"), Some("Track twö"), "{name}: {probed:?}");
     assert_eq!(get("artist"), Some("Speaker"), "{name}: {probed:?}");
@@ -174,12 +191,6 @@ fn check(name: &str, src: &[u8]) {
     if !name.ends_with(".wav") {
         // INFO has no album artist; ffprobe reads only INFO from WAV.
         assert_eq!(get("album_artist"), Some("Ensemble"), "{name}: {probed:?}");
-    }
-    if let (Some(a), Some(b)) = (
-        common::ffmpeg_decode(&tagged_file, "s32le"),
-        common::ffmpeg_decode(&plain_file, "s32le"),
-    ) {
-        assert_eq!(a, b, "{name}: ffmpeg decodes the same audio");
     }
 }
 

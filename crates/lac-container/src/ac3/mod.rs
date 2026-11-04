@@ -36,10 +36,11 @@
 //!
 //! ## Tags
 //!
-//! AC-3 has no tags of its own. An ID3v2 tag in front, as ffmpeg and
-//! taggers read it, is read; an export copies it verbatim, or writes a new
-//! ID3v2.4 tag with the given tags and the source's other frames (see
-//! [`crate::tags::id3`]).
+//! AC-3 has no tags of its own. An ID3v2 tag in front, as taggers write
+//! it, is read; an export copies it verbatim, or writes a new ID3v2.4 tag
+//! with the given tags and the source's other frames (see
+//! [`crate::tags::id3`]). Players differ: ffmpeg 6.1 shows such a tag,
+//! ffmpeg 9 skips it and plays the audio.
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
