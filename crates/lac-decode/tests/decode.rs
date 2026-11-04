@@ -38,8 +38,15 @@ fn ffmpeg(name: &str) -> Option<Vec<f32>> {
 /// Decodes the file at `path` like [`ffmpeg`].
 fn ffmpeg_file(path: &Path) -> Option<Vec<f32>> {
     let name = path.display();
+    // AC-3: seed the dither generator per frame, as lac-decode does (see
+    // lac_container::ac3); the default stream-wide generator gives
+    // different noise to every decoder that starts elsewhere.
+    let ac3 = path.extension().is_some_and(|e| e == "ac3");
+    let opts: &[&str] = if ac3 { &["-cons_noisegen", "1"] } else { &[] };
     let out = match Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
+        .args(["-v", "error"])
+        .args(opts)
+        .arg("-i")
         .arg(path)
         .args(["-f", "f32le", "-"])
         .output()
@@ -65,7 +72,10 @@ fn ffmpeg_file(path: &Path) -> Option<Vec<f32>> {
 }
 
 /// Fixtures whose timeline ffmpeg reproduces exactly.
-const EXACT: [&str; 24] = [
+const EXACT: [&str; 27] = [
+    "ac3_stereo_44k.ac3",
+    "ac3_51_48k.ac3",
+    "ac3_mono_32k.ac3",
     "mp4_alac_stereo16_44k.m4a",
     "mp4_alac_mono24_48k.m4a",
     "aiff_s16_44k.aiff",
@@ -276,7 +286,10 @@ fn sink_can_stop_decoding() {
 }
 
 /// Every fixture with its chained and damaged variants.
-const ALL: [&str; 37] = [
+const ALL: [&str; 40] = [
+    "ac3_stereo_44k.ac3",
+    "ac3_51_48k.ac3",
+    "ac3_mono_32k.ac3",
     "mp4_alac_stereo16_44k.m4a",
     "mp4_alac_mono24_48k.m4a",
     "mp4_aac_stereo_44k.m4a",

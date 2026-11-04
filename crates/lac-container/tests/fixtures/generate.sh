@@ -117,3 +117,13 @@ $synth "$tmp/la.wav" 44100 2 16 0.75
 $og -i "$tmp/la.wav" -fflags +bitexact -c:a alac mp4_alac_stereo16_44k.m4a
 $synth "$tmp/lb.wav" 48000 1 24 0.5
 $og -i "$tmp/lb.wav" -fflags +bitexact -c:a alac mp4_alac_mono24_48k.m4a
+
+# Raw AC-3, encoded by ffmpeg's native (fixed-point) AC-3 encoder: stereo
+# 2/0 at 44.1 kHz (frame sizes alternate between 834 and 836 bytes),
+# 5.1 (3/2 + LFE) at 48 kHz and mono at 32 kHz.
+$synth "$tmp/ca.wav" 44100 2 16 1.0
+$og -i "$tmp/ca.wav" -fflags +bitexact -c:a ac3_fixed -b:a 192k ac3_stereo_44k.ac3
+$synth "$tmp/cb.wav" 48000 6 16 0.5
+$og -i "$tmp/cb.wav" -fflags +bitexact -c:a ac3_fixed -b:a 384k ac3_51_48k.ac3
+$synth "$tmp/cc.wav" 32000 1 16 0.5 0 speech
+$og -i "$tmp/cc.wav" -fflags +bitexact -c:a ac3_fixed -b:a 64k ac3_mono_32k.ac3

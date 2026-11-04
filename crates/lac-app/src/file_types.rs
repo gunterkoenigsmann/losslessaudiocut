@@ -56,6 +56,14 @@ pub const FILE_TYPES: &[FileType] = &[
         uti: "public.mpeg-4-audio",
     },
     FileType {
+        name: "AC-3 audio",
+        extensions: &["ac3"],
+        mime_types: &["audio/ac3"],
+        by_extension: true,
+        // System-defined (AVFoundation's AVFileTypeAC3).
+        uti: "public.ac3-audio",
+    },
+    FileType {
         name: "Ogg Vorbis audio",
         extensions: &["ogg", "oga"],
         mime_types: &["audio/ogg", "audio/x-vorbis+ogg"],
@@ -195,7 +203,10 @@ mod tests {
                 assert!(m.starts_with("audio/"), "{m} of {}", t.name);
             }
         }
-        assert!(desktop_mime_types().starts_with("audio/mpeg;audio/mp4;audio/x-m4a;audio/ogg;"));
+        assert!(
+            desktop_mime_types()
+                .starts_with("audio/mpeg;audio/mp4;audio/x-m4a;audio/ac3;audio/ogg;")
+        );
         assert!(desktop_mime_types().ends_with("audio/webm;"));
     }
 
@@ -210,7 +221,7 @@ mod tests {
     fn wildcard_lists_everything_first() {
         let w = dialog_wildcard();
         assert!(w.starts_with(
-            "Audio files|*.mp3;*.m4a;*.m4b;*.ogg;*.oga;*.opus;*.spx;*.flac;*.wav;*.aiff;*.aif;*.aifc;*.mka;*.webm;*.mkv;*.mp4|MP3 audio|*.mp3|"
+            "Audio files|*.mp3;*.m4a;*.m4b;*.ac3;*.ogg;*.oga;*.opus;*.spx;*.flac;*.wav;*.aiff;*.aif;*.aifc;*.mka;*.webm;*.mkv;*.mp4|MP3 audio|*.mp3|"
         ));
         assert!(w.ends_with("|All files|*"));
         // Description and pattern alternate, so the count is even.

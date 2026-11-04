@@ -50,6 +50,8 @@ pub enum Codec {
     /// Apple Lossless; the extradata is the 36-byte `alac` box of the MP4
     /// sample description (size, type, version, ALACSpecificConfig).
     Alac,
+    /// AC-3 (ATSC A/52); no extradata. Packets are whole sync frames.
+    Ac3,
     /// MPEG-1/2/2.5 audio layer III; no extradata. Packets are whole
     /// frames, fed in file order so that the decoder can follow the bit
     /// reservoir itself.

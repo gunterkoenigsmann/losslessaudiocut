@@ -79,6 +79,7 @@ Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe"; ValueTy
 Root: HKA; Subkey: "Software\Classes\.mp3\OpenWithProgids"; ValueType: string; ValueName: "losslessaudiocut.audio"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\.m4a\OpenWithProgids"; ValueType: string; ValueName: "losslessaudiocut.audio"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\.m4b\OpenWithProgids"; ValueType: string; ValueName: "losslessaudiocut.audio"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.ac3\OpenWithProgids"; ValueType: string; ValueName: "losslessaudiocut.audio"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\.ogg\OpenWithProgids"; ValueType: string; ValueName: "losslessaudiocut.audio"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\.oga\OpenWithProgids"; ValueType: string; ValueName: "losslessaudiocut.audio"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\.opus\OpenWithProgids"; ValueType: string; ValueName: "losslessaudiocut.audio"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
@@ -92,6 +93,7 @@ Root: HKA; Subkey: "Software\Classes\.mka\OpenWithProgids"; ValueType: string; V
 Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".mp3"; ValueData: ""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".m4a"; ValueData: ""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".m4b"; ValueData: ""; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".ac3"; ValueData: ""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".ogg"; ValueData: ""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".oga"; ValueData: ""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\Applications\losslessaudiocut.exe\SupportedTypes"; ValueType: string; ValueName: ".opus"; ValueData: ""; Tasks: openwith

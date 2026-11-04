@@ -8,12 +8,13 @@
 //! [`lac_core::CutPlan`]s. Lossy audio is never decoded or re-encoded here.
 //!
 //! Supported so far: [`wav`], [`aiff`], [`flac`], [`ogg`] (Vorbis, Opus, Speex),
-//! [`mp3`], [`mkv`] (Matroska/WebM with Opus) and [`mp4`] (MP4/M4A with
-//! AAC or ALAC). [`open`] detects the format
+//! [`mp3`], [`mkv`] (Matroska/WebM with Opus), [`mp4`] (MP4/M4A with
+//! AAC or ALAC) and [`ac3`] (raw AC-3). [`open`] detects the format
 //! from the file's content and returns it behind the common [`Container`]
 //! interface. Each format also reads and writes its tags; the shared tag
 //! formats live in [`tags`].
 
+pub mod ac3;
 pub mod aiff;
 mod bits;
 pub mod decode;
@@ -390,6 +391,47 @@ impl Container for mp4::Mp4File {
     }
 }
 
+impl Container for ac3::Ac3File {
+    fn format_name(&self) -> &'static str {
+        "AC-3"
+    }
+    fn details(&self) -> String {
+        self.params().layout()
+    }
+    fn index(&self) -> &PacketIndex {
+        ac3::Ac3File::index(self)
+    }
+    fn capabilities(&self) -> CutCapabilities {
+        ac3::Ac3File::capabilities(self)
+    }
+    fn warnings(&self) -> &[String] {
+        ac3::Ac3File::warnings(self)
+    }
+    fn tags(&self) -> &Tags {
+        ac3::Ac3File::tags(self)
+    }
+    fn write_cut(
+        &self,
+        r: &mut dyn ReadSeek,
+        plans: &[CutPlan],
+        tags: Option<&Tags>,
+        w: &mut dyn WriteSeek,
+    ) -> Result<()> {
+        ac3::Ac3File::write_cut(self, r, plans, tags, w)
+    }
+    fn decode_sections(&self, r: &mut dyn ReadSeek) -> Result<Vec<DecodeSection>> {
+        ac3::Ac3File::decode_sections(self, r)
+    }
+    fn read_decode_packet(
+        &self,
+        r: &mut dyn ReadSeek,
+        section: usize,
+        packet: usize,
+    ) -> Result<Vec<u8>> {
+        ac3::Ac3File::read_decode_packet(self, r, section, packet)
+    }
+}
+
 /// Detects the container format from the first bytes of `r` and opens it.
 pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
     let mut head = [0u8; 12];
@@ -416,11 +458,18 @@ pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
         if &magic[..n] == b"fLaC" {
             return Ok(Box::new(flac::FlacFile::open(r)?));
         }
+        if magic[..n].starts_with(&[0x0B, 0x77]) {
+            return Ok(Box::new(ac3::Ac3File::open(r)?));
+        }
         return Ok(Box::new(mp3::Mp3File::open(r)?));
     }
     // MPEG audio frame sync: 11 set bits.
     if head.len() >= 2 && head[0] == 0xFF && head[1] & 0xE0 == 0xE0 {
         return Ok(Box::new(mp3::Mp3File::open(r)?));
+    }
+    // A/52 5.3.1: the AC-3 sync word.
+    if head.starts_with(&[0x0B, 0x77]) {
+        return Ok(Box::new(ac3::Ac3File::open(r)?));
     }
     if head.starts_with(b"OggS") {
         return Ok(Box::new(ogg::OggFile::open(r)?));
@@ -435,7 +484,8 @@ pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
         return Ok(Box::new(mkv::MkvFile::open(r)?));
     }
     Err(ContainerError::Unsupported(
-        "unknown file format (supported: WAV, AIFF, FLAC, Ogg, MP3, Matroska/WebM, MP4/M4A)".into(),
+        "unknown file format (supported: WAV, AIFF, FLAC, Ogg, MP3, Matroska/WebM, MP4/M4A, AC-3)"
+            .into(),
     ))
 }
 
