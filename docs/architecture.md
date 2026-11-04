@@ -208,6 +208,7 @@ pub struct CutPlan {
 | Format | Demux | Mux | Best exactness | Notes |
 |---|---|---|---|---|
 | WAV | RIFF chunks | RIFF, rewrite `data` size | sample-exact, bit-exact *(implemented)* | trivial; first milestone. A `data` size that is a placeholder, too large, or too small (stale checkpoint, low 32 bits of a > 4 GiB chunk: no chunk header follows) is replaced by the audio actually present, with a warning |
+| AIFF / AIFF-C | IFF chunks (big-endian), `COMM` with 80-bit sample rate; AIFF-C types `NONE`, `twos`, `sowt`, `fl32`, `fl64`, `alaw`, `ulaw` | `COMM` copied with a new frame count, fresh `SSND` | sample-exact, bit-exact *(implemented)* | as WAV; a `COMM` frame count or `SSND` size of 0 or beyond the file is replaced by the audio present, with a warning |
 | FLAC | frame sync + CRC-16 chaining (no decoding), STREAMINFO | copy frames with rewritten variable-block-size headers, re-encode boundary frames losslessly (FIXED predictor + Rice), fix STREAMINFO (total samples, block/frame sizes, MD5), drop SEEKTABLE/CUESHEET | sample-exact, bit-exact *(implemented)* | the small FLAC decoder/encoder lives in `lac-container`, since boundary frames must be rewritten there |
 | MP3 | frame sync confirmed by the next frame, side info (`main_data_begin`, `part2_3_length`), Xing/Info + LAME tag (delay, padding) | **repack the bit reservoir**: every kept frame's main data bytes are laid out anew over the output slots with new `main_data_begin` (raising a frame's bitrate index where it does not fit, never re-encoding); one granule of pre-roll; new Xing/Info + LAME tag with delay/padding and both CRCs; ID3v2/ID3v1 copied | sample-exact and bit-exact at the file's start and end on gapless decoders (ffmpeg, mpg123), packet-granular at joins *(implemented)*; non-gapless players also play the pre-roll (≤ 2 frames) | trimming only at the file ends, see `CutCapabilities::trims_at_file_ends_only` |
 | AAC (ADTS) | ADTS headers | copy frames + 1 pre-roll frame | 1 frame (21 ms at 48 kHz) | ADTS has no trimming metadata |
@@ -236,6 +237,7 @@ target)*.
 | FLAC | `VORBIS_COMMENT` (in place of the source's); `PICTURE` blocks copied | an ID3v2 tag in front of the stream is read, and written as `VORBIS_COMMENT` if there is none |
 | Ogg Vorbis / Opus / Speex | the comment header packet (`TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `TRACKNUMBER`, `TRACKTOTAL`, `DATE`, `GENRE`, `COMMENT`, extras such as `METADATA_BLOCK_PICTURE`) of every output stream | the header is re-paged, vendor string and Opus extension data kept; audio packets stay verbatim |
 | Matroska / WebM | one `Tag` without targets, with `SimpleTag`s (`TITLE`, `ARTIST`, `ALBUM`, `ALBUM_ARTIST`, `PART_NUMBER`, `TOTAL_PARTS`, `DATE_RELEASED`, `GENRE`, `COMMENT`), and the title as `Info/Title` | as ffmpeg writes global tags; tags aimed at a track UID (ffmpeg's `DURATION`) are not read |
+| AIFF / AIFF-C | text chunks `NAME`, `AUTH`, `ANNO`, `(c) ` plus an `ID3 ` chunk with everything, both before `SSND` | the text chunks win when reading; the copyright is kept as the extra `COPYRIGHT`. Markers and instrument chunks are not copied |
 | WAV | `LIST/INFO` chunk (`INAM`, `IART`, `IPRD`, `ITRK`, `ICRD`, `IGNR`, `ICMT`) plus an `id3 ` chunk, both before `data` | INFO has no album artist or cover; ffprobe reads only INFO |
 
 Milestone order *(agreed)*: WAV, FLAC, Ogg (Vorbis, Opus, Speex), MP3, then the GUI, then AAC/M4A and ADTS.
@@ -655,7 +657,7 @@ packets in the same state. This gives:
 |---|---|
 | Decoding | FFmpeg libavcodec, for playback, waveform and analysis only |
 | Cutting | own demuxers, cut planners, muxers and tag writers |
-| Containers | all of them: WAV, FLAC, MP3, ADTS `.aac`, MP4/M4A, Ogg Vorbis, Ogg Opus, Speex, Matroska/WebM Opus |
+| Containers | all of them: WAV, AIFF, FLAC, MP3, ADTS `.aac`, MP4/M4A, Ogg Vorbis, Ogg Opus, Speex, Matroska/WebM Opus |
 | Tags | per-track tags when splitting |
 | Platforms | Linux, macOS, Windows |
 | GUI binding | `wxdragon` |

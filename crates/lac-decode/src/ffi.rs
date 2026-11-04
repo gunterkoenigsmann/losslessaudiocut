@@ -128,21 +128,30 @@ fn codec_id(section: &DecodeSection) -> Result<(Id, i32), FfmpegError> {
         Codec::Pcm {
             encoding,
             block_align,
+            big_endian,
+            signed_8bit,
             ..
         } => {
             // The container size of one sample decides the decoder; WAV's
-            // "valid bits" may be fewer, the extra low bits are then zero.
+            // "valid bits" (AIFF's sample size) may be fewer, the extra low
+            // bits are then zero.
             let bytes = usize::from(block_align) / usize::from(section.channels.max(1));
-            let id = match (encoding, bytes) {
-                (SampleEncoding::Pcm, 1) => Id::PCM_U8,
-                (SampleEncoding::Pcm, 2) => Id::PCM_S16LE,
-                (SampleEncoding::Pcm, 3) => Id::PCM_S24LE,
-                (SampleEncoding::Pcm, 4) => Id::PCM_S32LE,
-                (SampleEncoding::Float, 4) => Id::PCM_F32LE,
-                (SampleEncoding::Float, 8) => Id::PCM_F64LE,
-                (SampleEncoding::ALaw, 1) => Id::PCM_ALAW,
-                (SampleEncoding::MuLaw, 1) => Id::PCM_MULAW,
-                (e, b) => return Err(FfmpegError::PcmLayout(e, b)),
+            let id = match (encoding, bytes, big_endian) {
+                (SampleEncoding::Pcm, 1, _) if signed_8bit => Id::PCM_S8,
+                (SampleEncoding::Pcm, 1, _) => Id::PCM_U8,
+                (SampleEncoding::Pcm, 2, false) => Id::PCM_S16LE,
+                (SampleEncoding::Pcm, 2, true) => Id::PCM_S16BE,
+                (SampleEncoding::Pcm, 3, false) => Id::PCM_S24LE,
+                (SampleEncoding::Pcm, 3, true) => Id::PCM_S24BE,
+                (SampleEncoding::Pcm, 4, false) => Id::PCM_S32LE,
+                (SampleEncoding::Pcm, 4, true) => Id::PCM_S32BE,
+                (SampleEncoding::Float, 4, false) => Id::PCM_F32LE,
+                (SampleEncoding::Float, 4, true) => Id::PCM_F32BE,
+                (SampleEncoding::Float, 8, false) => Id::PCM_F64LE,
+                (SampleEncoding::Float, 8, true) => Id::PCM_F64BE,
+                (SampleEncoding::ALaw, 1, _) => Id::PCM_ALAW,
+                (SampleEncoding::MuLaw, 1, _) => Id::PCM_MULAW,
+                (e, b, _) => return Err(FfmpegError::PcmLayout(e, b)),
             };
             (id, (bytes * 8) as i32)
         }

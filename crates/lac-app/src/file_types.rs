@@ -83,6 +83,15 @@ pub const FILE_TYPES: &[FileType] = &[
         uti: "com.microsoft.waveform-audio",
     },
     FileType {
+        name: "AIFF audio",
+        extensions: &["aiff", "aif", "aifc"],
+        // shared-mime-info's names; audio/aiff is an alias of the first.
+        mime_types: &["audio/x-aiff", "audio/x-aifc"],
+        by_extension: true,
+        // System-defined; macOS's public.aifc-audio conforms to it.
+        uti: "public.aiff-audio",
+    },
+    FileType {
         name: "Matroska audio",
         extensions: &["mka"],
         mime_types: &["audio/x-matroska"],
@@ -184,7 +193,7 @@ mod tests {
     fn wildcard_lists_everything_first() {
         let w = dialog_wildcard();
         assert!(w.starts_with(
-            "Audio files|*.mp3;*.ogg;*.oga;*.opus;*.spx;*.flac;*.wav;*.mka;*.webm;*.mkv|MP3 audio|*.mp3|"
+            "Audio files|*.mp3;*.ogg;*.oga;*.opus;*.spx;*.flac;*.wav;*.aiff;*.aif;*.aifc;*.mka;*.webm;*.mkv|MP3 audio|*.mp3|"
         ));
         assert!(w.ends_with("|All files|*"));
         // Description and pattern alternate, so the count is even.

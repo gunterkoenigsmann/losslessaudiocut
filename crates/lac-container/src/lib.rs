@@ -7,12 +7,13 @@
 //! new files by copying packets verbatim according to
 //! [`lac_core::CutPlan`]s. Lossy audio is never decoded or re-encoded here.
 //!
-//! Supported so far: [`wav`], [`flac`], [`ogg`] (Vorbis, Opus, Speex),
+//! Supported so far: [`wav`], [`aiff`], [`flac`], [`ogg`] (Vorbis, Opus, Speex),
 //! [`mp3`] and [`mkv`] (Matroska/WebM with Opus). [`open`] detects the format
 //! from the file's content and returns it behind the common [`Container`]
 //! interface. Each format also reads and writes its tags; the shared tag
 //! formats live in [`tags`].
 
+pub mod aiff;
 mod bits;
 pub mod decode;
 pub mod flac;
@@ -117,6 +118,52 @@ impl Container for wav::WavFile {
         packet: usize,
     ) -> Result<Vec<u8>> {
         wav::WavFile::read_decode_packet(self, r, section, packet)
+    }
+}
+
+impl Container for aiff::AiffFile {
+    fn format_name(&self) -> &'static str {
+        if self.is_aifc() { "AIFF-C" } else { "AIFF" }
+    }
+    fn details(&self) -> String {
+        let order = match (self.block_align() / self.info().channels, self.big_endian()) {
+            (1, _) => "",
+            (_, true) => ", big-endian",
+            (_, false) => ", little-endian",
+        };
+        format!("{:?}, {} bit{order}", self.encoding(), self.sample_size())
+    }
+    fn index(&self) -> &PacketIndex {
+        aiff::AiffFile::index(self)
+    }
+    fn capabilities(&self) -> CutCapabilities {
+        aiff::AiffFile::capabilities(self)
+    }
+    fn warnings(&self) -> &[String] {
+        aiff::AiffFile::warnings(self)
+    }
+    fn tags(&self) -> &Tags {
+        aiff::AiffFile::tags(self)
+    }
+    fn write_cut(
+        &self,
+        r: &mut dyn ReadSeek,
+        plans: &[CutPlan],
+        tags: Option<&Tags>,
+        w: &mut dyn WriteSeek,
+    ) -> Result<()> {
+        aiff::AiffFile::write_cut(self, r, plans, tags, w)
+    }
+    fn decode_sections(&self, r: &mut dyn ReadSeek) -> Result<Vec<DecodeSection>> {
+        aiff::AiffFile::decode_sections(self, r)
+    }
+    fn read_decode_packet(
+        &self,
+        r: &mut dyn ReadSeek,
+        section: usize,
+        packet: usize,
+    ) -> Result<Vec<u8>> {
+        aiff::AiffFile::read_decode_packet(self, r, section, packet)
     }
 }
 
@@ -306,6 +353,10 @@ pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
     if head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WAVE" {
         return Ok(Box::new(wav::WavFile::open(r)?));
     }
+    // EA IFF 85: FORM, size, form type.
+    if head.len() >= 12 && &head[0..4] == b"FORM" && matches!(&head[8..12], b"AIFF" | b"AIFC") {
+        return Ok(Box::new(aiff::AiffFile::open(r)?));
+    }
     if head.starts_with(b"fLaC") {
         return Ok(Box::new(flac::FlacFile::open(r)?));
     }
@@ -333,7 +384,7 @@ pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
         return Ok(Box::new(mkv::MkvFile::open(r)?));
     }
     Err(ContainerError::Unsupported(
-        "unknown file format (supported: WAV, FLAC, Ogg, MP3, Matroska/WebM)".into(),
+        "unknown file format (supported: WAV, AIFF, FLAC, Ogg, MP3, Matroska/WebM)".into(),
     ))
 }
 

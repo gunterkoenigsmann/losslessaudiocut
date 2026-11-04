@@ -32,13 +32,14 @@
                 <string>org.xiph.speex</string>
                 <string>org.xiph.flac</string>
                 <string>com.microsoft.waveform-audio</string>
+                <string>public.aiff-audio</string>
                 <string>org.matroska.mka</string>
             </array>
         </dict>
     </array>
-    <!-- Types macOS itself may not define (public.mp3 and the WAV type it
-         does). An imported declaration only applies where no other app or
-         the system declares the type. -->
+    <!-- Types macOS itself may not define (public.mp3 and the WAV and
+         AIFF types it does). An imported declaration only applies where no
+         other app or the system declares the type. -->
     <key>UTImportedTypeDeclarations</key>
     <array>
         <dict>

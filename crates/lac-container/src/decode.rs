@@ -20,7 +20,7 @@ use crate::wav::SampleEncoding;
 /// The codec of a section and its fixed parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
-    /// Uncompressed samples as stored in a WAV file.
+    /// Uncompressed samples as stored in a WAV or AIFF file.
     Pcm {
         /// How each sample is encoded.
         encoding: SampleEncoding,
@@ -28,6 +28,12 @@ pub enum Codec {
         bits_per_sample: u16,
         /// Bytes per sample frame (all channels).
         block_align: u16,
+        /// Multi-byte samples are stored most significant byte first
+        /// (AIFF), not least significant byte first (WAV, AIFF-C `sowt`).
+        big_endian: bool,
+        /// 8-bit integer samples are signed (AIFF and AIFF-C) rather than
+        /// unsigned with an offset of 128 (WAV).
+        signed_8bit: bool,
     },
     /// FLAC; the extradata is the 34-byte STREAMINFO block (RFC 9639 8.2).
     Flac,
