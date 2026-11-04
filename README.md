@@ -47,7 +47,14 @@ for all tracks (Ctrl+Shift+A) gives every track the value of the selected
 cell, e.g. the album. Selecting a row moves the cursor to that track. Tag
 changes are undone with Ctrl+Z like any other edit.
 
-The toolbar and the track list are dockable panes: drag them by their
+The bar *Selection and clock* shows where the selection starts and ends,
+its length, and a large play clock (source time, like the waveform). Type a
+time into a field and press Enter to set the selection: a start keeps the
+end, an end or a length keeps the start; without a selection, a start moves
+the cursor. Times are seconds, `m:ss`, `h:mm:ss` (all with optional
+decimals) or `@frames`.
+
+The toolbar, the selection bar and the track list are dockable panes: drag them by their
 gripper or title to another edge of the window, float them, resize or close
 them; the View menu shows and hides each one. Their arrangement and the
 window size are remembered between runs.

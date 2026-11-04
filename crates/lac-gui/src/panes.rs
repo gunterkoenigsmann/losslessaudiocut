@@ -1,5 +1,6 @@
 //! The main window's dockable panes, arranged by wxWidgets' AUI manager:
-//! the waveform in the centre, the toolbar and the track list around it.
+//! the waveform in the centre, the toolbar, the position bar and the
+//! track list around it.
 //! The user can drag panes to another edge, float them, resize and close
 //! them; the View menu shows and hides each one.
 //!
@@ -48,6 +49,7 @@ pub fn pane_for(id: Id) -> Option<Pane> {
 pub fn menu_label(pane: Pane) -> String {
     match pane {
         Pane::Toolbar => "Tool&bar".to_string(),
+        Pane::Positions => "&Selection and clock".to_string(),
         // The shortcut the track list had before it was a pane.
         Pane::TrackList => "&Track list\tCtrl+L".to_string(),
     }
@@ -57,6 +59,7 @@ pub fn menu_label(pane: Pane) -> String {
 pub fn menu_help(pane: Pane) -> &'static str {
     match pane {
         Pane::Toolbar => "Show the buttons for the most used commands",
+        Pane::Positions => "Show the selection's start, end and length, and the play clock",
         Pane::TrackList => "Show the tracks and their tags",
     }
 }
@@ -84,10 +87,16 @@ pub struct Panes {
 }
 
 impl Panes {
-    /// Puts `waveform` in the centre of `frame` and docks `toolbar` at
-    /// the top and `track_list` at the bottom. Call [`Panes::restore`]
-    /// next.
-    pub fn new(frame: &Frame, waveform: &Panel, toolbar: &Panel, track_list: &Grid) -> Panes {
+    /// Puts `waveform` in the centre of `frame`, docks `toolbar` at the
+    /// top, and `track_list` and, under it, `positions` at the bottom.
+    /// Call [`Panes::restore`] next.
+    pub fn new(
+        frame: &Frame,
+        waveform: &Panel,
+        toolbar: &Panel,
+        positions: &Panel,
+        track_list: &Grid,
+    ) -> Panes {
         let aui = AuiManager::builder(frame).build();
         aui.add_pane_with_info(
             waveform,
@@ -105,6 +114,18 @@ impl Panes {
                 .toolbar_pane()
                 .top()
                 .best_size(tb.width, tb.height),
+        );
+        let pb = positions.get_best_size();
+        aui.add_pane_with_info(
+            positions,
+            PaneInfo::new()
+                .with_name(Pane::Positions.name())
+                .with_caption(Pane::Positions.caption())
+                .toolbar_pane()
+                .bottom()
+                // Outside the track list, next to the status bar.
+                .layer(10)
+                .best_size(pb.width, pb.height),
         );
         aui.add_pane_with_info(
             track_list,

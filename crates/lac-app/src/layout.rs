@@ -25,19 +25,23 @@
 pub enum Pane {
     /// Buttons for the most used commands.
     Toolbar,
+    /// Selection start, end and length, and the play clock (see
+    /// [`crate::positions`]).
+    Positions,
     /// The tracks and their tags, editable.
     TrackList,
 }
 
 impl Pane {
     /// Every pane, in the order of the View menu.
-    pub const ALL: [Pane; 2] = [Pane::Toolbar, Pane::TrackList];
+    pub const ALL: [Pane; 3] = [Pane::Toolbar, Pane::Positions, Pane::TrackList];
 
     /// The pane's name in the stored layout. Never change one: a layout
     /// stored by an earlier version would lose the pane.
     pub fn name(self) -> &'static str {
         match self {
             Pane::Toolbar => "toolbar",
+            Pane::Positions => "positions",
             Pane::TrackList => "track_list",
         }
     }
@@ -46,6 +50,7 @@ impl Pane {
     pub fn caption(self) -> &'static str {
         match self {
             Pane::Toolbar => "Toolbar",
+            Pane::Positions => "Selection and clock",
             Pane::TrackList => "Track list",
         }
     }
@@ -53,7 +58,7 @@ impl Pane {
     /// Whether the pane is shown when there is no stored layout.
     pub fn shown_by_default(self) -> bool {
         match self {
-            Pane::Toolbar | Pane::TrackList => true,
+            Pane::Toolbar | Pane::Positions | Pane::TrackList => true,
         }
     }
 
@@ -215,7 +220,7 @@ mod tests {
     fn names_are_unique_and_stable() {
         // Stored layouts refer to these; renaming one loses the pane.
         let names: Vec<&str> = Pane::ALL.iter().map(|p| p.name()).collect();
-        assert_eq!(names, ["toolbar", "track_list"]);
+        assert_eq!(names, ["toolbar", "positions", "track_list"]);
         for p in Pane::ALL {
             assert_eq!(Pane::from_name(p.name()), Some(p));
         }
@@ -251,7 +256,8 @@ mod tests {
     fn a_complete_layout_is_loaded_as_it_is() {
         let r = restore(Some(SAVED), |_| true);
         assert_eq!(r.perspective.as_deref(), Some(SAVED));
-        assert!(r.then_show.is_empty());
+        // Saved before the position bar existed.
+        assert_eq!(r.then_show, [(Pane::Positions, true)]);
     }
 
     #[test]
@@ -259,7 +265,10 @@ mod tests {
         let old = "layout2|name=toolbar;caption=Toolbar;state=2106100|";
         let r = restore(Some(old), |p| p == Pane::TrackList);
         assert_eq!(r.perspective.as_deref(), Some(old));
-        assert_eq!(r.then_show, [(Pane::TrackList, true)]);
+        assert_eq!(
+            r.then_show,
+            [(Pane::Positions, false), (Pane::TrackList, true)]
+        );
     }
 
     #[test]
