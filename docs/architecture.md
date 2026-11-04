@@ -295,13 +295,13 @@ codecs the decoder state at the join is wrong for one or two packets:
 | AAC | MDCT overlap-add mixes the tails of two unrelated frames: a transient of one frame (~20 ms) | M4A: keep the frame and rely on the short crossfade-like overlap |
 | Vorbis | as AAC | each kept part becomes a **chained** logical stream that starts with its real predecessor packet, whose output a new stream discards: **no join window**, bit-exact *(implemented)*. Caveat: ffmpeg does not reset its Vorbis decoder at a chain boundary and plays one extra overlap (≤ 23 ms) per join; libvorbisfile-based players are exact |
 | Opus | CELT/SILK prediction state | each kept part becomes a chained stream with ≥ 80 ms pre-roll hidden by `pre_skip` (RFC 7845 4.3) and both ends trimmed to the sample *(implemented)*. The output is bit-exact again once the decoder has converged; the window depends on the content, typically < 100 ms. Caveat: when a kept part starts and ends inside the same packet (a sliver shorter than one packet, ≤ 120 ms), ffmpeg drops the rest of the pre-skip as soon as the end-trimmed packet arrives and plays up to one packet too much. That includes a part that starts inside the source's own end-trimmed last packet. The file itself is correct per RFC 7845 |
-| Opus in Matroska / WebM | as Ogg Opus | none: kept parts are joined in one stream without pre-roll, since Matroska has no way to hide samples at the start of an inner block *(implemented)*. On the speech-like fixtures the decoder becomes bit-identical again within 330 ms (worst of 36 measured joins, 10 ms SILK frames converge slowest); tests allow 400 ms. The same ffmpeg caveat as for Ogg Opus applies when the whole output is one packet trimmed at both ends |
+| Opus in Matroska / WebM | as Ogg Opus | none: kept parts are joined in one stream without pre-roll, since Matroska has no way to hide samples at the start of an inner block *(implemented)*. On the speech-like fixtures the decoder usually becomes bit-identical again within 330 ms (36 measured joins, 10 ms SILK frames converge slowest), but one join after a single kept packet took about 410 ms, so bit-exactness is no fixed-time property here either (issue #54). *Decided*, as for Speex: within 400 ms after a join anything goes; from then on the difference stays below one 16-bit LSB (2^-15), and before the first join the output is bit-exact. The same ffmpeg caveat as for Ogg Opus applies when the whole output is one packet trimmed at both ends |
 | Speex | CELP predictor, pitch memory and the float synthesis-filter state | none: parts are joined within one stream *(implemented)*. The audible transient lasts about 200 ms; after that the float decoder state only decays geometrically (below 1e-6 after about 200 ms). It becomes *bit*-identical only when the content lets it, which on continuous signals may never happen, so bit-exact convergence is no fixed-time property for Speex (issue #17). *Decided*: within 400 ms after a join anything goes; from then on the difference stays below one 16-bit LSB (2^-15, Speex's native output resolution), and before the first join the output is bit-exact |
 
 Tests use a speech-like fixture signal (syllables separated by 80 ms of
 silence) and require the output to be bit-exact from 250 ms (Opus) after
-each join point on; for Speex, within 2^-15 from 400 ms after a join on (see
-the table). A kept part shorter than the window does not end it: the window
+each join point on; for Speex and Opus in Matroska, within 2^-15 from 400 ms
+after a join on (see the table). A kept part shorter than the window does not end it: the window
 counts from the join, across following contiguous parts.
 
 On top of that, the editor **suggests join points in quiet packets** (it has
@@ -624,10 +624,21 @@ packets in the same state. This gives:
   ship a minimal FFmpeg built with only the needed decoders (LGPL build, which
   also keeps the binaries small).
 - **Audio output**: `cpal` (ALSA/PulseAudio/PipeWire, CoreAudio, WASAPI).
+- **Dependencies**: a weekly `cargo update` (`.github/workflows/cargo-update.yml`,
+  Saturdays) refreshes every crate in `Cargo.lock`, transitive ones included,
+  as a PR that runs the full CI and merges itself when green, so security
+  fixes reach the weekly builds. Dependabot handles major crate bumps and
+  the GitHub Actions.
 - **CI**: GitHub Actions matrix on `ubuntu-latest`, `macos-latest` and
   `windows-latest` for build and tests. Format equivalence tests run on all
   three, because endianness-independent parsing and path handling are exactly
   what breaks between platforms.
+- **Logo**: one SVG, `packaging/icons/losslessaudiocut.svg` (a strip of film
+  cut in two, with a waveform across the cut). The GUI embeds it as its window
+  icon (`lac-gui/src/logo.rs`); the release packaging renders the `.ico`,
+  `.icns` and Linux icons from it, and the snap uses it as its icon (a
+  byte-identical copy in `snap/gui/`). It uses plain shapes only, because
+  wxWidgets renders it with NanoSVG.
 - Release packaging: Linux has a snap (`snap/snapcraft.yaml`, built in CI
   and published weekly to edge and stable, see [`snap.md`](snap.md)). An
   `.app` in a `.dmg` and an installer or zip for Windows come later.

@@ -1,5 +1,7 @@
 # losslessaudiocut
 
+<img src="packaging/icons/losslessaudiocut.svg" alt="losslessaudiocut logo: a cut strip of film" width="96" align="right">
+
 A lossless audio cutter in Rust: delete parts of a recording, join the rest
 or split it into tracks, without ever re-encoding lossy audio.
 

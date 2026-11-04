@@ -22,10 +22,11 @@ The one documented exception are **internal join points** of lossy codecs
 (after a deleted part): there the first packet(s) decode with a different
 predecessor state. Tests compare everything outside that window bit for bit
 and check that the window is no longer than `docs/architecture.md`
-(section "Join points inside a file") says for the codec. Speex is the one
-codec whose decoders never provably reach bit-exactness after a join; there
-the tests require a difference below one 16-bit LSB after the window
-(decided in issue #17).
+(section "Join points inside a file") says for the codec. Speex and Opus in
+Matroska (joined in one stream without pre-roll) are the codecs whose
+decoders never provably reach bit-exactness after a join; there the tests
+require a difference below one 16-bit LSB after the window (decided in
+issues #17 and #54).
 
 Never "fix" a failing equivalence test by loosening the comparison. A lossy
 codec is never re-encoded; FLAC/PCM boundary frames may be, because that is
