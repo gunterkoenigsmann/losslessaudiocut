@@ -33,6 +33,13 @@ jobs:
       - uses: actions/checkout@v7
       - uses: snapcore/action-build@v1
         id: build
+      # Snapcraft's own log has the details its console output leaves out.
+      - name: Upload snapcraft log
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: snapcraft-log
+          path: ~/.local/state/snapcraft/log/
       - name: Upload snap
         uses: actions/upload-artifact@v6
         with:

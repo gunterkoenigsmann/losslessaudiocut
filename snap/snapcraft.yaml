@@ -62,10 +62,25 @@ apps:
     environment: *environment
 
 parts:
+  # The Rust toolchain. With `rust-channel` the Rust plugin wants a rustup
+  # binary in the build environment and did not find one there in CI,
+  # neither the rustup snap nor Ubuntu's package. A part named rust-deps is
+  # the plugin's documented alternative: it puts rustup's stable toolchain
+  # into ~/.cargo/bin, which the plugin adds to PATH.
+  rust-deps:
+    plugin: nil
+    build-packages:
+      - curl
+      - ca-certificates
+    override-build: |
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path
+      "$HOME/.cargo/bin/cargo" --version
+
   losslessaudiocut:
     plugin: rust
+    after: [rust-deps]
     source: .
-    rust-channel: stable
     rust-path:
       - crates/lac-gui
       - crates/lac-cli
@@ -91,11 +106,6 @@ parts:
         craftctl set grade=devel
       fi
     build-packages:
-      # The Rust plugin installs the toolchain of rust-channel with rustup,
-      # which it expects to be there already. Ubuntu's package and not the
-      # rustup snap: the gnome extension's build PATH has no /snap/bin, so
-      # the plugin would not find the snap.
-      - rustup
       - git
       # wxdragon downloads wxWidgets and builds it with CMake (Ninja if
       # present); GTK 3 comes from the gnome extension's SDK.
