@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use clap_complete::Shell;
 use lac_analysis::{DetectParams, RegionKind, SplitReason};
+use lac_app::launch::GuiArgs;
 use lac_app::{CutRequest, Source, TagEdits, TimeRange, format_samples};
 use lac_core::{SamplePos, TagField};
 
@@ -171,8 +172,9 @@ fn main() -> Result<()> {
     }
 }
 
-/// Writes one manpage for `lac` and one for each visible subcommand
-/// (`lac-cut.1` and so on, the naming git uses) into `dir`.
+/// Writes one manpage for `lac`, one for each visible subcommand
+/// (`lac-cut.1` and so on, the naming git uses) and `losslessaudiocut.1`
+/// for the GUI into `dir`.
 ///
 /// `lac.1` is assembled from clap_mangen's sections plus EXAMPLES and
 /// SEE ALSO: its default page would put the examples under a heading
@@ -187,11 +189,17 @@ fn manpages(dir: &Path) -> Result<()> {
 
     let mut cmd = cmd;
     cmd.build();
-    let subpages: Vec<String> = cmd
+    let gui = GuiArgs::command();
+    clap_mangen::Man::new(gui.clone())
+        .generate_to(dir)
+        .with_context(|| format!("writing manpages to {}", dir.display()))?;
+
+    let mut see_also: Vec<String> = cmd
         .get_subcommands()
         .filter(|s| !s.is_hide_set())
         .map(|s| format!("lac-{}(1)", s.get_name()))
         .collect();
+    see_also.push(format!("{}(1)", gui.get_name()));
     let man = clap_mangen::Man::new(cmd);
     let mut page = Vec::new();
     man.render_title(&mut page)?;
@@ -209,7 +217,7 @@ fn manpages(dir: &Path) -> Result<()> {
     extra.control("fi", []);
     extra
         .control("SH", ["SEE ALSO"])
-        .text([roman(subpages.join(", "))]);
+        .text([roman(see_also.join(", "))]);
     page.extend(extra.render().into_bytes());
     man.render_version_section(&mut page)?;
     let path = dir.join("lac.1");

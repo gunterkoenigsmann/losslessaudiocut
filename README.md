@@ -18,6 +18,11 @@ with per-track tags); AAC follows. See
 cargo run --bin losslessaudiocut -- recording.mp3
 ```
 
+The file argument is optional (`--help` and `--version` work too); on macOS
+files opened from the Finder arrive as an "open documents" event, which the
+program handles the same way. If edits are not exported yet, it asks before
+switching to the new file.
+
 Mouse wheel zooms at the pointer, Shift + wheel (or a horizontal wheel)
 scrolls; View menu: zoom in (Ctrl++), out (Ctrl+-), to fit (Ctrl+0).
 

@@ -56,6 +56,7 @@ use lac_app::detail::{Detail, DetailLoader};
 use lac_app::editor::{Editor, Edits};
 use lac_app::export_job::{ExportJob, default_output, describe_outcomes, track_tasks};
 use lac_app::format_samples;
+use lac_app::launch::GuiArgs;
 use lac_app::layout::Pane;
 use lac_app::minimap::Minimap;
 use lac_app::peak_cache::PeakCache;
@@ -182,10 +183,6 @@ const PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
 const ZOOM_STEP: f64 = 1.25;
 /// Pixels scrolled per wheel notch.
 const SCROLL_STEP: f64 = 40.0;
-
-/// File types offered by the open dialog.
-const WILDCARD: &str =
-    "Audio files|*.mp3;*.ogg;*.oga;*.opus;*.spx;*.webm;*.mka;*.mkv;*.flac;*.wav|All files|*";
 
 /// Background of the waveform area.
 const BACKGROUND: Colour = Colour::rgb(0x1e, 0x22, 0x28);
@@ -783,7 +780,21 @@ impl State {
 }
 
 fn main() {
-    let _ = wxdragon::main(|_| {
+    // Before any window: --help and --version print and exit, a malformed
+    // command line exits with clap's message.
+    let args = GuiArgs::try_parse_os(std::env::args_os()).unwrap_or_else(|e| e.exit());
+    let _ = wxdragon::main(move |app| {
+        // macOS hands files opened from the Finder (double-click, "Open
+        // With", drop on the Dock icon) to the running program as an event,
+        // also at startup; other systems pass them on the command line. The
+        // handler must be `Send`, so it only queues the paths; the timer
+        // below opens them on the GUI thread.
+        let (open_tx, open_rx) = std::sync::mpsc::channel::<PathBuf>();
+        app.on_open_files(move |files| {
+            for f in files {
+                let _ = open_tx.send(PathBuf::from(f));
+            }
+        });
         let frame = Frame::builder()
             .with_title("losslessaudiocut")
             .with_size({
@@ -876,6 +887,17 @@ fn main() {
         {
             let state = Rc::clone(&state);
             timer.on_tick(move |_| {
+                // One window shows one file: of several opened at once,
+                // the first wins.
+                let opened: Vec<PathBuf> = open_rx.try_iter().collect();
+                if let Some((first, rest)) = opened.split_first() {
+                    if !rest.is_empty() {
+                        report(&frame, "only one file at a time; opening the first");
+                    }
+                    if confirm_discard(&frame, &state) {
+                        open_file(&frame, &state, first.clone());
+                    }
+                }
                 let (status, detail, export, playing, analysis) = {
                     let mut st = state.borrow_mut();
                     (
@@ -919,9 +941,8 @@ fn main() {
         // `wxdragon::main` returns right away, so leak this one handle.
         std::mem::forget(timer);
 
-        if let Some(path) = std::env::args_os().nth(1) {
-            state.borrow_mut().open(PathBuf::from(path));
-            update_chrome(&frame, &state.borrow());
+        if let Some(path) = args.file {
+            open_file(&frame, &state, path);
         }
         frame.show(true);
         frame.centre();
@@ -1098,14 +1119,13 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
         }
         let dialog = FileDialog::builder(&f)
             .with_message("Open an audio file")
-            .with_wildcard(WILDCARD)
+            .with_wildcard(&lac_app::file_types::dialog_wildcard())
             .with_style(FileDialogStyle::Open | FileDialogStyle::FileMustExist)
             .build();
         if dialog.show_modal() == ID_OK
             && let Some(path) = dialog.get_path()
         {
-            state.borrow_mut().open(PathBuf::from(path));
-            report(&f, "reading…");
+            open_file(&f, state, PathBuf::from(path));
         }
     } else if id == ID_EXPORT {
         export(&f, state);
@@ -1334,6 +1354,14 @@ fn confirm_discard(frame: &Frame, state: &Rc<RefCell<State>>) -> bool {
     )
     .build();
     dialog.show_modal() == ID_YES
+}
+
+/// Starts reading `path` (from File > Open, the command line or the
+/// macOS Finder). Unexported edits must have been confirmed before.
+fn open_file(frame: &Frame, state: &Rc<RefCell<State>>, path: PathBuf) {
+    state.borrow_mut().open(path);
+    report(frame, "reading…");
+    update_chrome(frame, &state.borrow());
 }
 
 /// File > Export: asks for the output file and starts writing it.
