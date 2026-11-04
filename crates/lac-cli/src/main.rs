@@ -6,20 +6,31 @@
 //! lac cut recording.wav -o out.wav --keep 0:10..3:45
 //! lac cut recording.flac -o part.flac --keep 1:00.. --tag title="Part 2" --tag track=2
 //! lac detect recording.mp3 --min-gap 3
+//! lac completions bash > ~/.local/share/bash-completion/completions/lac
 //! ```
 //!
 //! Supported formats: WAV, FLAC, Ogg Vorbis/Opus/Speex, MP3 and Matroska/WebM Opus (detected from the content). Besides being useful for scripting, the CLI drives the end-to-end tests.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-use clap::{Parser, Subcommand};
+use anyhow::{Context, Result};
+use clap::{CommandFactory, Parser, Subcommand, ValueHint};
+use clap_complete::Shell;
 use lac_analysis::{DetectParams, RegionKind, SplitReason};
 use lac_app::{CutRequest, Source, TagEdits, TimeRange, format_samples};
 use lac_core::{SamplePos, TagField};
 
 #[derive(Parser)]
-#[command(name = "lac", version, about = "Lossless audio cutter")]
+#[command(
+    name = "lac",
+    version,
+    about = "Lossless audio cutter",
+    long_about = "Cuts audio recordings without re-encoding them: what is kept \
+                  decodes to exactly the same samples as the original.\n\n\
+                  Supported formats: WAV, FLAC, Ogg Vorbis/Opus/Speex, MP3 and \
+                  Matroska/WebM Opus, detected from the content.",
+    after_long_help = EXAMPLES
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -30,6 +41,7 @@ enum Command {
     /// Show format, length and warnings of a file.
     Info {
         /// The audio file.
+        #[arg(value_hint = ValueHint::FilePath)]
         file: PathBuf,
     },
     /// Cut a file without re-encoding.
@@ -39,9 +51,10 @@ enum Command {
     /// either side may be omitted to mean the start or end of the file.
     Cut {
         /// The source file.
+        #[arg(value_hint = ValueHint::FilePath)]
         input: PathBuf,
         /// Where to write the result. Must differ from the input.
-        #[arg(short, long)]
+        #[arg(short, long, value_hint = ValueHint::FilePath)]
         output: PathBuf,
         /// Delete this range; the rest is joined. May be repeated; ranges
         /// refer to the original file.
@@ -65,6 +78,7 @@ enum Command {
     /// long pause and where the timbre or the key changes without a pause.
     Detect {
         /// The audio file.
+        #[arg(value_hint = ValueHint::FilePath)]
         file: PathBuf,
         /// Pauses at least this long (seconds) suggest a new track.
         #[arg(long, value_name = "SECONDS", default_value_t = DetectParams::default().min_track_gap_secs)]
@@ -79,7 +93,41 @@ enum Command {
         #[arg(long)]
         no_key: bool,
     },
+    /// Print a shell completion script.
+    ///
+    /// Bash: `lac completions bash > ~/.local/share/bash-completion/completions/lac`.
+    /// Zsh: write `_lac` into a directory of `$fpath`. Fish:
+    /// `lac completions fish > ~/.config/fish/completions/lac.fish`.
+    /// PowerShell: add `lac completions powershell | Out-String | Invoke-Expression`
+    /// to your `$PROFILE`.
+    Completions {
+        /// The shell to complete in.
+        shell: Shell,
+        /// The command name to complete, if `lac` is called by another
+        /// name (an alias, or `losslessaudiocut.cli` in the snap).
+        #[arg(long, value_name = "NAME", default_value = "lac")]
+        bin_name: String,
+    },
+    /// Write the manpages (lac.1, lac-cut.1, ...) into a directory.
+    ///
+    /// For packagers; hidden from the help.
+    #[command(hide = true)]
+    Manpages {
+        /// Where to write the pages; created if missing.
+        #[arg(value_hint = ValueHint::DirPath)]
+        dir: PathBuf,
+    },
 }
+
+/// Examples at the end of `lac --help` and in the manpage.
+const EXAMPLES: &str = "\
+Examples:
+  lac info recording.wav
+  lac cut recording.wav -o out.wav --delete 1:00..1:30 --delete 5:00..
+  lac cut recording.wav -o out.wav --keep 0:10..3:45
+  lac cut recording.flac -o part.flac --keep 1:00.. --tag title=\"Part 2\" --tag track=2
+  lac detect recording.mp3 --min-gap 3
+  lac completions bash > ~/.local/share/bash-completion/completions/lac";
 
 fn main() -> Result<()> {
     match Cli::parse().command {
@@ -115,7 +163,58 @@ fn main() -> Result<()> {
                 ..DetectParams::default()
             },
         ),
+        Command::Completions { shell, bin_name } => {
+            clap_complete::generate(shell, &mut Cli::command(), bin_name, &mut std::io::stdout());
+            Ok(())
+        }
+        Command::Manpages { dir } => manpages(&dir),
     }
+}
+
+/// Writes one manpage for `lac` and one for each visible subcommand
+/// (`lac-cut.1` and so on, the naming git uses) into `dir`.
+///
+/// `lac.1` is assembled from clap_mangen's sections plus EXAMPLES and
+/// SEE ALSO: its default page would put the examples under a heading
+/// "EXTRA" and reflow them into one paragraph.
+fn manpages(dir: &Path) -> Result<()> {
+    use clap_mangen::roff::{Roff, roman};
+
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let cmd = Cli::command().disable_help_subcommand(true);
+    clap_mangen::generate_to(cmd.clone(), dir)
+        .with_context(|| format!("writing manpages to {}", dir.display()))?;
+
+    let mut cmd = cmd;
+    cmd.build();
+    let subpages: Vec<String> = cmd
+        .get_subcommands()
+        .filter(|s| !s.is_hide_set())
+        .map(|s| format!("lac-{}(1)", s.get_name()))
+        .collect();
+    let man = clap_mangen::Man::new(cmd);
+    let mut page = Vec::new();
+    man.render_title(&mut page)?;
+    man.render_name_section(&mut page)?;
+    man.render_synopsis_section(&mut page)?;
+    man.render_description_section(&mut page)?;
+    man.render_options_section(&mut page)?;
+    man.render_subcommands_section(&mut page)?;
+    let mut extra = Roff::new();
+    // .nf/.fi: no filling, so that each example stays on its own line.
+    extra.control("SH", ["EXAMPLES"]).control("nf", []);
+    for line in EXAMPLES.lines().skip(1) {
+        extra.text([roman(line.trim_start())]);
+    }
+    extra.control("fi", []);
+    extra
+        .control("SH", ["SEE ALSO"])
+        .text([roman(subpages.join(", "))]);
+    page.extend(extra.render().into_bytes());
+    man.render_version_section(&mut page)?;
+    let path = dir.join("lac.1");
+    std::fs::write(&path, page).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 fn info(path: &Path) -> Result<()> {
