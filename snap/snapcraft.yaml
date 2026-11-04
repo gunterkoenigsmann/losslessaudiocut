@@ -84,6 +84,16 @@ parts:
     # `rustup update stable` in its pull step, before rust-deps is built.
     rust-channel: none
     source: .
+    # Compile against Ubuntu's own GTK 3 headers (libgtk-3-dev below), the
+    # setup the normal CI job tests, instead of the gnome extension's SDK.
+    # With the SDK on CMAKE_PREFIX_PATH, wxWidgets' CMake adds
+    # -I/snap/gnome-46-2404-sdk/current/usr/include, whose <math.h> then
+    # shadows libstdc++'s and breaks the build ("'isnan' was not declared"
+    # in nanosvg). At run time the binary uses the GTK of the
+    # gnome-46-2404 runtime, which is the same GTK 3 ABI, only newer.
+    build-environment:
+      - CMAKE_PREFIX_PATH: ""
+      - PKG_CONFIG_PATH: ""
     rust-path:
       - crates/lac-gui
       - crates/lac-cli
@@ -111,7 +121,7 @@ parts:
     build-packages:
       - git
       # wxdragon downloads wxWidgets and builds it with CMake (Ninja if
-      # present); GTK 3 comes from the gnome extension's SDK.
+      # present).
       - cmake
       - ninja-build
       # wxdragon-sys's build script downloads wxWidgets with reqwest and
@@ -128,6 +138,8 @@ parts:
       - libavutil-dev
       # lac-playback: cpal's ALSA backend.
       - libasound2-dev
+      # wxWidgets' GTK port (see build-environment above).
+      - libgtk-3-dev
     stage-packages:
       - libavcodec60
       - libavformat60
