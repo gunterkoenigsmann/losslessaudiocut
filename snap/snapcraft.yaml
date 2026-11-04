@@ -148,6 +148,14 @@ parts:
       - libasound2-data
       # The pulse plugin of ALSA (see snap/local/asound.conf).
       - libasound2-plugins
+    prime:
+      - "*"
+      # libavcodec pulls in Ubuntu's librsvg. The gnome-46-2404 runtime has
+      # a newer one, which its gdk-pixbuf SVG loader needs (with ours first
+      # on the library path it failed: "undefined symbol:
+      # rsvg_handle_get_pixbuf_and_error", so GTK could not draw SVG theme
+      # icons). The runtime's librsvg keeps the same soname and ABI.
+      - -usr/lib/*/librsvg-2.so*
 
   alsa-config:
     plugin: dump
