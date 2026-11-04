@@ -47,6 +47,10 @@ for all tracks (Ctrl+Shift+A) gives every track the value of the selected
 cell, e.g. the album. Selecting a row moves the cursor to that track. Tag
 changes are undone with Ctrl+Z like any other edit.
 
+A time ruler along the bottom of the waveform shows the time scale at any
+zoom, down to fractions of a millisecond (View > Time ruler switches it
+off).
+
 The bar *Selection and clock* shows where the selection starts and ends,
 its length, and a large play clock (source time, like the waveform). Type a
 time into a field and press Enter to set the selection: a start keeps the

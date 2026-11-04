@@ -27,6 +27,7 @@
 //!   arrangement of them is restored.
 //! - [`positions`]: the position bar (selection start, end, length and
 //!   play clock) and typing times into it.
+//! - [`ruler`]: ticks and labels of the time ruler under the waveform.
 //! - [`detail`]: decoded samples for a zoomed-in waveform, loaded in the
 //!   background with random access.
 //!
@@ -42,6 +43,7 @@ pub mod peak_job;
 pub mod playback;
 pub mod positions;
 pub mod ranges;
+pub mod ruler;
 pub mod session;
 pub mod tag_edits;
 pub mod time;
