@@ -1,0 +1,85 @@
+# Builds the snap (snap/snapcraft.yaml) and smoke-tests it: installs it,
+# runs the command line tool on a fixture and starts the GUI under Xvfb.
+# Publishing is .github/workflows/snap-publish.yml; docs/snap.md has the
+# release steps.
+name: Snap
+
+on:
+  push:
+    branches: [main]
+  # Only the PRs that can break the package: the recipe itself, and new or
+  # updated crates, which may need system libraries the snap does not have
+  # yet. Every merge to main builds it anyway.
+  pull_request:
+    paths:
+      - snap/**
+      - .github/workflows/snap.yml
+      - Cargo.lock
+      - "**/Cargo.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build snap
+    runs-on: ubuntu-latest
+    # The build runs in a fresh LXD container without any cache: Rust
+    # toolchain, all crates and wxWidgets from source. Generous on purpose,
+    # so only a real hang hits it.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: snapcore/action-build@v1
+        id: build
+      # Snapcraft's own log has the details its console output leaves out.
+      - name: Upload snapcraft log
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: snapcraft-log
+          path: ~/.local/state/snapcraft/log/
+      - name: Upload snap
+        uses: actions/upload-artifact@v6
+        with:
+          name: snap
+          path: ${{ steps.build.outputs.snap }}
+          if-no-files-found: error
+      # --dangerous: a local file, not signed by the store. The runtime
+      # (gnome-46-2404) is a default provider, but install it explicitly so
+      # a missing one fails here and not in the GUI start below.
+      - name: Install snap
+        run: |
+          sudo snap install gnome-46-2404 gtk-common-themes
+          sudo snap install --dangerous "${{ steps.build.outputs.snap }}"
+          snap connections losslessaudiocut
+      # The cli links the same FFmpeg and ALSA libraries as the GUI, so this
+      # also proves that the staged libraries are found at run time. The
+      # fixtures are under $HOME (/home/runner/work), which the home plug
+      # covers.
+      # A library in the snap that shadows a newer one of the gnome runtime
+      # shows up as "undefined symbol" when GTK or gdk-pixbuf loads a module
+      # (it happened with librsvg); such warnings fail the job.
+      - name: Command line smoke test
+        run: |
+          set -x
+          losslessaudiocut.cli --help 2> stderr.txt
+          cat stderr.txt
+          # (`! grep` would not stop a `bash -e` script.)
+          if grep -qi "undefined symbol" stderr.txt; then exit 1; fi
+          fixtures=crates/lac-container/tests/fixtures
+          losslessaudiocut.cli info "$fixtures/mp3_cbr128_44k.mp3"
+          losslessaudiocut.cli cut "$fixtures/mp3_cbr128_44k.mp3" -o "$HOME/cut.mp3" --delete 0.5..1
+          losslessaudiocut.cli info "$HOME/cut.mp3"
+      # The GUI must come up and keep running; `timeout` ends it after 20 s
+      # with exit status 124, which is the success case. A missing library,
+      # GTK runtime or a crash at start-up gives any other status.
+      - name: GUI smoke test
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb
+          set +e
+          xvfb-run -a timeout 20 losslessaudiocut
+          status=$?
+          echo "exit status: $status"
+          test "$status" -eq 124

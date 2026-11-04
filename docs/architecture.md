@@ -636,10 +636,12 @@ packets in the same state. This gives:
 - **Logo**: one SVG, `packaging/icons/losslessaudiocut.svg` (a strip of film
   cut in two, with a waveform across the cut). The GUI embeds it as its window
   icon (`lac-gui/src/logo.rs`); the release packaging renders the `.ico`,
-  `.icns` and Linux icons from it, and the snap uses it as its icon. It uses
-  plain shapes only, because wxWidgets renders it with NanoSVG.
-- Release packaging (AppImage or `.deb`, `.app` in a `.dmg`, an installer or
-  zip for Windows) comes later in its own PR.
+  `.icns` and Linux icons from it, and the snap uses it as its icon (a
+  byte-identical copy in `snap/gui/`). It uses plain shapes only, because
+  wxWidgets renders it with NanoSVG.
+- Release packaging: Linux has a snap (`snap/snapcraft.yaml`, built in CI
+  and published weekly to edge and stable, see [`snap.md`](snap.md)). An
+  `.app` in a `.dmg` and an installer or zip for Windows come later.
 
 ## 11. Decisions so far
 

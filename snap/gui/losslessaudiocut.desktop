@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=losslessaudiocut
+GenericName=Audio cutter
+Comment=Cut audio recordings without re-encoding them
+Exec=losslessaudiocut %f
+Icon=${SNAP}/meta/gui/losslessaudiocut.svg
+Terminal=false
+Categories=AudioVideo;Audio;AudioVideoEditing;
+Keywords=audio;cut;trim;split;lossless;mp3;aac;ogg;opus;flac;wav;speex;
+MimeType=audio/aac;audio/x-aac;audio/mp4;audio/x-m4a;audio/mpeg;audio/ogg;audio/x-vorbis+ogg;audio/x-opus+ogg;audio/x-speex;audio/flac;audio/x-flac;audio/x-wav;audio/wav;audio/webm;audio/x-matroska;

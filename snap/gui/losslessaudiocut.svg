@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!--
+    losslessaudiocut logo: a strip of film, cut diagonally in two, with a
+    waveform running across the cut.
+
+    Plain shapes only, no CSS, <use>, clipPath or text: the GUI renders this
+    file with wxWidgets' built-in NanoSVG, which knows nothing else.
+    The two pieces with a dark gap between them are what still reads at
+    16 px; sprocket holes and waveform are detail for larger sizes.
+  -->
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="#2b3a4a"/>
+  <g transform="rotate(-14 128 128)">
+    <!-- Left piece; the cut runs from (128,84) down to (112,172). -->
+    <g>
+      <path d="M22 84H128L112 172H22Z" fill="#e9eef3"/>
+      <!-- Sprocket holes, in the background colour so they look punched. -->
+      <g fill="#2b3a4a">
+        <rect x="28" y="90" width="10" height="10" rx="2"/>
+        <rect x="46" y="90" width="10" height="10" rx="2"/>
+        <rect x="64" y="90" width="10" height="10" rx="2"/>
+        <rect x="82" y="90" width="10" height="10" rx="2"/>
+        <rect x="100" y="90" width="10" height="10" rx="2"/>
+        <rect x="28" y="156" width="10" height="10" rx="2"/>
+        <rect x="46" y="156" width="10" height="10" rx="2"/>
+        <rect x="64" y="156" width="10" height="10" rx="2"/>
+        <rect x="82" y="156" width="10" height="10" rx="2"/>
+        <rect x="100" y="156" width="10" height="10" rx="2"/>
+      </g>
+      <!-- Waveform, centred on y = 128. -->
+      <g stroke="#1f8a70" stroke-width="7" stroke-linecap="round">
+        <line x1="34" y1="122" x2="34" y2="134"/>
+        <line x1="45.5" y1="114" x2="45.5" y2="142"/>
+        <line x1="57" y1="118" x2="57" y2="138"/>
+        <line x1="68.5" y1="109" x2="68.5" y2="147"/>
+        <line x1="80" y1="116" x2="80" y2="140"/>
+        <line x1="91.5" y1="106" x2="91.5" y2="150"/>
+        <line x1="103" y1="112" x2="103" y2="144"/>
+      </g>
+    </g>
+    <!-- Right piece: starts 10 units after the cut and is pushed a little
+         up and to the right, so the cut is visibly open. -->
+    <g transform="translate(6 -6)">
+      <path d="M138 84H234V172H122Z" fill="#e9eef3"/>
+      <g fill="#2b3a4a">
+        <rect x="154" y="90" width="10" height="10" rx="2"/>
+        <rect x="172" y="90" width="10" height="10" rx="2"/>
+        <rect x="190" y="90" width="10" height="10" rx="2"/>
+        <rect x="208" y="90" width="10" height="10" rx="2"/>
+        <rect x="136" y="156" width="10" height="10" rx="2"/>
+        <rect x="154" y="156" width="10" height="10" rx="2"/>
+        <rect x="172" y="156" width="10" height="10" rx="2"/>
+        <rect x="190" y="156" width="10" height="10" rx="2"/>
+        <rect x="208" y="156" width="10" height="10" rx="2"/>
+      </g>
+      <g stroke="#1f8a70" stroke-width="7" stroke-linecap="round">
+        <line x1="149" y1="117" x2="149" y2="139"/>
+        <line x1="160.5" y1="111" x2="160.5" y2="145"/>
+        <line x1="172" y1="121" x2="172" y2="135"/>
+        <line x1="183.5" y1="114" x2="183.5" y2="142"/>
+        <line x1="195" y1="109" x2="195" y2="147"/>
+        <line x1="206.5" y1="118" x2="206.5" y2="138"/>
+        <line x1="218" y1="122" x2="218" y2="134"/>
+      </g>
+    </g>
+  </g>
+</svg>
