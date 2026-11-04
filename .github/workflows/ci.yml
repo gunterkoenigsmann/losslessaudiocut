@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Started by cargo-update.yml on its branch: a PR opened with GITHUB_TOKEN
+  # triggers no pull_request runs, but a dispatch is allowed.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always

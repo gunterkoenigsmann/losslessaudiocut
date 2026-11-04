@@ -624,6 +624,11 @@ packets in the same state. This gives:
   ship a minimal FFmpeg built with only the needed decoders (LGPL build, which
   also keeps the binaries small).
 - **Audio output**: `cpal` (ALSA/PulseAudio/PipeWire, CoreAudio, WASAPI).
+- **Dependencies**: a weekly `cargo update` (`.github/workflows/cargo-update.yml`,
+  Saturdays) refreshes every crate in `Cargo.lock`, transitive ones included,
+  as a PR that runs the full CI and merges itself when green, so security
+  fixes reach the weekly builds. Dependabot handles major crate bumps and
+  the GitHub Actions.
 - **CI**: GitHub Actions matrix on `ubuntu-latest`, `macos-latest` and
   `windows-latest` for build and tests. Format equivalence tests run on all
   three, because endianness-independent parsing and path handling are exactly

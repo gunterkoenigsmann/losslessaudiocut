@@ -1,9 +1,9 @@
 # Dependabot keeps the CI actions and the Cargo dependencies current.
 # Docs: https://docs.github.com/code-security/dependabot/working-with-dependabot/dependabot-options-reference
 #
-# Updates are grouped so each ecosystem opens at most one PR per week
-# instead of one PR per crate; each PR still has to pass the full CI,
-# including the bit-exactness tests, before it is merged.
+# GitHub Actions updates are grouped into at most one PR per week instead of
+# one PR per action; each PR still has to pass the full CI, including the
+# bit-exactness tests, before it is merged.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
@@ -14,13 +14,15 @@ updates:
       github-actions:
         patterns: ["*"]
 
+  # Only major bumps (which may need code changes). Semver-compatible
+  # updates of all crates, transitive ones included, come from the weekly
+  # `cargo update` in .github/workflows/cargo-update.yml; Dependabot's cargo
+  # updates would only cover the direct dependencies and race with it.
+  # Security updates (Dependabot alerts) are not affected by this filter.
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "weekly"
-    groups:
-      # Semver-compatible bumps (Cargo.lock only, or minor/patch in
-      # Cargo.toml) together; major bumps stay separate because they may
-      # need code changes.
-      cargo-compatible:
-        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
