@@ -80,6 +80,9 @@ parts:
   losslessaudiocut:
     plugin: rust
     after: [rust-deps]
+    # "none": take cargo from rust-deps. Left out, the plugin still runs
+    # `rustup update stable` in its pull step, before rust-deps is built.
+    rust-channel: none
     source: .
     rust-path:
       - crates/lac-gui
