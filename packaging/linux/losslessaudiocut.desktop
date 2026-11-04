@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=losslessaudiocut
+GenericName=Audio cutter
+Comment=Cut audio recordings without re-encoding them
+Exec=losslessaudiocut
+Icon=losslessaudiocut
+Terminal=false
+Categories=AudioVideo;Audio;AudioVideoEditing;
+Keywords=audio;cut;trim;split;lossless;mp3;aac;ogg;opus;flac;wav;speex;

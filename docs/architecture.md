@@ -628,8 +628,12 @@ packets in the same state. This gives:
   `windows-latest` for build and tests. Format equivalence tests run on all
   three, because endianness-independent parsing and path handling are exactly
   what breaks between platforms.
-- Release packaging (AppImage or `.deb`, `.app` in a `.dmg`, an installer or
-  zip for Windows) comes later in its own PR.
+- Release packaging: a `vX.Y.Z` tag makes `.github/workflows/release.yml`
+  build a zip and an Inno Setup installer for Windows (x64, arm64), a `.dmg`
+  for macOS (arm64, x86_64) and an AppImage for Linux (x86_64, aarch64),
+  smoke-test each and attach them to the GitHub release; see
+  [`release.md`](release.md). FFmpeg's shared libraries are bundled with
+  each package; wxWidgets is linked statically.
 
 ## 11. Decisions so far
 

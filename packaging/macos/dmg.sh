@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Builds losslessaudiocut.app and packs it into a disk image for the
+# architecture of the Mac it runs on (arm64 or x86_64):
+#
+#   packaging/macos/dmg.sh VERSION OUTDIR
+#
+# Expects `cargo build --release -p lac-gui -p lac-cli` to have run, and
+# Homebrew's `dylibbundler` and `librsvg` (rsvg-convert) to be installed.
+# Writes OUTDIR/losslessaudiocut-VERSION-macos-ARCH.dmg.
+#
+# Layout of the bundle:
+#
+#   losslessaudiocut.app/Contents/
+#     Info.plist
+#     MacOS/losslessaudiocut      the GUI (CFBundleExecutable)
+#     MacOS/lac                   the command line tool
+#     Frameworks/*.dylib          FFmpeg and everything it links, from Homebrew
+#     Resources/losslessaudiocut.icns
+#
+# The app is not signed with a Developer ID nor notarized (see
+# docs/release.md); it only gets the ad-hoc signature that Apple silicon
+# needs to run any code at all.
+set -euo pipefail
+
+version="$1"
+outdir="$(mkdir -p "$2" && cd "$2" && pwd)"
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+arch="$(uname -m)"            # arm64 or x86_64
+target_dir="${CARGO_TARGET_DIR:-$root/target}"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+app="$work/dmg/losslessaudiocut.app"
+contents="$app/Contents"
+mkdir -p "$contents/MacOS" "$contents/Frameworks" "$contents/Resources"
+
+# --- Info.plist --------------------------------------------------------------
+# macOS wants up to three dot-separated integers in the bundle versions, so
+# a pre-release or development suffix is cut off there (it stays in the
+# "Get Info" string and the file name).
+short_version="${version%%-*}"
+sed -e "s/@VERSION@/$version/g" -e "s/@SHORT_VERSION@/$short_version/g" \
+    "$root/packaging/macos/Info.plist" > "$contents/Info.plist"
+plutil -lint "$contents/Info.plist"
+
+# --- Icon --------------------------------------------------------------------
+# iconutil builds an .icns from an .iconset folder with these fixed names.
+iconset="$work/losslessaudiocut.iconset"
+mkdir -p "$iconset"
+for size in 16 32 128 256 512; do
+    rsvg-convert -w "$size" -h "$size" "$root/packaging/icons/losslessaudiocut.svg" \
+        -o "$iconset/icon_${size}x${size}.png"
+    rsvg-convert -w $((size * 2)) -h $((size * 2)) "$root/packaging/icons/losslessaudiocut.svg" \
+        -o "$iconset/icon_${size}x${size}@2x.png"
+done
+iconutil -c icns -o "$contents/Resources/losslessaudiocut.icns" "$iconset"
+
+# --- Binaries and libraries -------------------------------------------------
+cp "$target_dir/release/losslessaudiocut" "$target_dir/release/lac" "$contents/MacOS/"
+# Copies every non-system dylib the binaries need (FFmpeg and its codec
+# libraries from Homebrew) into Frameworks and rewrites the load commands
+# to @executable_path/../Frameworks, recursively.
+dylibbundler --overwrite-dir --bundle-deps --create-dir \
+    --fix-file "$contents/MacOS/losslessaudiocut" \
+    --fix-file "$contents/MacOS/lac" \
+    --dest-dir "$contents/Frameworks" \
+    --install-path @executable_path/../Frameworks/
+
+# Nothing may still point into Homebrew: on a user's Mac it does not exist,
+# and the app would only fail there, not here.
+leaks=0
+for f in "$contents/MacOS/"* "$contents/Frameworks/"*; do
+    if otool -L "$f" | tail -n +2 | grep -E '/(opt/homebrew|usr/local)/'; then
+        echo "error: $f still links a Homebrew library" >&2
+        leaks=1
+    fi
+done
+[ "$leaks" -eq 0 ]
+
+# Rewriting load commands invalidates the libraries' signatures; Apple
+# silicon refuses to load unsigned code, so sign everything ad hoc ("-"),
+# libraries first, then the bundle.
+codesign --force --sign - "$contents/Frameworks/"*.dylib
+codesign --force --sign - "$contents/MacOS/lac"
+codesign --force --sign - "$app"
+codesign --verify --deep --strict "$app"
+
+# --- Disk image ----------------------------------------------------------------
+# The usual drag-to-install layout: the app next to a link to /Applications.
+ln -s /Applications "$work/dmg/Applications"
+dmg="$outdir/losslessaudiocut-$version-macos-$arch.dmg"
+hdiutil create -volname "losslessaudiocut $version" -srcfolder "$work/dmg" \
+    -ov -format UDZO "$dmg"
+ls -l "$dmg"

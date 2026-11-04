@@ -138,6 +138,10 @@ Some tests cross-check results with `ffmpeg`, `flac`, `oggdec`
 Test fixtures are regenerated with `crates/lac-container/tests/fixtures/generate.sh`. See
 [`AGENTS.md`](AGENTS.md) for conventions.
 
+Release packages (Windows zip and installer, macOS DMG, Linux AppImage) are
+built by CI when a version tag is pushed; see
+[`docs/release.md`](docs/release.md).
+
 ## License
 
 GPL-3.0-or-later
