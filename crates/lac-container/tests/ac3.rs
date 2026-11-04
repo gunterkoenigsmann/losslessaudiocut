@@ -340,3 +340,19 @@ proptest! {
         assert_decodes_like_source(name, &src, &out, &p);
     }
 }
+
+/// ffmpeg's encoder asks for dither, so every fixture gets the note.
+#[test]
+fn dither_is_detected() {
+    for (name, ..) in FIXTURES {
+        let src = fixture(name);
+        let f = open(&src);
+        assert!(
+            f.uses_dither(&mut Cursor::new(&src)).expect("reads"),
+            "{name}"
+        );
+        let c = lac_container::open(&mut Cursor::new(&src)).expect("opens");
+        let notes = c.cut_notes(&mut Cursor::new(&src)).expect("reads");
+        assert_eq!(notes, vec![ac3::DITHER_NOTE.to_owned()], "{name}");
+    }
+}

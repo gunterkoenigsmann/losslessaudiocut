@@ -52,6 +52,12 @@ use crate::tags::id3;
 use crate::window::Window;
 use crate::{ContainerError, Result};
 
+/// What the export report says about a stream that uses dither.
+pub const DITHER_NOTE: &str = "this AC-3 stream fills quiet frequency bands with \
+     dither noise; after a cut, players that do not seed it per frame \
+     generate different noise of the same loudness there, everything else \
+     is unchanged";
+
 /// Samples per channel in one frame (six blocks of 256).
 pub const FRAME_SAMPLES: u32 = 1536;
 
@@ -170,6 +176,57 @@ pub fn parse_header(b: &[u8]) -> std::result::Result<(StreamParams, usize), Head
         },
         usize::from(words) * 2,
     ))
+}
+
+/// Whether the first audio block of `frame` (a whole sync frame) asks
+/// for dither in any channel: `dithflag`, A/52 5.4.3.2. Decoders fill
+/// mantissas that got no bits with noise from a random generator there,
+/// see the module documentation. `None` if the frame is too short.
+pub fn first_block_dithers(frame: &[u8]) -> Option<bool> {
+    let mut b = crate::bits::BitReader::new(frame.get(5..)?);
+    let mut read = |n| b.read_u32(n).ok();
+    // A/52 5.3.2 bsi (Annex D's alternate syntax has the same lengths).
+    read(5)?; // bsid
+    read(3)?; // bsmod
+    let acmod = read(3)?;
+    if acmod & 1 != 0 && acmod != 1 {
+        read(2)?; // cmixlev
+    }
+    if acmod & 4 != 0 {
+        read(2)?; // surmixlev
+    }
+    if acmod == 2 {
+        read(2)?; // dsurmod
+    }
+    read(1)?; // lfeon
+    // dialnorm, compr, langcod, mixlevel/roomtyp; twice for 1+1.
+    for _ in 0..if acmod == 0 { 2 } else { 1 } {
+        read(5)?;
+        for len in [8, 8, 7] {
+            if read(1)? == 1 {
+                read(len)?;
+            }
+        }
+    }
+    read(2)?; // copyrightb, origbs
+    for _ in 0..2 {
+        // timecod1/timecod2 (Annex D: xbsi1/xbsi2), 14 bits each.
+        if read(1)? == 1 {
+            read(14)?;
+        }
+    }
+    if read(1)? == 1 {
+        // addbsil + 1 bytes of additional bit stream information.
+        let len = read(6)? + 1;
+        for _ in 0..len {
+            read(8)?;
+        }
+    }
+    // A/52 5.3.3 audblk: blksw[ch], then dithflag[ch].
+    const NFCHANS: [u32; 8] = [2, 1, 2, 3, 3, 4, 4, 5];
+    let n = NFCHANS[acmod as usize];
+    read(n)?;
+    Some(read(n)? != 0)
 }
 
 /// An opened AC-3 file.
@@ -294,6 +351,23 @@ impl Ac3File {
             index,
             warnings,
         })
+    }
+
+    /// Whether any frame's first block asks for dither (see
+    /// [`first_block_dithers`]). Reads frame headers until one does.
+    pub fn uses_dither<R: Read + Seek + ?Sized>(&self, r: &mut R) -> Result<bool> {
+        // The bit stream information and the start of the first block fit
+        // in 128 bytes even with the largest additional information.
+        let mut head = [0u8; 128];
+        for p in self.index.packets() {
+            let n = (p.byte_len as usize).min(head.len());
+            r.seek(SeekFrom::Start(p.byte_offset))?;
+            r.read_exact(&mut head[..n])?;
+            if first_block_dithers(&head[..n]) == Some(true) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The stream's parameters.
@@ -493,6 +567,62 @@ mod tests {
         assert_eq!(p.channels(), 6); // 5.1
         let (p, _) = parse_header(&header(2, false)).expect("valid");
         assert_eq!(p.channels(), 2);
+    }
+
+    /// A frame whose bit stream information has the given optional parts,
+    /// then the first block's `blksw` and `dithflag` bits.
+    fn frame_with_dither(acmod: u8, compr: bool, addbsi_bytes: u8, dithflag: u32) -> Vec<u8> {
+        let mut w = crate::bits::BitWriter::new();
+        w.write(8, 5); // bsid
+        w.write(0, 3); // bsmod
+        w.write(u64::from(acmod), 3);
+        for present in [acmod & 1 != 0 && acmod != 1, acmod & 4 != 0, acmod == 2] {
+            if present {
+                w.write(0, 2);
+            }
+        }
+        w.write(1, 1); // lfeon
+        for _ in 0..if acmod == 0 { 2 } else { 1 } {
+            w.write(27, 5); // dialnorm
+            w.write(u64::from(compr), 1);
+            if compr {
+                w.write(0xFF, 8);
+            }
+            w.write(0, 1); // langcode
+            w.write(1, 1); // audprodie
+            w.write(0x7F, 7);
+        }
+        w.write(0, 2); // copyrightb, origbs
+        w.write(1, 1); // timecod1e
+        w.write(0x3FFF, 14);
+        w.write(0, 1); // timecod2e
+        w.write(u64::from(addbsi_bytes > 0), 1);
+        if addbsi_bytes > 0 {
+            w.write(u64::from(addbsi_bytes - 1), 6);
+            for _ in 0..addbsi_bytes {
+                w.write(0xAA, 8);
+            }
+        }
+        let n = [2, 1, 2, 3, 3, 4, 4, 5][usize::from(acmod)];
+        w.write((1 << n) - 1, n); // blksw: all set, so that misreading shows
+        w.write(u64::from(dithflag), n);
+        w.write(0, 16);
+        let mut f = vec![0x0B, 0x77, 0, 0, 0];
+        f.extend(w.into_bytes());
+        f
+    }
+
+    #[test]
+    fn dither_flags_are_found_after_the_bit_stream_information() {
+        for acmod in [0, 1, 2, 7] {
+            for (compr, addbsi) in [(false, 0), (true, 3), (true, 64)] {
+                let off = frame_with_dither(acmod, compr, addbsi, 0);
+                assert_eq!(first_block_dithers(&off), Some(false), "{acmod}");
+                let on = frame_with_dither(acmod, compr, addbsi, 1);
+                assert_eq!(first_block_dithers(&on), Some(true), "{acmod}");
+            }
+        }
+        assert_eq!(first_block_dithers(&[0x0B, 0x77, 0, 0, 0, 0x40]), None);
     }
 
     #[test]

@@ -52,6 +52,9 @@ pub struct ExportOutcome {
     pub output: PathBuf,
     /// What it contains, or why it failed.
     pub result: ExportResult,
+    /// Notes about how the file plays (see [`Source::cut_notes`]); empty
+    /// when the export failed.
+    pub notes: Vec<String>,
 }
 
 /// Where an export of `source` goes by default: next to it, as
@@ -215,6 +218,13 @@ pub fn describe_outcomes(outcomes: &[ExportOutcome], rate: u32) -> String {
         }
         out += &f;
     }
+    // The notes concern the source, so all files share them: say each once.
+    let mut notes: Vec<&String> = outcomes.iter().flat_map(|o| &o.notes).collect();
+    notes.sort();
+    notes.dedup();
+    for n in notes {
+        out += &format!(". Note: {n}");
+    }
     out
 }
 
@@ -253,23 +263,33 @@ impl ExportJob {
             let result = Arc::clone(&result);
             std::thread::spawn(move || {
                 let outcomes = match Source::open(&source) {
-                    Ok(mut s) => tasks
-                        .into_iter()
-                        .map(|t| {
-                            let tags = t.tags.as_ref().map(|e| e.apply_to(s.tags()));
-                            ExportOutcome {
-                                result: s
+                    Ok(mut s) => {
+                        let notes = s.cut_notes();
+                        tasks
+                            .into_iter()
+                            .map(|t| {
+                                let tags = t.tags.as_ref().map(|e| e.apply_to(s.tags()));
+                                let result = s
                                     .export(&t.request, tags.as_ref(), &t.output)
-                                    .map_err(|e| e.to_string()),
-                                output: t.output,
-                            }
-                        })
-                        .collect(),
+                                    .map_err(|e| e.to_string());
+                                ExportOutcome {
+                                    notes: if result.is_ok() {
+                                        notes.clone()
+                                    } else {
+                                        Vec::new()
+                                    },
+                                    result,
+                                    output: t.output,
+                                }
+                            })
+                            .collect()
+                    }
                     Err(e) => tasks
                         .into_iter()
                         .map(|t| ExportOutcome {
                             output: t.output,
                             result: Err(e.to_string()),
+                            notes: Vec::new(),
                         })
                         .collect(),
                 };
@@ -306,6 +326,7 @@ impl ExportJob {
                 .map(|o| ExportOutcome {
                     output: o.clone(),
                     result: Err("the export thread crashed or was already polled".into()),
+                    notes: Vec::new(),
                 })
                 .collect(),
         }
@@ -391,6 +412,38 @@ mod tests {
             std::fs::read(dir.join("job.flac")).expect("read"),
             std::fs::read(dir.join("direct.flac")).expect("read")
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cut of a file whose codec generates noise says so once in the
+    /// report, also for several files; others say nothing extra.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)] // one deleted range
+    fn reports_codec_noise_notes() {
+        let dir = temp_dir("notes");
+        let src = fixture("mp4_aac_pns_44k.m4a");
+        let tasks = (0..2)
+            .map(|i| ExportTask {
+                request: CutRequest::Delete(vec![1000..20_000]),
+                output: dir.join(format!("{i}.m4a")),
+                tags: None,
+            })
+            .collect();
+        let outcomes = ExportJob::start_all(&src, tasks).wait();
+        let note = lac_container::mp4::aac::NOISE_NOTE;
+        assert!(outcomes.iter().all(|o| o.notes == [note]), "{outcomes:?}");
+        let text = describe_outcomes(&outcomes, 44_100);
+        assert_eq!(text.matches(note).count(), 1, "{text}");
+        assert!(text.contains(". Note: this AAC stream"), "{text}");
+
+        let plain = ExportJob::start(
+            fixture("flac_stereo16_44k.flac"),
+            CutRequest::Delete(vec![1000..20_000]),
+            dir.join("plain.flac"),
+        )
+        .wait();
+        assert!(plain[0].notes.is_empty());
+        assert!(!describe_outcomes(&plain, 44_100).contains("Note"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

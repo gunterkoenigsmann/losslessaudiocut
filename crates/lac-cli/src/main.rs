@@ -227,7 +227,7 @@ fn manpages(dir: &Path) -> Result<()> {
 }
 
 fn info(path: &Path) -> Result<()> {
-    let src = Source::open(path)?;
+    let mut src = Source::open(path)?;
     let i = src.info();
     let total = src.total_samples();
     println!("format:      {} ({})", src.format_name(), src.details());
@@ -251,6 +251,9 @@ fn info(path: &Path) -> Result<()> {
     }
     for w in src.warnings() {
         println!("warning:     {w}");
+    }
+    for n in src.cut_notes() {
+        println!("note:        {n}");
     }
     Ok(())
 }
@@ -315,6 +318,9 @@ fn cut(
         output.display(),
         format_samples(out_len, rate)
     );
+    for n in src.cut_notes() {
+        println!("note: {n}");
+    }
     Ok(())
 }
 

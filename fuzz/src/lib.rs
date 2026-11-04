@@ -24,7 +24,7 @@ pub fn run<C: Container>(data: &[u8], open: impl FnOnce(&mut Cursor<&[u8]>) -> R
 }
 
 /// Calls everything a front end calls on an opened file: the metadata
-/// getters, the decode setup, every packet read, and a cut of the whole
+/// getters and export notes, the decode setup, every packet read, and a cut of the whole
 /// file plus one of its middle half (the latter forces trimming and, for
 /// FLAC, boundary re-encoding).
 pub fn exercise(c: &dyn Container, data: &[u8]) {
@@ -32,6 +32,8 @@ pub fn exercise(c: &dyn Container, data: &[u8]) {
     let _ = c.format_name();
     let _ = c.details();
     let _ = c.warnings();
+    // Reads every packet's first bytes (generated codec noise).
+    let _ = c.cut_notes(&mut r);
     let index = c.index();
     let caps = c.capabilities();
 
