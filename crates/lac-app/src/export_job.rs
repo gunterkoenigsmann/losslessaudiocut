@@ -9,6 +9,12 @@
 //! One job writes one file, or one file per track ([`track_tasks`]); the
 //! source is opened once for all of them.
 //!
+//! Each file gets the source's tags with the task's [`TagEdits`] applied:
+//! the track's changes from the editor. Unless the user set them, track
+//! files are numbered among the files written (`track_number` 1..n,
+//! `track_total` n), so a track that is deleted entirely leaves no gap in
+//! a player's numbering.
+//!
 //! An export cannot be cancelled: stopping half way would leave a broken
 //! file. Dropping the job only stops listening; the files are still
 //! written.
@@ -17,10 +23,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use lac_core::SamplePos;
+use lac_core::{SamplePos, TagField};
 
 use crate::editor::{Editor, Track, describe_export};
-use crate::{CutRequest, KeptRange, Source};
+use crate::{CutRequest, KeptRange, Source, TagEdits};
 
 /// What an export produced: per kept range what it became, or a message
 /// for the user.
@@ -33,6 +39,10 @@ pub struct ExportTask {
     pub request: CutRequest,
     /// Where it goes.
     pub output: PathBuf,
+    /// Changes to the source's tags for this file; `None` keeps the
+    /// source's tags as they are (copied verbatim where the format
+    /// allows).
+    pub tags: Option<TagEdits>,
 }
 
 /// How writing one file went.
@@ -100,22 +110,69 @@ pub fn track_output(dir: &Path, source: &Path, track: &Track, count: usize) -> P
     dir.join(name)
 }
 
+/// The task for exporting all of `editor`'s kept audio as one file:
+/// the source's tags with the changes made to the one track (none:
+/// `tags` is `None` and the source's tags are copied as they are).
+pub fn single_task(editor: &Editor, output: impl Into<PathBuf>) -> ExportTask {
+    let tags = editor
+        .tracks()
+        .into_iter()
+        .next()
+        .map(|t| t.tags)
+        .filter(|t| !t.is_empty());
+    ExportTask {
+        request: editor.cut_request(),
+        output: output.into(),
+        tags,
+    }
+}
+
+/// The track numbers that files will get: (number, total) of each track
+/// of `editor`, `None` for a track deleted entirely. Numbers count the
+/// files written; a number or total the user set wins.
+pub fn track_numbers(editor: &Editor) -> Vec<Option<(String, String)>> {
+    let tracks = editor.tracks();
+    let files = tracks.iter().filter(|t| !t.kept.is_empty()).count();
+    let mut n = 0;
+    tracks
+        .iter()
+        .map(|t| {
+            if t.kept.is_empty() {
+                return None;
+            }
+            n += 1;
+            let get = |f, auto: usize| t.tags.get(f).map_or_else(|| auto.to_string(), String::from);
+            Some((
+                get(TagField::TrackNumber, n),
+                get(TagField::TrackTotal, files),
+            ))
+        })
+        .collect()
+}
+
 /// One task per track of `editor` that keeps anything, writing into `dir`
-/// (see [`track_output`]). Also returns the numbers of the tracks that are
-/// deleted entirely and so produce no file.
+/// (see [`track_output`]), with the track's number among the written
+/// files and its name as title (see the module documentation). Also
+/// returns the numbers of the tracks that are deleted entirely and so
+/// produce no file.
 pub fn track_tasks(editor: &Editor, source: &Path, dir: &Path) -> (Vec<ExportTask>, Vec<usize>) {
     let tracks = editor.tracks();
     let count = tracks.len();
-    let mut skipped = Vec::new();
     let mut tasks = Vec::new();
-    for t in tracks {
-        if t.kept.is_empty() {
+    let mut skipped = Vec::new();
+    for (t, numbers) in tracks.into_iter().zip(track_numbers(editor)) {
+        let Some((number, total)) = numbers else {
             skipped.push(t.number);
             continue;
-        }
+        };
+        let mut tags = t.tags.clone();
+        // Valid numbers (counted, or set by the user and checked then).
+        let _ = tags.set(TagField::TrackNumber, &number);
+        let _ = tags.set(TagField::TrackTotal, &total);
         tasks.push(ExportTask {
             output: track_output(dir, source, &t, count),
             request: CutRequest::Keep(t.kept),
+            tags: Some(tags),
         });
     }
     (tasks, skipped)
@@ -181,6 +238,7 @@ impl ExportJob {
             vec![ExportTask {
                 request,
                 output: output.into(),
+                tags: None,
             }],
         )
     }
@@ -197,9 +255,14 @@ impl ExportJob {
                 let outcomes = match Source::open(&source) {
                     Ok(mut s) => tasks
                         .into_iter()
-                        .map(|t| ExportOutcome {
-                            result: s.export(&t.request, &t.output).map_err(|e| e.to_string()),
-                            output: t.output,
+                        .map(|t| {
+                            let tags = t.tags.as_ref().map(|e| e.apply_to(s.tags()));
+                            ExportOutcome {
+                                result: s
+                                    .export(&t.request, tags.as_ref(), &t.output)
+                                    .map_err(|e| e.to_string()),
+                                output: t.output,
+                            }
                         })
                         .collect(),
                     Err(e) => tasks
@@ -292,6 +355,7 @@ mod tests {
             span: 0..1,
             kept: vec![],
             name: name.map(String::from),
+            tags: TagEdits::new(),
         };
         let src = Path::new("/rec/show.mp3");
         let out = Path::new("/out");
@@ -320,7 +384,7 @@ mod tests {
         let outcomes = job.wait();
         let direct = Source::open(&src)
             .expect("open")
-            .export(&request, dir.join("direct.flac"))
+            .export(&request, None, dir.join("direct.flac"))
             .expect("direct export");
         assert_eq!(outcomes[0].result, Ok(direct));
         assert_eq!(
@@ -363,17 +427,69 @@ mod tests {
         );
         for t in &tasks {
             let reference = dir.join("reference.flac");
-            Source::open(&src)
-                .expect("open")
-                .export(&t.request, &reference)
+            let mut s = Source::open(&src).expect("open");
+            let tags = t.tags.as_ref().map(|e| e.apply_to(s.tags()));
+            s.export(&t.request, tags.as_ref(), &reference)
                 .expect("export");
             assert_eq!(
                 std::fs::read(&t.output).ok(),
                 std::fs::read(&reference).ok()
             );
         }
+        // Numbered among the written files, the name as title.
+        let tags: Vec<_> = tasks
+            .iter()
+            .map(|t| Source::open(&t.output).expect("open").tags().clone())
+            .collect();
+        assert_eq!(tags[0].title.as_deref(), Some("Intro"));
+        assert_eq!(
+            (tags[0].track_number, tags[0].track_total),
+            (Some(1), Some(2))
+        );
+        assert_eq!(tags[1].title, None);
+        assert_eq!(
+            (tags[1].track_number, tags[1].track_total),
+            (Some(2), Some(2))
+        );
         let report = describe_outcomes(&outcomes, 44_100);
         assert!(report.starts_with("2 files: exported 2 parts"), "{report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Track files start from the source's tags: the fields nobody
+    /// changed are the source's.
+    #[test]
+    fn track_files_keep_the_source_tags() {
+        let dir = temp_dir("srctags");
+        // TITLE=Fixture, ARTIST=losslessaudiocut.
+        let src = fixture("flac_wasted_22k.flac");
+        let total = Source::open(&src).expect("open").total_samples();
+        let mut e = Editor::new(total);
+        e.split_at(total / 2);
+        e.rename_track(1, "Second half");
+        let (tasks, _) = track_tasks(&e, &src, &dir);
+        let outcomes = ExportJob::start_all(&src, tasks.clone()).wait();
+        assert!(outcomes.iter().all(|o| o.result.is_ok()), "{outcomes:?}");
+        let tags = |i: usize| Source::open(&tasks[i].output).expect("open").tags().clone();
+        assert_eq!(tags(0).title.as_deref(), Some("Fixture"));
+        assert_eq!(tags(1).title.as_deref(), Some("Second half"));
+        for i in 0..2 {
+            assert_eq!(tags(i).artist.as_deref(), Some("losslessaudiocut"));
+        }
+
+        // One file: the one track's name, no track number.
+        let mut one = Editor::new(total);
+        one.rename_track(0, "Everything");
+        let task = single_task(&one, dir.join("one.flac"));
+        let o = ExportJob::start_all(&src, vec![task]).wait();
+        assert!(o[0].result.is_ok(), "{o:?}");
+        let t = Source::open(dir.join("one.flac"))
+            .expect("open")
+            .tags()
+            .clone();
+        assert_eq!(t.title.as_deref(), Some("Everything"));
+        assert_eq!(t.track_number, None);
+        assert_eq!(single_task(&Editor::new(total), "x").tags, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

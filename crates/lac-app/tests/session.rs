@@ -75,7 +75,7 @@ fn delete_joins_the_rest_bit_exactly() {
     let out = dir.join("out.wav");
     // Unordered and overlapping on purpose: both refer to the original file.
     let req = CutRequest::Delete(vec![600..700, 100..200, 150..250]);
-    let kept = src.export(&req, &out).expect("export");
+    let kept = src.export(&req, None, &out).expect("export");
 
     assert_eq!(
         kept.iter().map(|k| k.actual.clone()).collect::<Vec<_>>(),
@@ -92,7 +92,7 @@ fn keep_preserves_the_given_order() {
     let mut src = ramp_source(&dir, 1000);
     let out = dir.join("out.wav");
     let req = CutRequest::Keep(vec![800..900, 5..5, 10..20]);
-    let kept = src.export(&req, &out).expect("export");
+    let kept = src.export(&req, None, &out).expect("export");
 
     assert_eq!(kept.len(), 2, "the empty range is dropped");
     let want: Vec<u16> = (800..900).chain(10..20).collect();
@@ -122,7 +122,7 @@ fn refuses_to_overwrite_the_source() {
     let mut src = ramp_source(&dir, 100);
     let input = src.path().to_path_buf();
     let err = src
-        .export(&CutRequest::Keep(vec![0..10]), &input)
+        .export(&CutRequest::Keep(vec![0..10]), None, &input)
         .expect_err("must refuse");
     assert!(matches!(err, AppError::OutputIsInput));
     assert_eq!(std::fs::read(&input).expect("read"), ramp_wav(100));

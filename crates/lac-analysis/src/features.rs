@@ -11,7 +11,11 @@
 //!   Gaussian noise is `exp(-γ)`), harmonic sounds such as voiced speech
 //!   and music give well below 0.1, a single sine almost 0,
 //! - its **band spectrum**: power in [`BANDS`] log-spaced bands, for
-//!   telling one piece of music from the next.
+//!   telling one piece of music from the next by its timbre,
+//! - its **chroma**: how the energy between [`CHROMA_LOW_HZ`] and
+//!   [`CHROMA_HIGH_HZ`] is distributed over the twelve pitch classes
+//!   (C, C♯, …, B; octaves folded together), for telling pieces apart by
+//!   their key and harmony when their timbre is alike.
 //!
 //! The spectrum is taken over a Hann window of two hops centred on the
 //! frame (50 % overlap), of the mean of all channels.
@@ -41,6 +45,14 @@ pub const FLATNESS_LOW_HZ: f32 = 150.0;
 /// Upper edge of the flatness band (or 90 % of the Nyquist frequency, if
 /// lower), below the low-pass of narrow-band speech codecs.
 pub const FLATNESS_HIGH_HZ: f32 = 6000.0;
+/// Lower edge of the [`Frame::chroma`] range: below, one FFT bin (16 to
+/// 23 Hz) is wider than a semitone, so bins could not be told apart by
+/// pitch class. Low notes still count through their harmonics.
+pub const CHROMA_LOW_HZ: f32 = 400.0;
+/// Upper edge of the chroma range: above, harmonics are dense and say
+/// little about the pitch.
+pub const CHROMA_HIGH_HZ: f32 = 5000.0;
+
 /// Lower edge of the lowest of the [`BANDS`].
 const BANDS_LOW_HZ: f32 = 80.0;
 /// Upper edge of the highest of the [`BANDS`] (or 90 % of Nyquist).
@@ -71,9 +83,18 @@ pub struct Frame {
     /// Band powers, see [`Frame::band_db`]; stored in half-dB steps from
     /// −128 dB to keep a multi-hour recording at a few megabytes.
     bands: [u8; BANDS],
+    /// Share of each pitch class, see [`Frame::chroma`]; 255 = all.
+    chroma: [u8; 12],
 }
 
 impl Frame {
+    /// Share (0..1) of the energy between [`CHROMA_LOW_HZ`] and
+    /// [`CHROMA_HIGH_HZ`] in pitch class `pc` (0 = C, 9 = A, `< 12`), in
+    /// steps of 1/255. All zero when there is no energy there.
+    pub fn chroma(&self, pc: usize) -> f32 {
+        f32::from(self.chroma[pc]) / 255.0
+    }
+
     /// Power in band `b` (`< BANDS`, log-spaced from 80 Hz to 12 kHz or
     /// 90 % of Nyquist) as its contribution to the frame's mean square, in
     /// dB (−128 to −0.5, in half-dB steps).
@@ -156,6 +177,8 @@ pub struct FeatureExtractor {
     scratch: Vec<Complex<f32>>,
     flat_bins: std::ops::Range<usize>,
     band_bins: [std::ops::Range<usize>; BANDS],
+    /// Bins in the chroma range and their pitch class.
+    chroma_bins: Vec<(usize, usize)>,
     total: SamplePos,
     frames: Vec<Frame>,
 }
@@ -205,6 +228,13 @@ impl FeatureExtractor {
             *r = start.min(end - 1)..end;
             start = end;
         }
+        // Pitch class of a bin's centre frequency, A4 = 440 Hz = class 9.
+        let chroma_bins = (bin(CHROMA_LOW_HZ)..=bin(CHROMA_HIGH_HZ.min(top)))
+            .map(|k| {
+                let semitones = 12.0 * (k as f32 * bin_hz / 440.0).log2();
+                (k, (semitones.round() as i32 + 9).rem_euclid(12) as usize)
+            })
+            .collect();
         FeatureExtractor {
             sample_rate,
             channels: channels.max(1),
@@ -218,6 +248,7 @@ impl FeatureExtractor {
             scratch: vec![Complex::default(); n],
             flat_bins,
             band_bins,
+            chroma_bins,
             total: 0,
             frames: Vec::new(),
         }
@@ -297,10 +328,24 @@ impl FeatureExtractor {
             *q = quantise_db(10.0 * (p + BIN_EPS).log10());
         }
 
+        let mut pcs = [0f64; 12];
+        for &(k, pc) in &self.chroma_bins {
+            pcs[pc] += power(k);
+        }
+        let total: f64 = pcs.iter().sum();
+        let chroma = pcs.map(|x| {
+            if total > 0.0 {
+                (x / total * 255.0).round() as u8
+            } else {
+                0
+            }
+        });
+
         self.frames.push(Frame {
             level_db,
             flatness,
             bands,
+            chroma,
         });
         self.pending.drain(..hop);
     }
@@ -430,6 +475,23 @@ pub(crate) mod tests {
         // A sine's energy sits in one or two bands, at about its level.
         let max = (0..BANDS).map(|b| l.band_db(b)).fold(f32::MIN, f32::max);
         assert!((max - l.level_db).abs() < 3.0, "{max} vs {}", l.level_db);
+    }
+
+    #[test]
+    fn chroma_names_the_pitch_class() {
+        let rate = 16000;
+        for (hz, pc) in [(440.0, 9), (523.25, 0), (1567.98, 7), (220.0, 9)] {
+            // 220 Hz lies below the chroma range: it counts through its
+            // harmonics (440, 660 = E, 880, ...).
+            let f = features_of(&tone(rate as usize, rate, hz, 3, 0.5), rate);
+            let fr = &f.frames()[5];
+            let best = (0..12).max_by(|&a, &b| fr.chroma(a).total_cmp(&fr.chroma(b)));
+            assert_eq!(best, Some(pc), "{hz} Hz");
+            let sum: f32 = (0..12).map(|p| fr.chroma(p)).sum();
+            assert!((sum - 1.0).abs() < 0.03, "{sum}");
+        }
+        let silent = features_of(&vec![0.0; 2000], rate);
+        assert_eq!(silent.frames()[1].chroma(0), 0.0);
     }
 
     #[test]

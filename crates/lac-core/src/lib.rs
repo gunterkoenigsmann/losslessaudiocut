@@ -23,7 +23,7 @@ mod tags;
 pub use edit::{EditError, EditList, Segment, SourceId, Track};
 pub use packet::{AudioStreamInfo, IndexError, PacketFlags, PacketIndex, PacketInfo};
 pub use plan::{CutCapabilities, CutPlan, PlanError, plan_cut, plan_cuts};
-pub use tags::Tags;
+pub use tags::{TagField, TagValueError, Tags, parse_track_number};
 
 /// A position or a duration, counted in sample frames at the stream's own
 /// sample rate.

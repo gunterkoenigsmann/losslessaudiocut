@@ -10,7 +10,8 @@
 //! Supported so far: [`wav`], [`flac`], [`ogg`] (Vorbis, Opus, Speex),
 //! [`mp3`] and [`mkv`] (Matroska/WebM with Opus). [`open`] detects the format
 //! from the file's content and returns it behind the common [`Container`]
-//! interface.
+//! interface. Each format also reads and writes its tags; the shared tag
+//! formats live in [`tags`].
 
 mod bits;
 pub mod decode;
@@ -18,12 +19,13 @@ pub mod flac;
 pub mod mkv;
 pub mod mp3;
 pub mod ogg;
+pub mod tags;
 pub mod wav;
 mod window;
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use lac_core::{CutCapabilities, CutPlan, PacketIndex};
+use lac_core::{CutCapabilities, CutPlan, PacketIndex, Tags};
 
 pub use decode::{Codec, DecodeSection};
 
@@ -50,11 +52,19 @@ pub trait Container: Send {
     fn capabilities(&self) -> CutCapabilities;
     /// Problems that were tolerated while opening the file.
     fn warnings(&self) -> &[String];
+    /// The source's tags, as far as [`Tags`] can hold them.
+    fn tags(&self) -> &Tags;
     /// Writes a new file containing the `actual` ranges of `plans`, joined.
+    ///
+    /// With `tags`, the new file carries them in the format's native tag
+    /// format; without, it keeps the source's tags (copied verbatim where
+    /// the format allows). Either way the source's pictures and other
+    /// binary tag data are kept; see [`tags`] and each format module.
     fn write_cut(
         &self,
         r: &mut dyn ReadSeek,
         plans: &[CutPlan],
+        tags: Option<&Tags>,
         w: &mut dyn WriteSeek,
     ) -> Result<()>;
     /// How to decode the source, see [`decode`]. Reads codec headers from
@@ -85,13 +95,17 @@ impl Container for wav::WavFile {
     fn warnings(&self) -> &[String] {
         wav::WavFile::warnings(self)
     }
+    fn tags(&self) -> &Tags {
+        wav::WavFile::tags(self)
+    }
     fn write_cut(
         &self,
         r: &mut dyn ReadSeek,
         plans: &[CutPlan],
+        tags: Option<&Tags>,
         w: &mut dyn WriteSeek,
     ) -> Result<()> {
-        wav::WavFile::write_cut(self, r, plans, w)
+        wav::WavFile::write_cut(self, r, plans, tags, w)
     }
     fn decode_sections(&self, r: &mut dyn ReadSeek) -> Result<Vec<DecodeSection>> {
         wav::WavFile::decode_sections(self, r)
@@ -122,13 +136,17 @@ impl Container for flac::FlacFile {
     fn warnings(&self) -> &[String] {
         flac::FlacFile::warnings(self)
     }
+    fn tags(&self) -> &Tags {
+        flac::FlacFile::tags(self)
+    }
     fn write_cut(
         &self,
         r: &mut dyn ReadSeek,
         plans: &[CutPlan],
+        tags: Option<&Tags>,
         w: &mut dyn WriteSeek,
     ) -> Result<()> {
-        flac::FlacFile::write_cut(self, r, plans, w)
+        flac::FlacFile::write_cut(self, r, plans, tags, w)
     }
     fn decode_sections(&self, r: &mut dyn ReadSeek) -> Result<Vec<DecodeSection>> {
         flac::FlacFile::decode_sections(self, r)
@@ -165,13 +183,17 @@ impl Container for ogg::OggFile {
     fn warnings(&self) -> &[String] {
         ogg::OggFile::warnings(self)
     }
+    fn tags(&self) -> &Tags {
+        ogg::OggFile::tags(self)
+    }
     fn write_cut(
         &self,
         r: &mut dyn ReadSeek,
         plans: &[CutPlan],
+        tags: Option<&Tags>,
         w: &mut dyn WriteSeek,
     ) -> Result<()> {
-        ogg::OggFile::write_cut(self, r, plans, w)
+        ogg::OggFile::write_cut(self, r, plans, tags, w)
     }
     fn decode_sections(&self, r: &mut dyn ReadSeek) -> Result<Vec<DecodeSection>> {
         ogg::OggFile::decode_sections(self, r)
@@ -202,13 +224,17 @@ impl Container for mp3::Mp3File {
     fn warnings(&self) -> &[String] {
         mp3::Mp3File::warnings(self)
     }
+    fn tags(&self) -> &Tags {
+        mp3::Mp3File::tags(self)
+    }
     fn write_cut(
         &self,
         r: &mut dyn ReadSeek,
         plans: &[CutPlan],
+        tags: Option<&Tags>,
         w: &mut dyn WriteSeek,
     ) -> Result<()> {
-        mp3::Mp3File::write_cut(self, r, plans, w)
+        mp3::Mp3File::write_cut(self, r, plans, tags, w)
     }
     fn decode_sections(&self, r: &mut dyn ReadSeek) -> Result<Vec<DecodeSection>> {
         mp3::Mp3File::decode_sections(self, r)
@@ -246,13 +272,17 @@ impl Container for mkv::MkvFile {
     fn warnings(&self) -> &[String] {
         mkv::MkvFile::warnings(self)
     }
+    fn tags(&self) -> &Tags {
+        mkv::MkvFile::tags(self)
+    }
     fn write_cut(
         &self,
         r: &mut dyn ReadSeek,
         plans: &[CutPlan],
+        tags: Option<&Tags>,
         w: &mut dyn WriteSeek,
     ) -> Result<()> {
-        mkv::MkvFile::write_cut(self, r, plans, w)
+        mkv::MkvFile::write_cut(self, r, plans, tags, w)
     }
     fn decode_sections(&self, r: &mut dyn ReadSeek) -> Result<Vec<DecodeSection>> {
         mkv::MkvFile::decode_sections(self, r)

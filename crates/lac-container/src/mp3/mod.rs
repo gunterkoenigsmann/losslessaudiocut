@@ -48,6 +48,15 @@
 //! Junk between frames is skipped with a warning; frames whose reservoir
 //! bytes lie before the start of the file or before skipped junk are kept,
 //! with the missing bytes replaced by zeros, and reported.
+//!
+//! ## Tags
+//!
+//! The source's tags come from the ID3v2 tag, with fields it lacks taken
+//! from an ID3v1 tag. An export without new tags copies both tags
+//! verbatim; one with new tags writes a fresh ID3v2.4 tag holding them
+//! plus the source's other frames (pictures and the like, see
+//! [`crate::tags::id3`]) and no ID3v1 tag, which could only hold a
+//! truncated copy. APE tags are never copied.
 
 pub mod frame;
 pub mod xing;
@@ -55,7 +64,9 @@ pub mod xing;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
-use lac_core::{AudioStreamInfo, CutCapabilities, CutPlan, PacketFlags, PacketIndex, PacketInfo};
+use lac_core::{
+    AudioStreamInfo, CutCapabilities, CutPlan, PacketFlags, PacketIndex, PacketInfo, Tags,
+};
 
 use crate::window::Window;
 use crate::{ContainerError, Result};
@@ -98,6 +109,8 @@ pub struct Mp3File {
     id3v2: Range<u64>,
     /// Offset of a trailing ID3v1 tag.
     id3v1: Option<u64>,
+    /// The tags parsed from both, and the ID3v2 frames to keep.
+    id3: crate::tags::id3::Id3v2,
     lame: Option<LameTag>,
     /// Frame of each index entry.
     entry_frame: Vec<usize>,
@@ -119,6 +132,7 @@ impl Mp3File {
         let mut warnings = Vec::new();
         let start = crate::flac::skip_id3v2(r, len)?.min(len);
         let (end, id3v1) = trailing_tags(r, start, len, &mut warnings)?;
+        let id3 = read_tags(r, start, id3v1, &mut warnings)?;
 
         let mut w = Window::new(r, len);
         let scan = scan(&mut w, start, end, &mut warnings)?;
@@ -218,6 +232,7 @@ impl Mp3File {
             first,
             id3v2: 0..start,
             id3v1,
+            id3,
             lame,
             entry_frame,
             entry_offset,
@@ -226,6 +241,11 @@ impl Mp3File {
             index,
             warnings,
         })
+    }
+
+    /// The source's tags (see the module documentation).
+    pub fn tags(&self) -> &Tags {
+        &self.id3.tags
     }
 
     /// One entry per audio frame with audible samples.
@@ -359,8 +379,16 @@ impl Mp3File {
         Ok(out)
     }
 
-    /// Writes the `actual` ranges of `plans` as one MP3 file.
-    pub fn write_cut<R, W>(&self, r: &mut R, plans: &[CutPlan], w: &mut W) -> Result<()>
+    /// Writes the `actual` ranges of `plans` as one MP3 file, with `tags`
+    /// if given, else with the source's tags (see the module
+    /// documentation).
+    pub fn write_cut<R, W>(
+        &self,
+        r: &mut R,
+        plans: &[CutPlan],
+        tags: Option<&Tags>,
+        w: &mut W,
+    ) -> Result<()>
     where
         R: Read + Seek + ?Sized,
         W: Write + Seek + ?Sized,
@@ -431,9 +459,17 @@ impl Mp3File {
             ));
         }
 
-        // ID3v2 tag, copied verbatim.
-        r.seek(SeekFrom::Start(self.id3v2.start))?;
-        io::copy(&mut (&mut *r).take(self.id3v2.end - self.id3v2.start), w)?;
+        match tags {
+            Some(t) => {
+                let tag = crate::tags::id3::write(t, &self.id3.other)
+                    .map_err(ContainerError::TooLarge)?;
+                w.write_all(&tag)?;
+            }
+            None => {
+                r.seek(SeekFrom::Start(self.id3v2.start))?;
+                io::copy(&mut (&mut *r).take(self.id3v2.end - self.id3v2.start), w)?;
+            }
+        }
 
         // Placeholder for the Xing frame, written at the end.
         let xh = self.xing_header();
@@ -493,7 +529,7 @@ impl Mp3File {
         let bytes = u32::try_from(pos)
             .map_err(|_| ContainerError::TooLarge("MP3 stream exceeds 4 GiB".into()))?;
 
-        if let Some(at) = self.id3v1 {
+        if let Some(at) = self.id3v1.filter(|_| tags.is_none()) {
             r.seek(SeekFrom::Start(at))?;
             io::copy(&mut (&mut *r).take(128), w)?;
         }
@@ -630,6 +666,27 @@ struct NeedCarrier;
 struct Scan {
     frames: Vec<Frame>,
     xing: Option<xing::XingInfo>,
+}
+
+/// Parses the ID3v2 tag in `0..id3v2_end` and the ID3v1 tag at `id3v1`.
+fn read_tags<R: Read + Seek + ?Sized>(
+    r: &mut R,
+    id3v2_end: u64,
+    id3v1: Option<u64>,
+    warnings: &mut Vec<String>,
+) -> Result<crate::tags::id3::Id3v2> {
+    let mut b = vec![0u8; usize::try_from(id3v2_end).unwrap_or(0)];
+    r.seek(SeekFrom::Start(0))?;
+    r.read_exact(&mut b)?;
+    let mut id3 = crate::tags::id3::parse(&b);
+    warnings.append(&mut id3.warnings);
+    if let Some(at) = id3v1 {
+        let mut v1 = [0u8; 128];
+        r.seek(SeekFrom::Start(at))?;
+        r.read_exact(&mut v1)?;
+        crate::tags::id3::merge_v1(&mut id3.tags, &v1);
+    }
+    Ok(id3)
 }
 
 /// Finds a trailing ID3v1 tag and APE tag; returns the end of the audio

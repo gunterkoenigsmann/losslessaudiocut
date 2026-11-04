@@ -6,8 +6,8 @@ or split it into tracks, without ever re-encoding lossy audio.
 Status: early development. WAV, FLAC, Ogg (Vorbis, Opus, Speex), MP3 and
 Matroska/WebM (Opus) cutting work from the command line and in the
 wxWidgets GUI (waveform, zoom, select, delete, split into tracks, undo,
-export, playback of the result, scrubbing, playback speed); per-track tags
-and AAC follow. See
+export, playback of the result, scrubbing, playback speed, a track list
+with per-track tags); AAC follows. See
 [`docs/architecture.md`](docs/architecture.md) for the design.
 
 ## GUI
@@ -34,8 +34,30 @@ joins the track under the cursor with the one before it, and F2 names it.
 Track boundaries show as dashed lines with the track number and name. With
 tracks, File > Export asks for a folder and writes one file per track,
 `<name>-01 <track name>.<ext>`, `<name>-02.<ext>`, …; a track that is
-deleted entirely gets no file. The files keep the source's tags for now;
-per-track titles and numbers in the tags come later (issue #24).
+deleted entirely gets no file. Each file gets the source's tags with its
+track number (counting the files written), the number of tracks, and the
+track's name as title.
+
+The track list under the waveform (View > Track list, Ctrl+L) shows every
+track with the tags its file will get: title, artist, album, album artist,
+track number and count, date, genre and comment. Click a cell and type to
+change it (the title is the track's name); changed values are shown in
+bold blue, and typing the original value back undoes the change. Edit > Use
+for all tracks (Ctrl+Shift+A) gives every track the value of the selected
+cell, e.g. the album. Selecting a row moves the cursor to that track. Tag
+changes are undone with Ctrl+Z like any other edit.
+
+The bar *Selection and clock* shows where the selection starts and ends,
+its length, and a large play clock (source time, like the waveform). Type a
+time into a field and press Enter to set the selection: a start keeps the
+end, an end or a length keeps the start; without a selection, a start moves
+the cursor. Times are seconds, `m:ss`, `h:mm:ss` (all with optional
+decimals) or `@frames`.
+
+The toolbar, the selection bar and the track list are dockable panes: drag them by their
+gripper or title to another edge of the window, float them, resize or close
+them; the View menu shows and hides each one. Their arrangement and the
+window size are remembered between runs.
 
 While the waveform loads, the file is also searched for pauses (silence or
 only noise) and track starts. Suggested pauses show as a strip along the
@@ -71,9 +93,13 @@ affects listening, never the exported files.
 cargo run --bin lac -- info recording.wav
 cargo run --bin lac -- cut recording.wav -o out.wav --delete 1:00..1:30 --delete 5:00..
 cargo run --bin lac -- cut recording.wav -o out.wav --keep 0:10..3:45
+cargo run --bin lac -- cut show.mp3 -o part2.mp3 --keep 30:00.. --tag title="Part 2" --tag track=2
 ```
 
 Times are seconds (`90.5`), `m:ss`, `h:mm:ss` or `@N` for sample frame N.
+`info` shows the tags; `--tag FIELD=VALUE` changes one in the output (title,
+artist, album, album_artist, track, tracktotal, date, genre, comment; an
+empty value removes it), the others are copied from the input.
 
 ## Development
 

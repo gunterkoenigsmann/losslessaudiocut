@@ -2,8 +2,10 @@
 //! store (the registry on Windows, a file in the home or config directory
 //! elsewhere).
 //!
-//! Only on/off choices from the menus live here; everything else about a
-//! session (the open file, the edits) is deliberately not remembered.
+//! Only on/off choices from the menus live here (which panes are shown,
+//! and where, is the window layout's business: see `panes.rs`);
+//! everything else about a session (the open file, the edits) is
+//! deliberately not remembered.
 
 use wxdragon::config::{Config, ConfigStyle};
 
@@ -53,7 +55,7 @@ impl Options {
 }
 
 /// The application's config store.
-fn config() -> Config {
+pub(crate) fn config() -> Config {
     Config::new(
         "losslessaudiocut",
         None,
@@ -68,7 +70,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn both_options_are_on_by_default() {
+    fn all_options_are_on_by_default() {
         // Decided with the user: hearing the dragged edge is what the tool
         // is for, and speech should stay intelligible at other speeds.
         assert_eq!(

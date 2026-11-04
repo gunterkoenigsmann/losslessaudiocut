@@ -37,8 +37,16 @@
 //!   limits, and the MD5 of the decoded output (computed by decoding every
 //!   frame while writing, which also verifies each copied frame).
 //! - SEEKTABLE and CUESHEET are dropped because their offsets would be wrong;
-//!   VORBIS_COMMENT, PICTURE, APPLICATION and PADDING are copied unchanged.
-//!   An ID3v2 tag in front of the stream is dropped with a warning.
+//!   PICTURE, APPLICATION and PADDING are copied unchanged.
+//!
+//! ## Tags
+//!
+//! The source's tags are the first VORBIS_COMMENT block (RFC 9639 8.6);
+//! without one, an ID3v2 tag in front of the stream is read instead. An
+//! export with new tags writes them as the VORBIS_COMMENT block (in place
+//! of the old one, else right after STREAMINFO); an export without new
+//! tags copies the source's block unchanged. The ID3v2 tag itself is never
+//! copied, since FLAC decoders are not required to skip it.
 
 mod crc;
 pub mod decode;
@@ -48,14 +56,21 @@ pub mod frame;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
-use lac_core::{AudioStreamInfo, CutCapabilities, CutPlan, PacketFlags, PacketIndex, PacketInfo};
+use lac_core::{
+    AudioStreamInfo, CutCapabilities, CutPlan, PacketFlags, PacketIndex, PacketInfo, Tags,
+};
 use md5::{Digest, Md5};
 
 use self::decode::{Channels, decode_frame};
 use self::encode::encode_frame;
 use self::frame::FrameHeader;
+use crate::tags::{id3, vorbis::VorbisComment};
 use crate::window::Window;
 use crate::{ContainerError, Result};
+
+/// Vendor string of a VORBIS_COMMENT block written where the source had
+/// none.
+const VENDOR: &str = "losslessaudiocut";
 
 /// Minimum block size allowed by RFC 9639 (except for the last frame).
 const MIN_BLOCK: usize = 16;
@@ -144,6 +159,11 @@ pub struct FlacFile {
     kept_blocks: Vec<(u8, Vec<u8>)>,
     /// Parsed header of every frame, parallel to the packet index.
     headers: Vec<FrameHeader>,
+    /// The source's tags (see the module documentation).
+    tags: Tags,
+    /// Whether the source has a VORBIS_COMMENT block, i.e. whether
+    /// [`FlacFile::tags`] are already in `kept_blocks`.
+    has_comment: bool,
     index: PacketIndex,
     warnings: Vec<String>,
 }
@@ -155,8 +175,12 @@ impl FlacFile {
         let len = r.seek(SeekFrom::End(0))?;
         let mut warnings = Vec::new();
         let mut pos = skip_id3v2(r, len)?;
-        if pos > 0 {
-            warnings.push("an ID3v2 tag in front of the FLAC stream will not be copied".into());
+        let mut id3_tags = Tags::default();
+        let had_id3 = pos > 0;
+        if had_id3 {
+            let mut tag = vec![0u8; usize::try_from(pos.min(len)).unwrap_or(0)];
+            read_exact_at(r, &mut tag, 0)?;
+            id3_tags = id3::parse(&tag).tags;
         }
 
         let mut magic = [0u8; 4];
@@ -168,6 +192,7 @@ impl FlacFile {
 
         let mut stream_info = None;
         let mut kept_blocks = Vec::new();
+        let mut comment: Option<VorbisComment> = None;
         loop {
             let mut h = [0u8; 4];
             read_exact_at(r, &mut h, pos)?;
@@ -183,7 +208,21 @@ impl FlacFile {
                 BLOCK_STREAMINFO if stream_info.is_none() => {
                     stream_info = Some(StreamInfo::parse(&payload, pos)?);
                 }
-                BLOCK_PADDING | BLOCK_APPLICATION | BLOCK_VORBIS_COMMENT | BLOCK_PICTURE => {
+                BLOCK_VORBIS_COMMENT => {
+                    if comment.is_none() {
+                        comment = Some(match VorbisComment::parse(&payload) {
+                            Ok((vc, _)) => vc,
+                            Err(e) => {
+                                warnings.push(format!("VORBIS_COMMENT not readable: {e}"));
+                                VorbisComment::default()
+                            }
+                        });
+                        kept_blocks.push((kind, payload));
+                    } else {
+                        warnings.push("a second VORBIS_COMMENT block was dropped".into());
+                    }
+                }
+                BLOCK_PADDING | BLOCK_APPLICATION | BLOCK_PICTURE => {
                     kept_blocks.push((kind, payload));
                 }
                 127 => return Err(malformed(pos, "forbidden metadata block type 127")),
@@ -212,10 +251,22 @@ impl FlacFile {
                 index.total_samples()
             ));
         }
+        if had_id3 {
+            warnings.push(if comment.is_some() {
+                "an ID3v2 tag in front of the FLAC stream will not be copied".into()
+            } else {
+                "the ID3v2 tag in front of the FLAC stream will be written as a VORBIS_COMMENT"
+                    .into()
+            });
+        }
+        let has_comment = comment.is_some();
+        let tags = comment.map_or(id3_tags, |c| c.tags());
         Ok(Self {
             stream_info: si,
             kept_blocks,
             headers,
+            tags,
+            has_comment,
             index,
             warnings,
         })
@@ -224,6 +275,11 @@ impl FlacFile {
     /// The source's STREAMINFO.
     pub fn stream_info(&self) -> &StreamInfo {
         &self.stream_info
+    }
+
+    /// The source's tags (see the module documentation).
+    pub fn tags(&self) -> &Tags {
+        &self.tags
     }
 
     /// One entry per frame.
@@ -303,10 +359,17 @@ impl FlacFile {
     }
 
     /// Writes a new FLAC file with the `actual` ranges of `plans` joined.
+    /// `tags`, if given, replace the source's VORBIS_COMMENT block.
     ///
     /// The writer must be seekable because STREAMINFO (with the MD5 of the
     /// output) is only known after all frames have been written.
-    pub fn write_cut<R, W>(&self, r: &mut R, plans: &[CutPlan], w: &mut W) -> Result<()>
+    pub fn write_cut<R, W>(
+        &self,
+        r: &mut R,
+        plans: &[CutPlan],
+        tags: Option<&Tags>,
+        w: &mut W,
+    ) -> Result<()>
     where
         R: Read + Seek + ?Sized,
         W: Write + Seek + ?Sized,
@@ -319,10 +382,11 @@ impl FlacFile {
         let start = w.stream_position()?;
         w.write_all(b"fLaC")?;
         let streaminfo_pos = start + 8;
-        let n_blocks = 1 + self.kept_blocks.len();
+        let blocks = self.output_blocks(tags);
+        let n_blocks = 1 + blocks.len();
         write_block_header(w, BLOCK_STREAMINFO, n_blocks == 1, 34)?;
         w.write_all(&[0u8; 34])?;
-        for (i, (kind, payload)) in self.kept_blocks.iter().enumerate() {
+        for (i, (kind, payload)) in blocks.iter().enumerate() {
             write_block_header(w, *kind, i + 2 == n_blocks, payload.len())?;
             w.write_all(payload)?;
         }
@@ -365,6 +429,33 @@ impl FlacFile {
         w.write_all(&final_info.to_bytes())?;
         w.seek(SeekFrom::Start(end))?;
         Ok(())
+    }
+
+    /// The metadata blocks after STREAMINFO: the kept ones, with the
+    /// VORBIS_COMMENT holding `tags` if given (or the ID3v2 tags of a
+    /// source without a VORBIS_COMMENT).
+    fn output_blocks(&self, tags: Option<&Tags>) -> Vec<(u8, Vec<u8>)> {
+        let id3_only = (!self.has_comment && !self.tags.is_empty()).then_some(&self.tags);
+        let Some(tags) = tags.or(id3_only) else {
+            return self.kept_blocks.clone();
+        };
+        let mut blocks = self.kept_blocks.clone();
+        let old = blocks.iter().position(|(k, _)| *k == BLOCK_VORBIS_COMMENT);
+        let base = old
+            .and_then(|i| VorbisComment::parse(&blocks[i].1).ok())
+            .map_or_else(
+                || VorbisComment {
+                    vendor: VENDOR.into(),
+                    fields: Vec::new(),
+                },
+                |(vc, _)| vc,
+            );
+        let new = (BLOCK_VORBIS_COMMENT, base.with_tags(tags).to_bytes());
+        match old {
+            Some(i) => blocks[i] = new,
+            None => blocks.insert(0, new),
+        }
+        blocks
     }
 
     /// Turns cut plans into a list of copied frames and re-encoded pieces.

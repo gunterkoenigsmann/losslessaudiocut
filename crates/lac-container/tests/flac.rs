@@ -40,7 +40,7 @@ fn decode_all(f: &FlacFile, bytes: &[u8]) -> Channels {
 /// Writes the given plans of `src` to a new FLAC file.
 fn write(src: &[u8], f: &FlacFile, plans: &[CutPlan]) -> Vec<u8> {
     let mut out = Cursor::new(Vec::new());
-    f.write_cut(&mut Cursor::new(src), plans, &mut out)
+    f.write_cut(&mut Cursor::new(src), plans, None, &mut out)
         .expect("write");
     out.into_inner()
 }

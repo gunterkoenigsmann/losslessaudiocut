@@ -9,14 +9,18 @@
 //! positions completely and computes each packet's duration from the
 //! packet itself (see [`codec`]).
 //!
-//! The one exception is the Opus *end trim* (RFC 7845 4.4): the final page
-//! of a stream may carry a granule position smaller than the decoded
-//! length, telling the decoder to drop the excess samples. It is honoured
-//! only when the granule of the page before agrees exactly with the
-//! packet-derived timeline, so random granules can never shorten a stream.
-//! Vorbis and Speex end trims, and Opus ones in streams whose granules do
-//! not start at zero, are not applied; the index may then be up to one
-//! page longer than what a player that trusts granules outputs.
+//! The one exception is the *end trim* of Vorbis and Opus (Vorbis I
+//! A.2, RFC 7845 4.4): the final page of a stream may carry a granule
+//! position smaller than the decoded length, telling the decoder to drop
+//! the excess samples (the encoder's padding of the last block). It is
+//! honoured only when the granule of the page before agrees exactly with
+//! the packet-derived timeline, so random granules can never shorten a
+//! stream. In a chained file this matters at every link boundary, not just
+//! at the end: without it the padding of each link would be played in the
+//! middle of the file, which libvorbisfile, opusfile and ffmpeg do not do.
+//! Speex end trims, and the end trims of streams whose granules do not
+//! start at zero, are not applied; the index may then be up to one page
+//! longer than what a player that trusts granules outputs.
 //!
 //! ## Packets, links and the index
 //!
@@ -47,7 +51,9 @@
 //!
 //! - Vorbis: the packet before the first kept one is written in front of
 //!   it. A new stream's first packet produces no output, so the output is
-//!   bit-exact; Vorbis keeps no decoder state beyond the overlap.
+//!   bit-exact; Vorbis keeps no decoder state beyond the overlap. A stream
+//!   that ends with the end-trimmed last packet of a source link gets the
+//!   same end trim in its final granule position.
 //! - Opus: at least 80 ms (3840 samples) of preceding packets are written
 //!   as pre-roll, hidden by the stream's pre-skip (RFC 7845 4.3 recommends
 //!   80 ms for the decoder to converge). Cuts are sample-exact: the
@@ -68,6 +74,16 @@
 //!   stream, because ffmpeg and speexdec mishandle chained Speex and
 //!   chaining would not help: Speex has no pre-skip to hide pre-roll. The
 //!   decoder converges after a join point, at the latest in the next pause.
+//!
+//! ## Tags
+//!
+//! The comment header (the second header packet) holds Vorbis comments:
+//! after `\x03vorbis` and followed by a framing bit for Vorbis (Vorbis I
+//! 5.2.1), after `OpusTags` for Opus (RFC 7845 5.2, where binary data may
+//! follow), and on its own for Speex. The source's tags are those of the
+//! first link. An export with new tags writes them into the comment header
+//! of every output stream, keeping the vendor string and anything after
+//! the comments; without new tags each stream keeps its link's header.
 
 pub mod codec;
 pub mod page;
@@ -75,8 +91,11 @@ pub mod page;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
-use lac_core::{AudioStreamInfo, CutCapabilities, CutPlan, PacketFlags, PacketIndex, PacketInfo};
+use lac_core::{
+    AudioStreamInfo, CutCapabilities, CutPlan, PacketFlags, PacketIndex, PacketInfo, Tags,
+};
 
+use crate::tags::vorbis::VorbisComment;
 use crate::window::Window;
 use crate::{ContainerError, Result};
 use codec::{CodecInfo, CodecKind};
@@ -126,6 +145,8 @@ pub struct OggFile {
     /// Raw packet of each index entry.
     entry_raw: Vec<usize>,
     index: PacketIndex,
+    /// Tags of the first link.
+    tags: Tags,
     warnings: Vec<String>,
 }
 
@@ -202,13 +223,32 @@ impl OggFile {
         }
         let index = PacketIndex::new(info, packets)
             .map_err(|e| ContainerError::InvalidPlan(format!("internal index error: {e}")))?;
+        let tags = match links[0].headers.get(1) {
+            Some(h) => {
+                let bytes = read_pieces(r, h)?;
+                match CommentHeader::parse(links[0].info.kind, &bytes) {
+                    Some(c) => c.comment.tags(),
+                    None => {
+                        warnings.push("the comment header is not readable".into());
+                        Tags::default()
+                    }
+                }
+            }
+            None => Tags::default(),
+        };
         Ok(Self {
             links,
             raw,
             entry_raw,
             index,
+            tags,
             warnings,
         })
+    }
+
+    /// The tags of the first link (see the module documentation).
+    pub fn tags(&self) -> &Tags {
+        &self.tags
     }
 
     /// The codec of the audio stream.
@@ -320,8 +360,15 @@ impl OggFile {
         read_pieces(r, &self.raw[raw].pieces)
     }
 
-    /// Writes the kept packets of `plans` as a chained Ogg file.
-    pub fn write_cut<R, W>(&self, r: &mut R, plans: &[CutPlan], w: &mut W) -> Result<()>
+    /// Writes the kept packets of `plans` as a chained Ogg file. `tags`,
+    /// if given, go into the comment header of every stream.
+    pub fn write_cut<R, W>(
+        &self,
+        r: &mut R,
+        plans: &[CutPlan],
+        tags: Option<&Tags>,
+        w: &mut W,
+    ) -> Result<()>
     where
         R: Read + Seek + ?Sized,
         W: Write + Seek + ?Sized,
@@ -329,7 +376,7 @@ impl OggFile {
         let runs = self.runs(plans)?;
         for (i, run) in runs.iter().enumerate() {
             let serial = SERIAL_BASE.wrapping_add(i as u32);
-            self.write_run(r, run, serial, w)?;
+            self.write_run(r, run, serial, tags, w)?;
         }
         Ok(())
     }
@@ -397,7 +444,14 @@ impl OggFile {
     }
 
     /// Writes one logical stream holding the index entries of `run`.
-    fn write_run<R, W>(&self, r: &mut R, run: &Run, serial: u32, w: &mut W) -> Result<()>
+    fn write_run<R, W>(
+        &self,
+        r: &mut R,
+        run: &Run,
+        serial: u32,
+        tags: Option<&Tags>,
+        w: &mut W,
+    ) -> Result<()>
     where
         R: Read + Seek + ?Sized,
         W: Write + Seek + ?Sized,
@@ -411,13 +465,25 @@ impl OggFile {
         // First packet to write, including pre-roll.
         let mut r0 = r_start;
         let mut opus_pre_skip = 0u64;
-        // Opus: granule position of the last page (RFC 7845 4.4), which
-        // trims the end of the last packet.
-        let mut opus_end = None;
+        // Granule position of the last page if it trims the end of the
+        // last packet (RFC 7845 4.4, Vorbis I A.2).
+        let mut end_granule = None;
         match link.info.kind {
             // Index entries never start a link (that packet has no output),
             // so the predecessor exists within the link.
-            CodecKind::Vorbis => r0 = r_start.saturating_sub(1).max(link.raw.start),
+            CodecKind::Vorbis => {
+                r0 = r_start.saturating_sub(1).max(link.raw.start);
+                // The source's own end trim, if the last packet straddles
+                // it. The first written packet produces no output, so the
+                // output starts at its end.
+                let last = &self.raw[r_last];
+                let last_end = last.start_in_link + u64::from(last.samples);
+                if last_end > link.audible.end {
+                    let first = &self.raw[r0];
+                    let origin = first.start_in_link + u64::from(first.samples);
+                    end_granule = Some(link.audible.end - origin);
+                }
+            }
             CodecKind::Opus => {
                 let mut acc = 0u64;
                 while r0 > link.raw.start && acc < OPUS_PREROLL {
@@ -438,7 +504,7 @@ impl OggFile {
                 // Hide the pre-roll and the head of the first packet.
                 let origin = self.raw[r0].start_in_link;
                 opus_pre_skip = start - origin;
-                opus_end = Some(end - origin);
+                end_granule = Some(end - origin);
             }
             CodecKind::Speex => {}
         }
@@ -460,6 +526,14 @@ impl OggFile {
                 })?;
                 bytes[10..12].copy_from_slice(&v.to_le_bytes());
             }
+            if i == 1
+                && let Some(tags) = tags
+            {
+                bytes = CommentHeader::parse(link.info.kind, &bytes)
+                    .unwrap_or_else(|| CommentHeader::empty(link.info.kind))
+                    .with_tags(tags)
+                    .to_bytes(link.info.kind);
+            }
             pg.push(&bytes, 0);
             // Every header packet ends its page; Vorbis, Opus and Speex
             // all require the first audio packet to start a new page.
@@ -477,12 +551,14 @@ impl OggFile {
             // The last packet always ends on the stream's last page, so its
             // granule position is that page's.
             if k + 1 == n_packets
-                && let Some(end) = opus_end
+                && let Some(end) = end_granule
             {
                 granule = end;
-                // ffmpeg ignores the end trim of a stream whose first audio
-                // page is also its last; a page of its own for the last
-                // packet avoids that for all but one-packet streams.
+                // ffmpeg ignores the Opus end trim of a stream whose first
+                // audio page is also its last; a page of its own for the
+                // last packet avoids that for all but one-packet streams.
+                // (Vorbis streams break after their second packet below,
+                // so the flush is a no-op for two-packet Vorbis streams.)
                 if k > 0 {
                     pg.flush();
                 }
@@ -519,6 +595,68 @@ struct Run {
 }
 
 /// Reads a packet from its pieces.
+/// A parsed comment header (see the module documentation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommentHeader {
+    comment: VorbisComment,
+    /// Bytes after the comments: Vorbis' framing bit, Opus' extension
+    /// data, Speex padding.
+    rest: Vec<u8>,
+}
+
+impl CommentHeader {
+    /// The bytes in front of the comments.
+    fn magic(kind: CodecKind) -> &'static [u8] {
+        match kind {
+            CodecKind::Vorbis => b"\x03vorbis",
+            CodecKind::Opus => b"OpusTags",
+            CodecKind::Speex => b"",
+        }
+    }
+
+    /// Parses a comment header packet; `None` if it is not one.
+    fn parse(kind: CodecKind, p: &[u8]) -> Option<Self> {
+        let body = p.strip_prefix(Self::magic(kind))?;
+        let (comment, used) = VorbisComment::parse(body).ok()?;
+        Some(CommentHeader {
+            comment,
+            rest: body[used..].to_vec(),
+        })
+    }
+
+    /// A header without comments, for a source whose header is damaged.
+    fn empty(kind: CodecKind) -> Self {
+        CommentHeader {
+            comment: VorbisComment {
+                vendor: "losslessaudiocut".into(),
+                fields: Vec::new(),
+            },
+            // Vorbis I 5.2.1: the framing bit must be set.
+            rest: if kind == CodecKind::Vorbis {
+                vec![1]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// The same header with the fields of `tags`.
+    fn with_tags(self, tags: &Tags) -> Self {
+        CommentHeader {
+            comment: self.comment.with_tags(tags),
+            rest: self.rest,
+        }
+    }
+
+    /// The packet.
+    fn to_bytes(&self, kind: CodecKind) -> Vec<u8> {
+        let mut out = Self::magic(kind).to_vec();
+        out.extend(self.comment.to_bytes());
+        out.extend_from_slice(&self.rest);
+        out
+    }
+}
+
 /// The identification header, the first of a link's headers.
 fn first_header(headers: Vec<Vec<u8>>) -> Vec<u8> {
     headers.into_iter().next().unwrap_or_default()
@@ -588,8 +726,9 @@ struct Current {
     /// packet equals the packet-derived sample count up to it (true before
     /// the first such page: header pages have granule 0).
     granules_agree: bool,
-    /// Opus: samples to drop at the end, from the final page's granule
-    /// position (RFC 7845 4.4); see the module documentation.
+    /// Vorbis and Opus: samples to drop at the end, from the final page's
+    /// granule position (RFC 7845 4.4, Vorbis I A.2); see the module
+    /// documentation.
     end_trim: u64,
 }
 
@@ -602,11 +741,12 @@ impl Current {
         }
         let g = u64::try_from(granule).ok();
         if eos
-            && self.info.kind == CodecKind::Opus
+            && self.info.kind != CodecKind::Speex
             && self.granules_agree
             && let Some(g) = g
             // RFC 7845 4.4: the trim may only remove samples of this last
-            // page, and the stream may not end inside its pre-skip.
+            // page, and the stream may not end inside its pre-skip (which
+            // is 0 for Vorbis). Vorbis I A.2 allows the same for Vorbis.
             && g >= before.max(u64::from(self.info.pre_skip))
             && g < self.samples
         {
@@ -897,6 +1037,7 @@ fn next_capture<R: Read + Seek + ?Sized>(w: &mut Window<R>, from: u64) -> io::Re
 mod tests {
     use super::page::{FLAG_BOS, FLAG_CONTINUED, FLAG_EOS, write_page};
     use super::*;
+    use lac_core::plan_cuts;
     use std::io::Cursor;
 
     /// A minimal Speex header: 16 kHz mono, 320 samples per packet.
@@ -924,7 +1065,7 @@ mod tests {
         let mut p = Paginator::new(serial);
         p.push(&speex_header(), 0);
         p.flush();
-        p.push(b"comment", 0);
+        p.push(&speex_comment("Title"), 0);
         p.flush();
         for i in 0..n {
             p.push(&vec![i; len], (i64::from(i) + 1) * 320);
@@ -932,8 +1073,51 @@ mod tests {
         p.finish()
     }
 
+    /// A Speex comment header with a title.
+    fn speex_comment(title: &str) -> Vec<u8> {
+        VorbisComment {
+            vendor: "test".into(),
+            fields: vec![("TITLE".into(), title.into())],
+        }
+        .to_bytes()
+    }
+
     fn open(bytes: &[u8]) -> OggFile {
         OggFile::open(&mut Cursor::new(bytes)).expect("opens")
+    }
+
+    #[test]
+    fn speex_tags_are_read_and_rewritten() {
+        let bytes = speex_stream(1, 4, 10);
+        let f = open(&bytes);
+        assert_eq!(f.tags().title.as_deref(), Some("Title"));
+        let plans = plan_cuts(
+            f.index(),
+            f.capabilities(),
+            std::slice::from_ref(&(0..f.index().total_samples())),
+        )
+        .expect("plans");
+        let tags = Tags {
+            title: Some("New".into()),
+            track_number: Some(2),
+            ..Tags::default()
+        };
+        let mut out = Cursor::new(Vec::new());
+        f.write_cut(&mut Cursor::new(&bytes), &plans, Some(&tags), &mut out)
+            .expect("writes");
+        let g = open(out.get_ref());
+        assert_eq!(*g.tags(), tags);
+        assert_eq!(packets(&g, out.get_ref()), packets(&f, &bytes));
+        // The vendor string is kept.
+        let comment =
+            read_pieces(&mut Cursor::new(out.get_ref()), &g.links[0].headers[1]).expect("header");
+        assert_eq!(
+            CommentHeader::parse(CodecKind::Speex, &comment)
+                .expect("parses")
+                .comment
+                .vendor,
+            "test"
+        );
     }
 
     fn packets(f: &OggFile, bytes: &[u8]) -> Vec<Vec<u8>> {
@@ -988,7 +1172,8 @@ mod tests {
     fn sequence_gap_drops_the_broken_packet() {
         let h = speex_header();
         let mut bytes = write_page(FLAG_BOS, 0, 9, 0, &[80], &h);
-        bytes.extend(write_page(0, 0, 9, 1, &[7], b"comment"));
+        let comment = speex_comment("x");
+        bytes.extend(write_page(0, 0, 9, 1, &[comment.len() as u8], &comment));
         // Packet 0 complete, packet 1 starts (255 = continues).
         bytes.extend(write_page(
             0,
@@ -1088,7 +1273,7 @@ mod tests {
             })
             .collect();
         let mut out = Cursor::new(Vec::new());
-        f.write_cut(&mut Cursor::new(&bytes), &plans, &mut out)
+        f.write_cut(&mut Cursor::new(&bytes), &plans, None, &mut out)
             .expect("write");
         let out = out.into_inner();
         let o = open(&out);

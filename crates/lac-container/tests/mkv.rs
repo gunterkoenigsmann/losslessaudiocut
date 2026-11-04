@@ -52,7 +52,7 @@ fn open(bytes: &[u8]) -> MkvFile {
 
 fn write(src: &[u8], f: &MkvFile, plans: &[CutPlan]) -> Vec<u8> {
     let mut out = Cursor::new(Vec::new());
-    f.write_cut(&mut Cursor::new(src), plans, &mut out)
+    f.write_cut(&mut Cursor::new(src), plans, None, &mut out)
         .expect("write");
     out.into_inner()
 }
@@ -344,7 +344,10 @@ fn trims_at_inner_joins_are_rejected() {
     let mut p = plans(&f, &[100..20_000, 30_000..40_000]);
     p[1].trim_start = 5;
     let mut out = Cursor::new(Vec::new());
-    assert!(f.write_cut(&mut Cursor::new(&src), &p, &mut out).is_err());
+    assert!(
+        f.write_cut(&mut Cursor::new(&src), &p, None, &mut out)
+            .is_err()
+    );
 }
 
 #[test]

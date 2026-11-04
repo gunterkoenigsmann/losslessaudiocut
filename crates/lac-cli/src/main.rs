@@ -4,18 +4,19 @@
 //! lac info recording.wav
 //! lac cut recording.wav -o out.wav --delete 1:00..1:30 --delete 5:00..
 //! lac cut recording.wav -o out.wav --keep 0:10..3:45
+//! lac cut recording.flac -o part.flac --keep 1:00.. --tag title="Part 2" --tag track=2
 //! lac detect recording.mp3 --min-gap 3
 //! ```
 //!
-//! Supported formats: WAV, FLAC, Ogg Vorbis/Opus/Speex and MP3 (detected from the content). Besides being useful for scripting, the CLI drives the end-to-end tests.
+//! Supported formats: WAV, FLAC, Ogg Vorbis/Opus/Speex, MP3 and Matroska/WebM Opus (detected from the content). Besides being useful for scripting, the CLI drives the end-to-end tests.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use lac_analysis::{DetectParams, RegionKind, SplitReason};
-use lac_app::{CutRequest, Source, TimeRange, format_samples};
-use lac_core::SamplePos;
+use lac_app::{CutRequest, Source, TagEdits, TimeRange, format_samples};
+use lac_core::{SamplePos, TagField};
 
 #[derive(Parser)]
 #[command(name = "lac", version, about = "Lossless audio cutter")]
@@ -50,12 +51,18 @@ enum Command {
         /// in the given order.
         #[arg(long, value_name = "RANGE")]
         keep: Vec<TimeRange>,
+        /// Set a tag of the output, e.g. `title=Intro` or `track=2`; an
+        /// empty value removes it. Fields: title, artist, album,
+        /// album_artist, track, tracktotal, date, genre, comment. May be
+        /// repeated; other tags are copied from the input.
+        #[arg(long, value_name = "FIELD=VALUE", value_parser = parse_tag)]
+        tag: Vec<(TagField, String)>,
     },
     /// Suggest pauses to delete and track starts.
     ///
     /// Pauses are stretches that are quiet or only noise (a flat
     /// spectrum: hiss, wind, murmur); a new track is suggested after each
-    /// long pause and where the timbre changes without a pause.
+    /// long pause and where the timbre or the key changes without a pause.
     Detect {
         /// The audio file.
         file: PathBuf,
@@ -68,6 +75,9 @@ enum Command {
         /// Do not suggest track starts at changes of timbre.
         #[arg(long)]
         no_timbre: bool,
+        /// Do not suggest track starts at changes of key or harmony.
+        #[arg(long)]
+        no_key: bool,
     },
 }
 
@@ -79,12 +89,14 @@ fn main() -> Result<()> {
             output,
             delete,
             keep,
-        } => cut(&input, &output, &delete, &keep),
+            tag,
+        } => cut(&input, &output, &delete, &keep, &tag),
         Command::Detect {
             file,
             min_gap,
             min_pause,
             no_timbre,
+            no_key,
         } => detect(
             &file,
             &DetectParams {
@@ -94,6 +106,11 @@ fn main() -> Result<()> {
                     f32::INFINITY
                 } else {
                     DetectParams::default().min_novelty_db
+                },
+                min_key_distance: if no_key {
+                    f32::INFINITY
+                } else {
+                    DetectParams::default().min_key_distance
                 },
                 ..DetectParams::default()
             },
@@ -113,13 +130,43 @@ fn info(path: &Path) -> Result<()> {
         format_samples(total, i.sample_rate),
         total
     );
+    let tags = src.tags();
+    for f in TagField::ALL {
+        if let Some(v) = tags.get(f) {
+            println!("{:<12} {v}", format!("{}:", f.key()));
+        }
+    }
+    for (k, v) in &tags.extra {
+        // Pictures and other binary data hidden in text tags can be huge.
+        let v: String = v.chars().take(60).collect();
+        println!("tag:         {k}={v}");
+    }
     for w in src.warnings() {
         println!("warning:     {w}");
     }
     Ok(())
 }
 
-fn cut(input: &Path, output: &Path, delete: &[TimeRange], keep: &[TimeRange]) -> Result<()> {
+/// Parses `FIELD=VALUE` of `--tag`.
+fn parse_tag(s: &str) -> Result<(TagField, String), String> {
+    let (k, v) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected FIELD=VALUE, got {s:?}"))?;
+    let field = TagField::from_key(k.trim()).ok_or_else(|| {
+        let keys: Vec<&str> = TagField::ALL.iter().map(|f| f.key()).collect();
+        format!("unknown field {k:?} (known: {})", keys.join(", "))
+    })?;
+    TagEdits::new().set(field, v).map_err(|e| e.to_string())?;
+    Ok((field, v.to_string()))
+}
+
+fn cut(
+    input: &Path,
+    output: &Path,
+    delete: &[TimeRange],
+    keep: &[TimeRange],
+    tag: &[(TagField, String)],
+) -> Result<()> {
     let mut src = Source::open(input)?;
     let rate = src.info().sample_rate;
     let total = src.total_samples();
@@ -135,7 +182,9 @@ fn cut(input: &Path, output: &Path, delete: &[TimeRange], keep: &[TimeRange]) ->
         CutRequest::Keep(resolve(keep)?)
     };
 
-    let kept = src.export(&request, output)?;
+    let edits: TagEdits = tag.iter().cloned().collect();
+    let tags = (!edits.is_empty()).then(|| edits.apply_to(src.tags()));
+    let kept = src.export(&request, tags.as_ref(), output)?;
 
     // Exactness report: what was asked for and what the file contains.
     let mut out_len: SamplePos = 0;
@@ -194,6 +243,9 @@ fn detect(path: &Path, params: &DetectParams) -> Result<()> {
             ),
             SplitReason::TimbreChange { novelty_db } => {
                 format!("timbre changes by {novelty_db:.1} dB")
+            }
+            SplitReason::KeyChange { distance } => {
+                format!("key or harmony changes (distance {distance:.2})")
             }
         };
         println!(

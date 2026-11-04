@@ -32,9 +32,15 @@ fn ours(name: &str) -> (Vec<f32>, lac_decode::DecodeReport, u64, u16) {
 /// Decodes `name` with the ffmpeg tool to interleaved f32, or `None` if
 /// ffmpeg is not installed (fatal when `LAC_REQUIRE_TOOLS` is set, as in CI).
 fn ffmpeg(name: &str) -> Option<Vec<f32>> {
+    ffmpeg_file(&fixture_path(name))
+}
+
+/// Decodes the file at `path` like [`ffmpeg`].
+fn ffmpeg_file(path: &Path) -> Option<Vec<f32>> {
+    let name = path.display();
     let out = match Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
-        .arg(fixture_path(name))
+        .arg(path)
         .args(["-f", "f32le", "-"])
         .output()
     {
@@ -91,29 +97,76 @@ fn decodes_like_ffmpeg_bit_for_bit() {
             total * u64::from(channels),
             "{name}: length"
         );
-        let Some(mut want) = ffmpeg(name) else { return };
-        if name.contains("vorbis") {
-            // Our Vorbis timeline ignores the end trim of the last granule
-            // position (granules are not trusted, see docs/architecture.md),
-            // so it may run up to one block longer than ffmpeg's; that tail
-            // is decoder output too, just not trimmed.
-            let extra = pcm.len() - want.len().min(pcm.len());
-            assert!(
-                extra / usize::from(channels) < 2048,
-                "{name}: {extra} extra samples"
-            );
-            want.extend(&pcm[want.len()..]);
+        let Some(want) = ffmpeg(name) else { return };
+        assert_bit_identical(name, &pcm, &want, channels);
+    }
+}
+
+/// Panics unless `pcm` and `want` hold the same samples, bit for bit.
+fn assert_bit_identical(name: &str, pcm: &[f32], want: &[f32], channels: u16) {
+    assert_eq!(pcm.len(), want.len(), "{name}: length differs from ffmpeg");
+    if let Some(i) = (0..pcm.len()).find(|&i| pcm[i].to_bits() != want[i].to_bits()) {
+        panic!(
+            "{name}: sample {} channel {} is {} but ffmpeg says {}",
+            i / usize::from(channels),
+            i % usize::from(channels),
+            pcm[i],
+            want[i]
+        );
+    }
+}
+
+/// Splits an Ogg file into its chain links: a new link starts at every
+/// BOS page that follows a non-BOS page (RFC 3533 4: grouped streams put
+/// all their BOS pages first, so those stay together).
+fn split_chain(bytes: &[u8]) -> Vec<&[u8]> {
+    let mut links = Vec::new();
+    let (mut pos, mut start, mut after_bos) = (0usize, 0usize, true);
+    while pos + 27 <= bytes.len() {
+        assert_eq!(&bytes[pos..pos + 4], b"OggS", "page at byte {pos}");
+        let bos = bytes[pos + 5] & 0x02 != 0;
+        if bos && !after_bos {
+            links.push(&bytes[start..pos]);
+            start = pos;
         }
-        assert_eq!(pcm.len(), want.len(), "{name}: length differs from ffmpeg");
-        if let Some(i) = (0..pcm.len()).find(|&i| pcm[i].to_bits() != want[i].to_bits()) {
-            panic!(
-                "{name}: sample {} channel {} is {} but ffmpeg says {}",
-                i / usize::from(channels),
-                i % usize::from(channels),
-                pcm[i],
-                want[i]
-            );
+        after_bos = bos;
+        // RFC 3533 6: 27 header bytes, the lacing values, then the body.
+        let n = usize::from(bytes[pos + 26]);
+        let body: usize = bytes[pos + 27..pos + 27 + n]
+            .iter()
+            .map(|&l| usize::from(l))
+            .sum();
+        pos += 27 + n + body;
+    }
+    links.push(&bytes[start..]);
+    links
+}
+
+/// A chained Ogg file decodes, bit for bit, to the concatenation of its
+/// links decoded as separate files by ffmpeg: every link starts with a
+/// fresh decoder, and the encoder padding at the end of each link (its end
+/// trim) is dropped, also in the middle of the file. ffmpeg does not reset
+/// its Vorbis decoder at a chain boundary when it reads the chained file
+/// itself, so the links are split apart for it.
+#[test]
+fn chained_files_decode_like_their_links() {
+    for name in ["ogg_vorbis_chained.ogg", "ogg_opus_chained.opus"] {
+        let (pcm, report, total, channels) = ours(name);
+        assert!(report.warnings.is_empty(), "{name}: {:?}", report.warnings);
+        assert_eq!(pcm.len() as u64, total * u64::from(channels), "{name}");
+        let bytes = std::fs::read(fixture_path(name)).expect("fixture");
+        let links = split_chain(&bytes);
+        assert_eq!(links.len(), 2, "{name}");
+        let dir = std::env::temp_dir().join(format!("lac-decode-chain-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let mut want = Vec::new();
+        for (i, link) in links.iter().enumerate() {
+            let path = dir.join(format!("{i}-{name}"));
+            std::fs::write(&path, link).expect("write link");
+            let Some(d) = ffmpeg_file(&path) else { return };
+            want.extend(d);
         }
+        assert_bit_identical(name, &pcm, &want, channels);
     }
 }
 

@@ -36,24 +36,24 @@ use proptest::prelude::*;
 
 /// Single-link fixtures: (name, codec, rate, channels, length in samples).
 ///
-/// Lengths are computed from packet contents, so for Vorbis and Speex they
-/// include the source's end padding that a granule-trusting player would
-/// cut off. Opus honours the end trim (RFC 7845 4.4), so its length is
-/// exactly the encoder's 1.5 s of input.
+/// Lengths are computed from packet contents. Vorbis and Opus honour the
+/// end trim of the final granule position (Vorbis I A.2, RFC 7845 4.4), so
+/// their lengths are exactly the encoder's input; for Speex they include
+/// the source's end padding that a granule-trusting player would cut off.
 const FIXTURES: [(&str, CodecKind, u32, u16, u64); 4] = [
     (
         "ogg_vorbis_stereo_44k.ogg",
         CodecKind::Vorbis,
         44_100,
         2,
-        66_176,
+        66_150,
     ),
     (
         "ogg_vorbis_mono_22k.ogg",
         CodecKind::Vorbis,
         22_050,
         1,
-        22_144,
+        22_050,
     ),
     ("ogg_opus_stereo.opus", CodecKind::Opus, 48_000, 2, 72_000),
     ("ogg_speex_16k.spx", CodecKind::Speex, 16_000, 1, 16_000),
@@ -88,7 +88,7 @@ fn open(bytes: &[u8]) -> OggFile {
 
 fn write(src: &[u8], f: &OggFile, plans: &[CutPlan]) -> Vec<u8> {
     let mut out = Cursor::new(Vec::new());
-    f.write_cut(&mut Cursor::new(src), plans, &mut out)
+    f.write_cut(&mut Cursor::new(src), plans, None, &mut out)
         .expect("write");
     out.into_inner()
 }
@@ -175,21 +175,44 @@ fn granule_length(out: &[u8]) -> u64 {
 /// Whether ffmpeg decodes the stream written for `plan` too long (see the
 /// `ogg` module docs): an Opus range that starts and ends inside the same
 /// packet. ffmpeg forgets the rest of the pre-skip when the end-trimmed
-/// last packet arrives. The end trim is either the plan's own or, for a
-/// range reaching the end of the file, the source's final end trim (the
-/// demuxer shortens that packet, so a plan ending there has `trim_end` 0;
-/// counting every such plan is conservative). [`opus_sliver_inside_one_packet`]
-/// and [`opus_sliver_in_the_end_trimmed_last_packet`] cover it.
-fn ffmpeg_mistrims(f: &OggFile, plan: &CutPlan) -> bool {
-    let end_trimmed = plan.trim_end > 0 || plan.actual.end == f.index().total_samples();
-    plan.packets.len() == 1 && plan.trim_start > 0 && end_trimmed
+/// last packet arrives. The end trim is either the plan's own or the source
+/// link's end trim, when the first packet is the last one of a link (of the
+/// file, or of a link in a chained file: a plan crossing a link boundary
+/// is written as one stream per link). The demuxer shortens such a packet,
+/// so a plan ending there has `trim_end` 0; counting every such plan is
+/// conservative. [`opus_sliver_inside_one_packet`] and
+/// [`opus_sliver_in_the_end_trimmed_last_packet`] cover it.
+fn ffmpeg_mistrims(f: &OggFile, src: &[u8], plan: &CutPlan) -> bool {
+    let Some(first) = f.index().packets().get(plan.packets.start) else {
+        return false;
+    };
+    let first_end = first.first_sample + u64::from(first.n_samples);
+    let ends_link = link_ends(f, src).contains(&first_end);
+    let own_trim = plan.packets.len() == 1 && plan.trim_end > 0;
+    plan.trim_start > 0 && (ends_link || own_trim)
 }
 
-/// Checks oracles 2 and 3 for a single-link source: ffmpeg's decode of
-/// `out` is the source's decode restricted to the plans' actual ranges.
+/// Timeline positions where the links of `f` end.
+fn link_ends(f: &OggFile, src: &[u8]) -> Vec<u64> {
+    let sections = f.decode_sections(&mut Cursor::new(src)).expect("sections");
+    sections
+        .iter()
+        .scan(0, |end, s| {
+            *end += s.keep.end - s.keep.start;
+            Some(*end)
+        })
+        .collect()
+}
+
+/// Checks oracles 2 and 3: the independent decoder's output for `out` is
+/// its output for `src` restricted to the plans' actual ranges.
+///
+/// Also valid for chained sources: oggdec and ffmpeg's Opus decoder start
+/// every link with a fresh decoder and honour its end trim, and so does
+/// our timeline, so a link boundary is no join point.
 fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPlan]) {
     let f = open(src);
-    if f.codec() == CodecKind::Opus && plans.iter().any(|p| ffmpeg_mistrims(&f, p)) {
+    if f.codec() == CodecKind::Opus && plans.iter().any(|p| ffmpeg_mistrims(&f, src, p)) {
         return;
     }
     let info = f.index().info();
@@ -311,7 +334,7 @@ fn fixtures_open_cleanly() {
 }
 
 /// Our packet-derived length agrees with an independent decoder: exactly
-/// for Opus, whose end trim we honour, and otherwise up to the end padding
+/// for Vorbis and Opus, whose end trim we honour, and for Speex up to the end padding
 /// that the decoder trims according to the last granule position.
 #[test]
 fn length_agrees_with_ffmpeg() {
@@ -326,7 +349,7 @@ fn length_agrees_with_ffmpeg() {
             (d.len() / (sample_bytes(f.codec()) * usize::from(f.index().info().channels))) as u64;
         let ours = f.index().total_samples();
         let last = u64::from(f.index().packets().last().map_or(0, |p| p.n_samples));
-        if f.codec() == CodecKind::Opus {
+        if f.codec() != CodecKind::Speex {
             assert_eq!(decoded, ours, "{name}");
         } else {
             assert!(
@@ -337,25 +360,36 @@ fn length_agrees_with_ffmpeg() {
     }
 }
 
+/// A chained file is the concatenation of its links, each with its own
+/// end trim applied: the encoder padding at the end of the first link is
+/// not part of the timeline, exactly as in libvorbisfile, opusfile and
+/// ffmpeg. Before the Vorbis end trim was honoured, 142 samples of padding
+/// were played at the link boundary (and at the end).
 #[test]
 fn chained_files_are_one_timeline() {
-    for (name, codec) in [
-        ("ogg_vorbis_chained.ogg", CodecKind::Vorbis),
-        ("ogg_opus_chained.opus", CodecKind::Opus),
+    for (name, codec, rate) in [
+        ("ogg_vorbis_chained.ogg", CodecKind::Vorbis, 44_100),
+        ("ogg_opus_chained.opus", CodecKind::Opus, 48_000),
     ] {
-        let f = open(&fixture(name));
+        let src = fixture(name);
+        let f = open(&src);
         assert!(f.warnings().is_empty(), "{name}: {:?}", f.warnings());
         assert_eq!(f.codec(), codec);
         assert_eq!(f.links(), 2, "{name}");
-        // 0.5 s + 0.8 s of input, plus encoder padding.
-        let secs = f.index().total_samples() as f64 / f64::from(f.index().info().sample_rate);
-        assert!((1.3..1.34).contains(&secs), "{name}: {secs} s");
+        // 0.5 s + 0.8 s of input (see generate.sh), nothing more.
+        assert_eq!(f.index().total_samples(), rate * 13 / 10, "{name}");
+        // The reference decoder agrees on the length.
+        let path = temp_file(name, &src);
+        if let Some(d) = decode(codec, &path) {
+            let frame = sample_bytes(codec) * usize::from(f.index().info().channels);
+            assert_eq!((d.len() / frame) as u64, rate * 13 / 10, "{name}");
+        }
     }
 }
 
 /// Random granule positions, as some radio stations send them, change
 /// nothing: the timeline and the cut output are the same as for the clean
-/// file. The only difference is the clean Opus file's end trim, which is
+/// file. The only difference is the clean file's end trim, which is
 /// not trusted when the granules before it are garbage, so the damaged
 /// file's last packet is longer.
 #[test]
@@ -376,6 +410,8 @@ fn granule_positions_are_ignored() {
         match fc.codec() {
             // ffmpeg's libopus wrapper pads the end to a whole packet.
             CodecKind::Opus => assert_eq!(trimmed, 648, "{bad}"),
+            // libvorbis pads the last block: 66_176 decoded, 66_150 input.
+            CodecKind::Vorbis => assert_eq!(trimmed, 26, "{bad}"),
             _ => assert_eq!(trimmed, 0, "{bad}"),
         }
         let len = pc[n - 1].first_sample;
@@ -537,7 +573,7 @@ fn opus_sliver_inside_one_packet() {
     let f = open(&src);
     // Packet 1 holds source samples 648..1608.
     let p = plans(&f, &[1_000..1_001]);
-    assert!(ffmpeg_mistrims(&f, &p[0]));
+    assert!(ffmpeg_mistrims(&f, &src, &p[0]));
     let out = write(&src, &f, &p);
     assert_packets_copied(&src, &out, &p);
     let path = temp_file(&format!("sliver-{name}"), &out);
@@ -567,7 +603,7 @@ fn opus_sliver_in_the_end_trimmed_last_packet() {
     let p = plans(&f, &[0..67_497, 71_771..len]);
     assert_eq!(p[1].packets.len(), 1);
     assert_eq!(p[1].trim_end, 0);
-    assert!(ffmpeg_mistrims(&f, &p[1]));
+    assert!(ffmpeg_mistrims(&f, &src, &p[1]));
     let out = write(&src, &f, &p);
     let o = assert_packets_copied(&src, &out, &p);
     assert_eq!(o.index().total_samples(), 67_497 + (len - 71_771));
@@ -618,11 +654,37 @@ fn cut_across_chain_boundary() {
         let out = write(&src, &f, &p);
         let o = assert_packets_copied(&src, &out, &p);
         assert_eq!(o.links(), 2, "{name}");
-        let path = temp_file(&format!("x-{name}"), &out);
-        if let Some(d) = decode(f.codec(), &path) {
-            let frame = sample_bytes(f.codec()) * usize::from(f.index().info().channels);
-            let planned = p[0].actual.end - p[0].actual.start;
-            assert_eq!((d.len() / frame) as u64, planned, "{name}");
+        assert_decodes_like_source(name, &src, &out, &p);
+    }
+}
+
+/// Cuts that end exactly at a link boundary, start exactly there, delete
+/// the boundary or keep only the end-trimmed last packet of the first link:
+/// the output keeps the source link's end trim wherever it keeps the
+/// trimmed packet, so it decodes exactly like the source.
+#[test]
+fn cuts_at_chain_boundary() {
+    for name in ["ogg_vorbis_chained.ogg", "ogg_opus_chained.opus"] {
+        let src = fixture(name);
+        let f = open(&src);
+        let len = f.index().total_samples();
+        // The first link holds 0.5 s.
+        let b = u64::from(f.index().info().sample_rate) / 2;
+        for ranges in [
+            vec![0..b],
+            vec![b..len],
+            vec![b / 2..b, b..len / 2 + b / 2],
+            vec![0..b / 2, b + b / 4..len],
+            vec![b - 1..b + 1],
+        ] {
+            let p = plans(&f, &ranges);
+            let out = write(&src, &f, &p);
+            assert_packets_copied(&src, &out, &p);
+            assert_decodes_like_source(name, &src, &out, &p);
+            // Cutting the cut again changes nothing.
+            let o = open(&out);
+            let again = write(&out, &o, &plans(&o, &[0..o.index().total_samples()]));
+            assert_eq!(out, again, "{name} {ranges:?}");
         }
     }
 }
@@ -692,8 +754,6 @@ proptest! {
         let p = delete(&f, &abs);
         let out = write(&src, &f, &p);
         assert_packets_copied(&src, &out, &p);
-        if f.links() == 1 {
-            assert_decodes_like_source(name, &src, &out, &p);
-        }
+        assert_decodes_like_source(name, &src, &out, &p);
     }
 }
