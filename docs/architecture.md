@@ -212,7 +212,7 @@ pub struct CutPlan {
 | MP3 | frame sync confirmed by the next frame, side info (`main_data_begin`, `part2_3_length`), Xing/Info + LAME tag (delay, padding) | **repack the bit reservoir**: every kept frame's main data bytes are laid out anew over the output slots with new `main_data_begin` (raising a frame's bitrate index where it does not fit, never re-encoding); one granule of pre-roll; new Xing/Info + LAME tag with delay/padding and both CRCs; ID3v2/ID3v1 copied | sample-exact and bit-exact at the file's start and end on gapless decoders (ffmpeg, mpg123), packet-granular at joins *(implemented)*; non-gapless players also play the pre-roll (≤ 2 frames) | trimming only at the file ends, see `CutCapabilities::trims_at_file_ends_only` |
 | AAC (ADTS) | ADTS headers | copy frames + 1 pre-roll frame | 1 frame (21 ms at 48 kHz) | ADTS has no trimming metadata |
 | AAC (M4A) | `stsz`/`stco`/`stts` | new `moov` with edit list | sample-exact via `elst` | most phone recorders produce M4A |
-| Ogg Vorbis | pages; timestamps from packet durations, granule positions ignored | new pages, copy headers, new serial, CRC; one chained stream per kept part, led by its predecessor packet as pre-roll | packet-granular, bit-exact including joins *(implemented)*; sample-exact via granule positions later | block size variable (64..8192) |
+| Ogg Vorbis | pages; timestamps from packet durations, granule positions ignored except a consistent end trim | new pages, copy headers, new serial, CRC; one chained stream per kept part, led by its predecessor packet as pre-roll; a kept end-trimmed last packet keeps its end trim | packet-granular, bit-exact including joins *(implemented)*; sample-exact via granule positions later | block size variable (64..8192) |
 | Ogg Opus | as above; pre-skip from `OpusHead`; end trim from the final granule when the granules before it are consistent | as Vorbis, with at least 80 ms pre-roll hidden by a rewritten `pre_skip`; the start trim is added to `pre_skip`, the end trim lowers the final granule (RFC 7845 4.4) | **sample-exact at every cut**, including joins, since each kept part is its own chained stream *(implemented)*; bit-exact after a short convergence window at joins | ffmpeg plays a kept part that starts and ends inside the same packet too long (see below) |
 | Speex | Ogg pages, Speex header | as Vorbis, but all kept parts of a link in one stream, no pre-roll | packet-granular (20 ms) *(implemented)*; bit-exact after convergence at joins | ffmpeg and speexdec do not handle chained Speex |
 | Matroska / WebM Opus | EBML elements, `SimpleBlock`/`BlockGroup` frames (all lacing modes), unknown-size Segments and Clusters of live recordings; timeline from packet durations, codec delay from `CodecDelay` (or the `OpusHead` pre-skip), end trim from `DiscardPadding` on the last block; only the first audio track | one Opus track in a fresh file of the same `DocType`: SeekHead, Info, Tracks, Clusters of verbatim packets, Cues; ≥ 80 ms pre-roll plus the start trim hidden by `CodecDelay` and `OpusHead` pre-skip, end trim by `DiscardPadding` | sample-exact at the file's start and end, packet-granular at joins (`trims_at_file_ends_only`) *(implemented)*; bit-exact after a convergence window at joins | Matroska cannot drop leading samples in the middle of a track (ffmpeg ignores negative `DiscardPadding`), so joins have neither pre-roll nor chaining; video and other tracks are dropped with a warning |
@@ -254,21 +254,29 @@ them, so we must too:
   byte, Speex from frames-per-packet in the header. `first_sample` is the
   running sum of those durations.
 - Granule positions are not used for timing *(implemented)*. The one
-  exception is the **Opus end trim** (RFC 7845 4.4) *(implemented)*: the
-  final granule of a stream is honoured when the granule of the page
-  before it equals the packet-derived sample count there exactly, so
-  garbage granules can never shorten a stream. Vorbis and Speex end trims,
-  and Opus end trims after inconsistent granules, are not applied: the
-  timeline may then be up to one page longer than what a granule-trusting
-  player outputs.
+  exception is the **Vorbis and Opus end trim** (Vorbis I A.2, RFC 7845
+  4.4) *(implemented)*: the final granule of a stream is honoured when the
+  granule of the page before it equals the packet-derived sample count
+  there exactly, so garbage granules can never shorten a stream. An export
+  that keeps such an end-trimmed last packet writes the same trim into its
+  own final granule. In chained files this applies to every link, so the
+  encoder padding of a link is not played in the middle of the file
+  (as libvorbisfile, opusfile and ffmpeg do). Speex end trims, and end
+  trims after inconsistent granules, are not applied: the timeline may
+  then be up to one page longer than what a granule-trusting player
+  outputs.
 - Export **always writes fresh, consistent granule positions** starting at
   zero, a new serial number and recomputed CRCs, so cut files are cleaner
   than the source.
 - Radio captures are often **chained** (a new logical stream, with new
   headers, per song or metadata change). Each chain link is indexed
-  separately *(implemented)*; a link boundary with a new comment header is
-  offered as a track boundary and its title tag as the track's title
-  *(planned)*. All links must share codec, rate and channel count.
+  separately and decoded with a fresh decoder *(implemented)*; a cut
+  across a link boundary becomes one output stream per link. Tests check
+  that a chained file decodes bit for bit like its links decoded as
+  separate files. A link boundary with a new comment header is offered as
+  a track boundary and its title tag as the track's title *(planned, issue #47)*.
+  All links must share codec, rate and channel count; other files are
+  refused (open question, issue #46).
 - Captures can start mid-stream or contain damaged pages from network
   dropouts. The demuxer resyncs on the next `OggS` capture pattern with a
   valid CRC, skips damaged pages and lists them in a load report instead of

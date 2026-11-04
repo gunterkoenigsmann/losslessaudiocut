@@ -9,14 +9,18 @@
 //! positions completely and computes each packet's duration from the
 //! packet itself (see [`codec`]).
 //!
-//! The one exception is the Opus *end trim* (RFC 7845 4.4): the final page
-//! of a stream may carry a granule position smaller than the decoded
-//! length, telling the decoder to drop the excess samples. It is honoured
-//! only when the granule of the page before agrees exactly with the
-//! packet-derived timeline, so random granules can never shorten a stream.
-//! Vorbis and Speex end trims, and Opus ones in streams whose granules do
-//! not start at zero, are not applied; the index may then be up to one
-//! page longer than what a player that trusts granules outputs.
+//! The one exception is the *end trim* of Vorbis and Opus (Vorbis I
+//! A.2, RFC 7845 4.4): the final page of a stream may carry a granule
+//! position smaller than the decoded length, telling the decoder to drop
+//! the excess samples (the encoder's padding of the last block). It is
+//! honoured only when the granule of the page before agrees exactly with
+//! the packet-derived timeline, so random granules can never shorten a
+//! stream. In a chained file this matters at every link boundary, not just
+//! at the end: without it the padding of each link would be played in the
+//! middle of the file, which libvorbisfile, opusfile and ffmpeg do not do.
+//! Speex end trims, and the end trims of streams whose granules do not
+//! start at zero, are not applied; the index may then be up to one page
+//! longer than what a player that trusts granules outputs.
 //!
 //! ## Packets, links and the index
 //!
@@ -47,7 +51,9 @@
 //!
 //! - Vorbis: the packet before the first kept one is written in front of
 //!   it. A new stream's first packet produces no output, so the output is
-//!   bit-exact; Vorbis keeps no decoder state beyond the overlap.
+//!   bit-exact; Vorbis keeps no decoder state beyond the overlap. A stream
+//!   that ends with the end-trimmed last packet of a source link gets the
+//!   same end trim in its final granule position.
 //! - Opus: at least 80 ms (3840 samples) of preceding packets are written
 //!   as pre-roll, hidden by the stream's pre-skip (RFC 7845 4.3 recommends
 //!   80 ms for the decoder to converge). Cuts are sample-exact: the
@@ -459,13 +465,25 @@ impl OggFile {
         // First packet to write, including pre-roll.
         let mut r0 = r_start;
         let mut opus_pre_skip = 0u64;
-        // Opus: granule position of the last page (RFC 7845 4.4), which
-        // trims the end of the last packet.
-        let mut opus_end = None;
+        // Granule position of the last page if it trims the end of the
+        // last packet (RFC 7845 4.4, Vorbis I A.2).
+        let mut end_granule = None;
         match link.info.kind {
             // Index entries never start a link (that packet has no output),
             // so the predecessor exists within the link.
-            CodecKind::Vorbis => r0 = r_start.saturating_sub(1).max(link.raw.start),
+            CodecKind::Vorbis => {
+                r0 = r_start.saturating_sub(1).max(link.raw.start);
+                // The source's own end trim, if the last packet straddles
+                // it. The first written packet produces no output, so the
+                // output starts at its end.
+                let last = &self.raw[r_last];
+                let last_end = last.start_in_link + u64::from(last.samples);
+                if last_end > link.audible.end {
+                    let first = &self.raw[r0];
+                    let origin = first.start_in_link + u64::from(first.samples);
+                    end_granule = Some(link.audible.end - origin);
+                }
+            }
             CodecKind::Opus => {
                 let mut acc = 0u64;
                 while r0 > link.raw.start && acc < OPUS_PREROLL {
@@ -486,7 +504,7 @@ impl OggFile {
                 // Hide the pre-roll and the head of the first packet.
                 let origin = self.raw[r0].start_in_link;
                 opus_pre_skip = start - origin;
-                opus_end = Some(end - origin);
+                end_granule = Some(end - origin);
             }
             CodecKind::Speex => {}
         }
@@ -533,12 +551,14 @@ impl OggFile {
             // The last packet always ends on the stream's last page, so its
             // granule position is that page's.
             if k + 1 == n_packets
-                && let Some(end) = opus_end
+                && let Some(end) = end_granule
             {
                 granule = end;
-                // ffmpeg ignores the end trim of a stream whose first audio
-                // page is also its last; a page of its own for the last
-                // packet avoids that for all but one-packet streams.
+                // ffmpeg ignores the Opus end trim of a stream whose first
+                // audio page is also its last; a page of its own for the
+                // last packet avoids that for all but one-packet streams.
+                // (Vorbis streams break after their second packet below,
+                // so the flush is a no-op for two-packet Vorbis streams.)
                 if k > 0 {
                     pg.flush();
                 }
@@ -706,8 +726,9 @@ struct Current {
     /// packet equals the packet-derived sample count up to it (true before
     /// the first such page: header pages have granule 0).
     granules_agree: bool,
-    /// Opus: samples to drop at the end, from the final page's granule
-    /// position (RFC 7845 4.4); see the module documentation.
+    /// Vorbis and Opus: samples to drop at the end, from the final page's
+    /// granule position (RFC 7845 4.4, Vorbis I A.2); see the module
+    /// documentation.
     end_trim: u64,
 }
 
@@ -720,11 +741,12 @@ impl Current {
         }
         let g = u64::try_from(granule).ok();
         if eos
-            && self.info.kind == CodecKind::Opus
+            && self.info.kind != CodecKind::Speex
             && self.granules_agree
             && let Some(g) = g
             // RFC 7845 4.4: the trim may only remove samples of this last
-            // page, and the stream may not end inside its pre-skip.
+            // page, and the stream may not end inside its pre-skip (which
+            // is 0 for Vorbis). Vorbis I A.2 allows the same for Vorbis.
             && g >= before.max(u64::from(self.info.pre_skip))
             && g < self.samples
         {
