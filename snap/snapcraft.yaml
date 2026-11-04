@@ -90,6 +90,10 @@ parts:
         craftctl set version="${cargo_version}"
         craftctl set grade=devel
       fi
+    # The Rust plugin installs the toolchain of rust-channel with rustup,
+    # which it expects to be there already.
+    build-snaps:
+      - rustup
     build-packages:
       - git
       # wxdragon downloads wxWidgets and builds it with CMake (Ninja if
