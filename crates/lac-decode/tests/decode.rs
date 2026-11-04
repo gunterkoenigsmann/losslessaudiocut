@@ -174,9 +174,10 @@ fn chained_files_decode_like_their_links() {
     }
 }
 
-/// MP4 files with AAC: ffmpeg honours the edit list's start but decodes
-/// the last frame whole, so its output is ours plus the hidden tail (less
-/// than one 1024-sample frame). The rest agrees bit for bit.
+/// MP4 files with AAC: ffmpeg honours the edit list's start; ffmpeg 6.1
+/// decodes the last frame whole, so its output is ours plus the hidden
+/// tail (less than one 1024-sample frame), while ffmpeg 9 also honours the
+/// edit list's end. The rest agrees bit for bit.
 #[test]
 fn mp4_decodes_like_ffmpeg_up_to_its_untrimmed_end() {
     for name in MP4 {

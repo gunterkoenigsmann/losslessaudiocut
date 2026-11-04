@@ -12,10 +12,12 @@
 //!    the source restricted to the plans' actual ranges, bit for bit,
 //!    except within [`join_window`] after each join: there the first
 //!    frame overlaps (MDCT) with a frame that was not its predecessor.
-//! 3. ffmpeg honours the edit list's start but decodes the last frame
-//!    whole, so its output is our planned length plus the hidden tail of
-//!    the last sample (less than one frame); our own decoding
-//!    (`lac-decode`'s tests) honours both ends.
+//! 3. ffmpeg honours the edit list's start. Whether it honours its end
+//!    depends on the version: ffmpeg 6.1 decodes the last frame whole, so
+//!    its output is our planned length plus the hidden tail of the last
+//!    sample (less than one frame); ffmpeg 9 outputs exactly the planned
+//!    length. Both are accepted. Our own decoding (`lac-decode`'s tests)
+//!    honours both ends.
 //!
 //! Oracle 2 needs fixtures without perceptual noise substitution (PNS,
 //! ISO/IEC 14496-3 4.6.13): a PNS band is filled with noise from a random
@@ -141,12 +143,13 @@ fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPl
         return;
     };
     let total: u64 = plans.iter().map(CutPlan::output_len).sum();
-    // Oracle 3: ffmpeg plays the hidden tail of the last sample as well.
+    // Oracle 3: older ffmpeg plays the hidden tail of the last sample as
+    // well, newer ffmpeg stops where the edit list ends.
     let tail = o.index().packets().last().map_or(0, |p| p.hidden_after);
-    assert_eq!(
-        (d.len() / frame) as u64,
-        total + u64::from(tail),
-        "{name}: decoded length"
+    let decoded = (d.len() / frame) as u64;
+    assert!(
+        decoded == total || decoded == total + u64::from(tail),
+        "{name}: decoded length {decoded}, expected {total} or {total} + {tail}"
     );
     assert!(u64::from(tail) < FRAME, "{name}: tail {tail}");
     assert!(

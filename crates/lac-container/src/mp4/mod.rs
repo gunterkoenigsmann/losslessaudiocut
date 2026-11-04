@@ -29,8 +29,8 @@
 //! sum of the `stts` durations (encoders shorten the last sample's
 //! duration to state the padding).
 //!
-//! ffmpeg honours the edit list's start but decodes the last frame whole;
-//! Apple's players honour both ends. Our decoding follows the edit list,
+//! ffmpeg honours the edit list's start; version 6.1 decodes the last
+//! frame whole, version 9 honours the end too, as Apple's players do. Our decoding follows the edit list,
 //! so the timeline is the encoder's input.
 //!
 //! ## Writing
