@@ -13,6 +13,8 @@ use wxdragon::config::{Config, ConfigStyle};
 const KEEP_PITCH: &str = "/Playback/KeepPitch";
 /// Key of [`Options::scrub_while_selecting`].
 const SCRUB_WHILE_SELECTING: &str = "/Playback/ScrubWhileSelecting";
+/// Key of [`Options::ruler`].
+const RULER: &str = "/View/Ruler";
 
 /// The remembered options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +24,8 @@ pub struct Options {
     /// Play > Scrub while selecting: dragging a selection plays the edge
     /// being dragged.
     pub scrub_while_selecting: bool,
+    /// View > Time ruler: the time scale under the waveform.
+    pub ruler: bool,
 }
 
 impl Default for Options {
@@ -29,6 +33,7 @@ impl Default for Options {
         Options {
             keep_pitch: true,
             scrub_while_selecting: true,
+            ruler: true,
         }
     }
 }
@@ -41,6 +46,7 @@ impl Options {
         Options {
             keep_pitch: c.read_bool(KEEP_PITCH, d.keep_pitch),
             scrub_while_selecting: c.read_bool(SCRUB_WHILE_SELECTING, d.scrub_while_selecting),
+            ruler: c.read_bool(RULER, d.ruler),
         }
     }
 
@@ -50,6 +56,7 @@ impl Options {
         let c = config();
         c.write_bool(KEEP_PITCH, self.keep_pitch);
         c.write_bool(SCRUB_WHILE_SELECTING, self.scrub_while_selecting);
+        c.write_bool(RULER, self.ruler);
         c.flush(false);
     }
 }
@@ -78,6 +85,7 @@ mod tests {
             Options {
                 keep_pitch: true,
                 scrub_while_selecting: true,
+                ruler: true,
             }
         );
     }

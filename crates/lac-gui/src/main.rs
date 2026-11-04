@@ -33,6 +33,7 @@
 
 mod icons;
 mod lanes;
+mod minimap;
 mod options;
 mod panes;
 mod position_bar;
@@ -54,6 +55,7 @@ use lac_app::editor::{Editor, Edits};
 use lac_app::export_job::{ExportJob, default_output, describe_outcomes, track_tasks};
 use lac_app::format_samples;
 use lac_app::layout::Pane;
+use lac_app::minimap::Minimap;
 use lac_app::peak_cache::PeakCache;
 use lac_app::peak_job::{JobStatus, PeakJob};
 use lac_app::waveform::{DrawMode, WaveformView};
@@ -91,8 +93,9 @@ const ID_NORMAL_SPEED: Id = ID_HIGHEST + 20;
 const ID_KEEP_PITCH: Id = ID_HIGHEST + 21;
 const ID_SCRUB_SELECTING: Id = ID_HIGHEST + 22;
 const ID_ALL_TRACKS: Id = ID_HIGHEST + 23;
-const ID_SUGGESTED_SPLITS: Id = ID_HIGHEST + 24;
-const ID_SUGGESTED_PAUSES: Id = ID_HIGHEST + 25;
+const ID_RULER: Id = ID_HIGHEST + 24;
+const ID_SUGGESTED_SPLITS: Id = ID_HIGHEST + 25;
+const ID_SUGGESTED_PAUSES: Id = ID_HIGHEST + 26;
 
 /// The toolbar: the most used menu commands. Tooltips name the shortcut,
 /// which is the faster way once known.
@@ -204,6 +207,17 @@ const SELECTION_EDGE: Colour = Colour::rgb(0xe8, 0xc0, 0x50);
 const CURSOR: Colour = Colour::rgb(0xc8, 0xcc, 0xd0);
 /// Track boundaries and track labels.
 const TRACK: Colour = Colour::rgb(0xd0, 0x8c, 0xe8);
+/// Background of the time ruler.
+const RULER_BACKGROUND: Colour = Colour::rgb(0x2a, 0x2f, 0x36);
+/// Tick marks of the time ruler.
+const RULER_TICK: Colour = Colour::rgb(0x8a, 0x94, 0x9e);
+/// Labels of the time ruler.
+const RULER_TEXT: Colour = Colour::rgb(0xc0, 0xc6, 0xcc);
+/// Length of the ruler's labelled (major) and other (minor) ticks.
+const RULER_MAJOR: i32 = 7;
+const RULER_MINOR: i32 = 3;
+/// Height of the ruler beyond its text.
+const RULER_PADDING: i32 = 7;
 /// The position being played.
 const PLAYHEAD: Colour = Colour::rgb(0x6c, 0xe0, 0x7c);
 /// Strip under a suggested pause that is silent.
@@ -287,6 +301,12 @@ struct State {
     panes: Option<Panes>,
     /// Selection fields and play clock.
     position_bar: Option<PositionBar>,
+    /// The minimap's view model; exists together with `view`.
+    minimap: Option<Minimap>,
+    /// Width of the minimap pane, remembered for minimaps created later.
+    minimap_width: u32,
+    /// The minimap pane, redrawn whenever the waveform is.
+    minimap_panel: Option<Panel>,
 }
 
 /// A scrub: dragging with the right button plays short pieces of audio
@@ -313,6 +333,7 @@ impl State {
         self.seen = None;
         self.peaks = None;
         self.view = None;
+        self.minimap = None;
         self.detail_seen = None;
         self.detail = None;
         self.editor = None;
@@ -724,6 +745,7 @@ impl State {
         if let Some(p) = u.peaks {
             if self.view.is_none() {
                 self.view = Some(WaveformView::new(p.total_samples(), self.width));
+                self.minimap = Some(Minimap::new(p.total_samples(), self.minimap_width));
                 self.editor = Some(Editor::new(p.total_samples()));
             }
             self.peaks = Some(p);
@@ -778,6 +800,7 @@ fn main() {
         panel.set_background_style(BackgroundStyle::Paint);
         let grid = track_list::create(&frame);
 
+        let map = minimap::create(&frame);
         let cache = PeakCache::default_dir().map(PeakCache::new);
         if let Some(c) = cache.clone() {
             // Startup eviction (orphans, old and excess entries) off the
@@ -788,6 +811,8 @@ fn main() {
         }
         let state = Rc::new(RefCell::new(State {
             width: 1,
+            minimap_width: 1,
+            minimap_panel: Some(map),
             cache,
             speed: Speed::new(100, options.keep_pitch),
             options,
@@ -813,7 +838,8 @@ fn main() {
                 type_position(&f, &p, &state, field, &text);
             })
         };
-        let panes = Panes::new(&frame, &panel, &tools, &bar.panel(), &grid);
+        bind_minimap(&map, &panel, &state);
+        let panes = Panes::new(&frame, &panel, &tools, &map, &bar.panel(), &grid);
         panes.restore();
         {
             let mut st = state.borrow_mut();
@@ -1009,6 +1035,11 @@ fn menu_bar(options: Options) -> MenuBar {
         )
         .append_item(ID_ZOOM_OUT, "Zoom &out\tCtrl+-", "Show more time")
         .append_item(ID_ZOOM_FIT, "Zoom to &fit\tCtrl+0", "Show the whole file")
+        .append_check_item(
+            ID_RULER,
+            "Time &ruler",
+            "Show the time scale along the bottom of the waveform",
+        )
         .append_separator();
     let view = Pane::ALL
         .into_iter()
@@ -1028,6 +1059,7 @@ fn menu_bar(options: Options) -> MenuBar {
         .build();
     bar.check_item(ID_KEEP_PITCH, options.keep_pitch);
     bar.check_item(ID_SCRUB_SELECTING, options.scrub_while_selecting);
+    bar.check_item(ID_RULER, options.ruler);
     bar
 }
 
@@ -1112,6 +1144,11 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
         st.options.scrub_while_selecting = on;
         st.options.save();
         return;
+    } else if id == ID_RULER {
+        let mut st = state.borrow_mut();
+        let on = checked.unwrap_or(!st.options.ruler);
+        st.options.ruler = on;
+        st.options.save();
     } else if id == ID_TO_START {
         let mut st = state.borrow_mut();
         if let Some(e) = &mut st.editor {
@@ -1754,10 +1791,21 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
         dc.set_background(BACKGROUND);
         dc.clear();
         let st = state.borrow();
+        // Whatever moved the waveform (zoom, scroll, edits, playback)
+        // moves the minimap's frame too.
+        if let Some(m) = st.minimap_panel {
+            m.refresh(false, None);
+        }
         let (Some(view), Some(peaks)) = (&st.view, &st.peaks) else {
             return;
         };
-        let lanes = lanes::lanes(peaks.channels(), size.height);
+        // The ruler takes a strip at the bottom; the lanes get the rest.
+        let ruler_height = if st.options.ruler {
+            dc.get_text_extent("0:00").1 + RULER_PADDING
+        } else {
+            0
+        };
+        let lanes = lanes::lanes(peaks.channels(), size.height - ruler_height);
         let editor = st.editor.as_ref();
         // Backgrounds first, the waveform goes on top.
         let spans = |ranges: &mut dyn Iterator<Item = Range<SamplePos>>| -> Vec<Range<u32>> {
@@ -1820,9 +1868,9 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
                 }
             }
         }
-        // Suggestions: a strip along the bottom under each suggested pause,
-        // and a tick at the top of each suggested track start not split at
-        // yet.
+        // Suggestions: a strip along the bottom of the lanes (just above
+        // the time ruler, if shown) under each suggested pause, and a tick
+        // at the top of each suggested track start not split at yet.
         if let Some(d) = &st.detection {
             for r in &d.regions {
                 let Some(span) = view.pixel_span(&r.range) else {
@@ -1836,7 +1884,7 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
                 dc.set_brush(colour, BrushStyle::Solid);
                 dc.draw_rectangle(
                     px(span.start),
-                    size.height - SUGGESTION_MARK,
+                    size.height - ruler_height - SUGGESTION_MARK,
                     px(span.end - span.start),
                     SUGGESTION_MARK,
                 );
@@ -1874,6 +1922,9 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
                 dc.draw_text(&label, x0.max(0.0) as i32 + 4, 2);
             }
         }
+        if let Some(rate) = st.rate.filter(|_| ruler_height > 0) {
+            draw_ruler(&dc, view, rate, size, ruler_height);
+        }
         // Vertical markers on top: selection edges (or the cursor), then
         // the playhead.
         let mut marks = Vec::new();
@@ -1891,6 +1942,125 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
             }
         }
     });
+}
+
+/// The minimap pane: painting, resizing, and dragging its frame to scroll
+/// the waveform (`waveform`, which is redrawn after a scroll; its paint
+/// handler redraws the minimap in turn).
+fn bind_minimap(map: &Panel, waveform: &Panel, state: &Rc<RefCell<State>>) {
+    let (m, w) = (*map, *waveform);
+    {
+        let state = Rc::clone(state);
+        map.on_paint(move |_| {
+            let dc = AutoBufferedPaintDC::new(&m);
+            let size = m.get_client_size();
+            let st = state.borrow();
+            if let (Some(map), Some(peaks), Some(view)) = (&st.minimap, &st.peaks, &st.view) {
+                let scene = minimap::Scene {
+                    map,
+                    peaks,
+                    editor: st.editor.as_ref(),
+                    visible: view.visible(),
+                    playhead: st.playhead(),
+                };
+                minimap::draw(&dc, size, &scene);
+            } else {
+                dc.set_background(BACKGROUND);
+                dc.clear();
+            }
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        map.on_size(move |e| {
+            if let WindowEventData::Size(s) = &e
+                && let Some(size) = s.get_size()
+            {
+                let mut st = state.borrow_mut();
+                st.minimap_width = u32::try_from(size.width).unwrap_or(1).max(1);
+                let w = st.minimap_width;
+                if let Some(map) = &mut st.minimap {
+                    map.set_width(w);
+                }
+            }
+            m.refresh(false, None);
+            e.skip(true);
+        });
+    }
+    // Moves the waveform to start at what the minimap says.
+    let scroll = move |st: &mut State, start: Option<SamplePos>| {
+        if let (Some(start), Some(v)) = (start, &mut st.view) {
+            v.scroll_to(start);
+            w.refresh(false, None);
+        }
+    };
+    {
+        let state = Rc::clone(state);
+        map.on_mouse_left_down(move |e| {
+            let Some((_, x)) = mouse_event(&e) else {
+                return;
+            };
+            let mut guard = state.borrow_mut();
+            let st = &mut *guard;
+            let (Some(map), Some(v)) = (&mut st.minimap, &st.view) else {
+                return;
+            };
+            let start = map.press(x, &v.visible());
+            scroll(st, Some(start));
+            m.capture_mouse();
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        map.on_mouse_motion(move |e| {
+            let Some((_, x)) = mouse_event(&e) else {
+                return;
+            };
+            let mut guard = state.borrow_mut();
+            let st = &mut *guard;
+            let start = st.minimap.as_mut().and_then(|map| map.drag(x));
+            scroll(st, start);
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        map.on_mouse_left_up(move |_| {
+            if m.has_capture() {
+                m.release_mouse();
+            }
+            if let Some(map) = &mut state.borrow_mut().minimap {
+                map.release();
+            }
+        });
+    }
+}
+
+/// Draws the time ruler into the bottom `height` rows of the waveform
+/// window (`size`): ticks and labels from [`lac_app::ruler::ticks`].
+fn draw_ruler(dc: &impl DeviceContext, view: &WaveformView, rate: u32, size: Size, height: i32) {
+    let top = size.height - height;
+    dc.set_pen(RULER_BACKGROUND, 1, PenStyle::Solid);
+    dc.set_brush(RULER_BACKGROUND, BrushStyle::Solid);
+    dc.draw_rectangle(0, top, size.width, height);
+    dc.set_pen(RULER_TICK, 1, PenStyle::Solid);
+    dc.draw_line(0, top, size.width, top);
+    dc.set_text_foreground(RULER_TEXT);
+    dc.set_background_mode(BackgroundMode::Transparent);
+    // Room for the widest usual label and a gap.
+    let min_gap = f64::from(dc.get_text_extent("0:00:00.000").0 + 16);
+    for t in lac_app::ruler::ticks(view, rate, min_gap) {
+        let x = t.x.round() as i32;
+        let len = if t.label.is_some() {
+            RULER_MAJOR
+        } else {
+            RULER_MINOR
+        };
+        // draw_line leaves out the end point, so go one past.
+        dc.draw_line(x, top, x, top + len + 1);
+        if let Some(label) = &t.label {
+            dc.draw_text(label, x + 3, top + RULER_MINOR + 1);
+        }
+    }
 }
 
 /// A pixel coordinate for the device context.
