@@ -110,3 +110,10 @@ $og -i "$tmp/mc.wav" $ma -b:a 64k -use_editlist 0 mp4_aac_noedit_22k.m4a
 $og -f lavfi -i "color=c=gray:s=16x16:r=5:d=1" -i "$tmp/mb.wav" -fflags +bitexact \
     -c:v mjpeg $ma -b:a 64k mp4_aac_with_video.mp4
 $og -i "$tmp/ma.wav" -fflags +bitexact -c:a aac -b:a 96k mp4_aac_pns_44k.m4a
+
+# MP4/M4A with Apple Lossless (ALAC), encoded by ffmpeg: 16-bit stereo
+# (4096-sample frames, the last one shorter) and 24-bit mono.
+$synth "$tmp/la.wav" 44100 2 16 0.75
+$og -i "$tmp/la.wav" -fflags +bitexact -c:a alac mp4_alac_stereo16_44k.m4a
+$synth "$tmp/lb.wav" 48000 1 24 0.5
+$og -i "$tmp/lb.wav" -fflags +bitexact -c:a alac mp4_alac_mono24_48k.m4a

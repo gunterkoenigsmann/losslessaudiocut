@@ -9,7 +9,7 @@
 //! lac completions bash > ~/.local/share/bash-completion/completions/lac
 //! ```
 //!
-//! Supported formats: WAV, AIFF, FLAC, Ogg Vorbis/Opus/Speex, MP3, MP4/M4A (AAC) and Matroska/WebM Opus (detected from the content). Besides being useful for scripting, the CLI drives the end-to-end tests.
+//! Supported formats: WAV, AIFF, FLAC, Ogg Vorbis/Opus/Speex, MP3, MP4/M4A (AAC, ALAC) and Matroska/WebM Opus (detected from the content). Besides being useful for scripting, the CLI drives the end-to-end tests.
 
 use std::path::{Path, PathBuf};
 
@@ -29,7 +29,7 @@ use lac_core::{SamplePos, TagField};
     long_about = "Cuts audio recordings without re-encoding them: what is kept \
                   decodes to exactly the same samples as the original.\n\n\
                   Supported formats: WAV, AIFF, FLAC, Ogg Vorbis/Opus/Speex, \
-                  MP3, MP4/M4A (AAC) and Matroska/WebM Opus, detected from \
+                  MP3, MP4/M4A (AAC, ALAC) and Matroska/WebM Opus, detected from \
                   the content.",
     after_long_help = EXAMPLES
 )]

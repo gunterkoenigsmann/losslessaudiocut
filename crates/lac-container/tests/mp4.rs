@@ -1,8 +1,8 @@
-//! Tests of the MP4 demuxer and muxer with AAC.
+//! Tests of the MP4 demuxer and muxer with AAC and ALAC.
 //!
 //! Fixtures come from `tests/fixtures/generate.sh` (ffmpeg's AAC-LC
-//! encoder; moov after and before mdat, without an edit list, and with a
-//! video track).
+//! encoder: moov after and before mdat, without an edit list, and with a
+//! video track; ffmpeg's ALAC encoder at 16 and 24 bit).
 //!
 //! Oracles:
 //! 1. Samples are copied verbatim: re-opening the output with our demuxer
@@ -10,14 +10,15 @@
 //!    planned length. This holds without external tools.
 //! 2. ffmpeg (an independent demuxer and decoder) decodes the output like
 //!    the source restricted to the plans' actual ranges, bit for bit,
-//!    except within [`join_window`] after each join: there the first
+//!    except within [`join_window`] after each join: there the first AAC
 //!    frame overlaps (MDCT) with a frame that was not its predecessor.
+//!    ALAC frames are independent, so ALAC has no such window.
 //! 3. ffmpeg honours the edit list's start. Whether it honours its end
 //!    depends on the version: ffmpeg 6.1 decodes the last frame whole, so
 //!    its output is our planned length plus the hidden tail of the last
-//!    sample (less than one frame); ffmpeg 9 outputs exactly the planned
-//!    length. Both are accepted. Our own decoding (`lac-decode`'s tests)
-//!    honours both ends.
+//!    sample (less than one frame, [`max_frame`]); ffmpeg 9 outputs exactly
+//!    the planned length. Both are accepted. Our own decoding
+//!    (`lac-decode`'s tests) honours both ends.
 //!
 //! Oracle 2 needs fixtures without perceptual noise substitution (PNS,
 //! ISO/IEC 14496-3 4.6.13): a PNS band is filled with noise from a random
@@ -42,23 +43,35 @@ use proptest::prelude::*;
 /// Fixtures: (name, sample rate, channels, length in samples). With an
 /// edit list the length is exactly the encoder's input; without one it
 /// includes the 1024 priming samples.
-const FIXTURES: [(&str, u32, u16, u64); 4] = [
+const FIXTURES: [(&str, u32, u16, u64); 6] = [
     ("mp4_aac_stereo_44k.m4a", 44_100, 2, 66_150),
     ("mp4_aac_mono_48k.m4a", 48_000, 1, 48_000),
     ("mp4_aac_noedit_22k.m4a", 22_050, 2, 22_050 + 1024),
     ("mp4_aac_with_video.mp4", 48_000, 1, 48_000),
+    ("mp4_alac_stereo16_44k.m4a", 44_100, 2, 33_075),
+    ("mp4_alac_mono24_48k.m4a", 48_000, 1, 24_000),
 ];
 
-/// AAC-LC frame length: every sample decodes to this many samples.
-const FRAME: u64 = 1024;
+/// The largest decoder output of one sample: an AAC-LC frame always
+/// decodes to 1024 samples, ffmpeg's ALAC frames hold up to 4096.
+fn max_frame(f: &Mp4File) -> u64 {
+    match f.codec() {
+        Mp4Codec::Aac { .. } => 1024,
+        Mp4Codec::Alac { .. } => 4096,
+    }
+}
 
-/// Samples after a join in which the output may differ from the source:
-/// one frame, whose output is the overlap-add of its own first half with
-/// the second half of the frame before the join (ISO/IEC 14496-3 4.6.11).
-/// From the next frame on, the decoder state holds only the current
-/// frame, so the output is bit-exact again.
-fn join_window() -> usize {
-    FRAME as usize
+/// Samples after a join in which the output may differ from the source.
+/// AAC: one frame, whose output is the overlap-add of its own first half
+/// with the second half of the frame before the join (ISO/IEC 14496-3
+/// 4.6.11); from the next frame on, the decoder state holds only the
+/// current frame, so the output is bit-exact again. ALAC: none, every
+/// frame decodes on its own.
+fn join_window(f: &Mp4File) -> usize {
+    match f.codec() {
+        Mp4Codec::Aac { .. } => 1024,
+        Mp4Codec::Alac { .. } => 0,
+    }
 }
 
 fn open(bytes: &[u8]) -> Mp4File {
@@ -151,7 +164,7 @@ fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPl
         decoded == total || decoded == total + u64::from(tail),
         "{name}: decoded length {decoded}, expected {total} or {total} + {tail}"
     );
-    assert!(u64::from(tail) < FRAME, "{name}: tail {tail}");
+    assert!(u64::from(tail) < max_frame(&f), "{name}: tail {tail}");
     assert!(
         s.len() / frame >= f.index().total_samples() as usize,
         "{name}: source length"
@@ -164,7 +177,7 @@ fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPl
         let r = p.actual.start as usize..p.actual.end as usize;
         out_pos += p.padding_before as usize;
         if r.start as u64 != prev_end || p.padding_before > 0 {
-            window_end = r.start + join_window();
+            window_end = r.start + join_window(&f);
         }
         let a = window_end.max(r.start).min(r.end);
         if a < r.end {
@@ -196,7 +209,8 @@ fn fixtures_open_cleanly() {
         let others = usize::from(name.contains("video"));
         assert_eq!(f.warnings().len(), others, "{name}: {:?}", f.warnings());
         assert_eq!(f.other_tracks(), others, "{name}");
-        assert!(matches!(f.codec(), Mp4Codec::Aac { .. }), "{name}");
+        let alac = matches!(f.codec(), Mp4Codec::Alac { .. });
+        assert_eq!(alac, name.contains("alac"), "{name}");
         assert_eq!(f.index().info().sample_rate, rate, "{name}");
         assert_eq!(f.index().info().channels, channels, "{name}");
         assert_eq!(f.index().total_samples(), len, "{name}");
@@ -218,7 +232,7 @@ fn timeline_agrees_with_ffmpeg() {
         let frames = (d.len() / (4 * usize::from(f.index().info().channels))) as u64;
         let len = f.index().total_samples();
         assert!(
-            len <= frames && frames < len + FRAME,
+            len <= frames && frames < len + max_frame(&f),
             "{name}: {frames} vs {len}"
         );
     }
