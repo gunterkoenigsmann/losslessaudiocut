@@ -38,6 +38,7 @@ mod tests {
     /// know; the logo must stick to plain shapes or parts of it vanish.
     #[test]
     fn logo_uses_only_what_nanosvg_renders() {
+        let shapes = without_comments(SVG);
         for unsupported in [
             "<style",
             "<use",
@@ -48,8 +49,27 @@ mod tests {
             "currentColor",
             "<filter",
         ] {
-            assert!(!SVG.contains(unsupported), "logo SVG uses {unsupported}");
+            assert!(!shapes.contains(unsupported), "logo SVG uses {unsupported}");
         }
+    }
+
+    /// `svg` with every `<!-- ... -->` removed: the logo's comments may
+    /// name the elements it avoids.
+    fn without_comments(svg: &str) -> String {
+        let mut out = String::new();
+        let mut rest = svg;
+        while let Some(start) = rest.find("<!--") {
+            out.push_str(&rest[..start]);
+            let end = rest[start..].find("-->").expect("unterminated comment");
+            rest = &rest[start + end + 3..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    #[test]
+    fn comments_are_stripped() {
+        assert_eq!(without_comments("a<!-- <use> -->b<!--c-->d"), "abd");
     }
 
     /// Icon generators (rsvg-convert, iconutil, snapcraft) expect a
