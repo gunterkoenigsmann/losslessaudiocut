@@ -112,10 +112,19 @@ parts, with the deleted ones skipped, starting at the selection or at the
 cursor (a click without dragging puts it; Home moves it to the start).
 Clicking while playing jumps there; stopping returns to the cursor.
 
-Dragging with the right mouse button scrubs: playback follows the pointer
-in short pieces of unaltered audio, so a word or a note can be found by ear.
-Released, playback goes on from there if it was running before; otherwise it
-stops and the cursor stays where the scrub ended.
+Dragging with the right mouse button (or holding it still for a moment)
+scrubs: playback follows the pointer in short pieces of unaltered audio, so
+a word or a note can be found by ear. Released, playback goes on from there
+if it was running before; otherwise it stops and the cursor stays where the
+scrub ended.
+
+A right click (or the menu key) opens a menu for the place clicked. In the
+selection it offers to make the selection a new track, to fit the track
+under the pointer to it or move one end of that track to one of its edges,
+to play its first or last 3 seconds, to fine-tune it to nearby detected
+pauses and track starts, and to delete or restore it. Near the playhead it
+splits there or moves a selection edge there; anywhere it splits at the
+pointer or plays from it. Entries that would change nothing are greyed out.
 
 Dragging a selection with the left button scrubs its moving edge too, so a
 cut point can be placed by ear (a plain click stays silent). *Play > Scrub

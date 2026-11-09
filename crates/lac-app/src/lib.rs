@@ -37,11 +37,15 @@
 //!   dialog and the packages' file associations.
 //! - [`launch`]: the GUI program's command line.
 //! - [`recent_files`]: the list behind File > Open recent.
+//! - [`hover`]: the waveform's tooltips, naming the mark under the
+//!   pointer.
+//! - [`context_menu`]: the waveform's right-click menu.
 //!
 //! See `docs/architecture.md` in the repository for how this crate fits in.
 
 pub mod analysis_job;
 pub mod chapters;
+pub mod context_menu;
 pub mod detail;
 pub mod editor;
 pub mod export_job;

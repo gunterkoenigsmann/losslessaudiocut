@@ -54,6 +54,7 @@ use icons::Icon;
 use lac_analysis::{DetectParams, Detection, RegionKind};
 use lac_app::analysis_job::{AnalysisJob, AnalysisStatus};
 use lac_app::chapters::{Chapter, SuggestedStart, suggested_starts};
+use lac_app::context_menu::{self, Effect, Entry, RightPress};
 use lac_app::detail::{Detail, DetailLoader};
 use lac_app::editor::{Editor, Edits};
 use lac_app::export_job::{ExportJob, default_output, describe_outcomes, track_tasks};
@@ -105,6 +106,11 @@ const ID_RULER: Id = ID_HIGHEST + 24;
 const ID_SUGGESTED_SPLITS: Id = ID_HIGHEST + 25;
 const ID_SUGGESTED_PAUSES: Id = ID_HIGHEST + 26;
 const ID_CHAINED_LINKS: Id = ID_HIGHEST + 27;
+/// The waveform's right-click menu: entry `i` has id `ID_CONTEXT_FIRST + i`
+/// (above the panes' ids, `ID_HIGHEST + 100` on).
+const ID_CONTEXT_FIRST: Id = ID_HIGHEST + 200;
+/// More entries than the right-click menu ever has.
+const CONTEXT_MAX: usize = 50;
 
 /// The toolbar: the most used menu commands. Tooltips name the shortcut,
 /// which is the faster way once known.
@@ -327,6 +333,12 @@ struct State {
     ruler_height: std::cell::Cell<i32>,
     /// The waveform's tooltip as last set, so it is set only on changes.
     tooltip: String,
+    /// The right button is down, and it is not yet known whether this is
+    /// a click (the menu) or a scrub.
+    right_press: Option<RightPress>,
+    /// What the entries of the last right-click menu do, by id
+    /// `ID_CONTEXT_FIRST + index`.
+    menu_actions: Vec<context_menu::Action>,
 }
 
 /// A scrub: dragging with the right button plays short pieces of audio
@@ -439,7 +451,7 @@ impl State {
     /// A position at (or after) the end of the kept parts plays from the
     /// beginning if `wrap`, else from the last frame.
     fn play_at(&mut self, src: SamplePos, wrap: bool) -> Result<(), String> {
-        let (Some(path), Some(editor)) = (&self.path, &self.editor) else {
+        let Some(editor) = &self.editor else {
             return Err("open a file first".to_string());
         };
         let tl = lac_app::playback::timeline(editor);
@@ -449,6 +461,24 @@ impl State {
         let start = match tl.from_source(src) {
             t if t >= tl.len() && wrap => 0,
             t => t.min(tl.len() - 1),
+        };
+        self.play_timeline(tl, start)
+    }
+
+    /// Plays `tl` from its start and stops at its end: an excerpt from
+    /// the right-click menu. Space plays the edits again afterwards.
+    fn play_excerpt(&mut self, tl: Timeline) -> Result<(), String> {
+        if tl.is_empty() {
+            return Err("all of it is deleted; nothing to play".to_string());
+        }
+        self.play_timeline(tl, 0)
+    }
+
+    /// Plays timeline `tl` from timeline position `start`, opening the
+    /// player on first use.
+    fn play_timeline(&mut self, tl: Timeline, start: SamplePos) -> Result<(), String> {
+        let Some(path) = &self.path else {
+            return Err("open a file first".to_string());
         };
         match &mut self.player {
             Some(p) => p.engine_mut().set_timeline(tl.clone(), start),
@@ -514,6 +544,22 @@ impl State {
             selecting,
         });
         None
+    }
+
+    /// The right button, held down, turned out not to be a click (it was
+    /// held or dragged): scrubs from where it went down. Returns an error
+    /// message.
+    fn begin_right_scrub(&mut self) -> Option<String> {
+        let press = self.right_press.take()?;
+        let pos = scrub_source_at(self, press.x())?;
+        self.begin_scrub(pos, false)
+    }
+
+    /// Timer: a right button held too long for a click starts scrubbing
+    /// (listening at the pointer). Returns an error message.
+    fn poll_right_press(&mut self) -> Option<String> {
+        let held = self.right_press.is_some_and(|p| p.held(Instant::now()));
+        if held { self.begin_right_scrub() } else { None }
     }
 
     /// The pointer moved to source position `src` while scrubbing.
@@ -1006,6 +1052,13 @@ fn main() {
                         open_file(&frame, &state, first.clone());
                     }
                 }
+                let held = state.borrow_mut().poll_right_press();
+                if let Some(msg) = held {
+                    if panel.has_capture() {
+                        panel.release_mouse();
+                    }
+                    report(&frame, &msg);
+                }
                 let (status, detail, export, playing, analysis) = {
                     let mut st = state.borrow_mut();
                     (
@@ -1248,6 +1301,11 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
             && let Some(path) = dialog.get_path()
         {
             open_file(&f, state, PathBuf::from(path));
+        }
+    } else if let Some(i) = context_index(id) {
+        let msg = context_command(&mut state.borrow_mut(), i);
+        if let Some(msg) = msg {
+            report(&f, &msg);
         }
     } else if let Some(i) = recent::index_of(id) {
         open_recent(&f, state, i);
@@ -1884,8 +1942,7 @@ const TOOLTIP_REACH: f64 = 3.0;
 /// the texts come from [`lac_app::hover`]). Only changes are passed on,
 /// so the tooltip does not flicker while the pointer moves over one mark.
 fn update_tooltip(st: &mut State, panel: &Panel, x: f64, y: i32) {
-    let tip = (|| {
-        let (view, ed, rate) = (st.view.as_ref()?, st.editor.as_ref()?, st.rate?);
+    let tip = with_scene(st, |scene, view| {
         let height = panel.get_client_size().height;
         let ruler = st.ruler_height.get();
         let zone = if y >= height - ruler {
@@ -1897,28 +1954,43 @@ fn update_tooltip(st: &mut State, panel: &Panel, x: f64, y: i32) {
         } else {
             Zone::Lanes
         };
-        let starts: Vec<SamplePos> = st
-            .suggested_starts()
-            .iter()
-            .map(|s| s.pos)
-            .filter(|p| !ed.splits().contains(p))
-            .collect();
-        let scene = hover::Scene {
-            editor: ed,
-            pauses: st.detection.as_ref().map_or(&[][..], |d| &d.regions),
-            suggested_starts: &starts,
-            playhead: st.playhead(),
-            rate,
-        };
-        let pos = view.x_to_sample(x.max(0.0));
-        let near = (TOOLTIP_REACH * view.samples_per_pixel()).ceil() as SamplePos;
-        hover::tooltip(&scene, pos, zone, near)
-    })()
+        let (pos, near) = pointer_at(view, x);
+        hover::tooltip(scene, pos, zone, near)
+    })
+    .flatten()
     .unwrap_or_default();
     if tip != st.tooltip {
         panel.set_tooltip(&tip);
         st.tooltip = tip;
     }
+}
+
+/// Calls `f` with what the waveform shows (for its tooltips and menu)
+/// and the view; `None` until a file is read.
+fn with_scene<R>(st: &State, f: impl FnOnce(&hover::Scene, &WaveformView) -> R) -> Option<R> {
+    let (view, ed, rate) = (st.view.as_ref()?, st.editor.as_ref()?, st.rate?);
+    let starts: Vec<SamplePos> = st
+        .suggested_starts()
+        .iter()
+        .map(|s| s.pos)
+        .filter(|p| !ed.splits().contains(p))
+        .collect();
+    let scene = hover::Scene {
+        editor: ed,
+        pauses: st.detection.as_ref().map_or(&[][..], |d| &d.regions),
+        suggested_starts: &starts,
+        playhead: st.playhead(),
+        rate,
+    };
+    Some(f(&scene, view))
+}
+
+/// The source position under the pointer at `x`, and how far from it
+/// (in samples) a mark still counts as under the pointer.
+fn pointer_at(view: &WaveformView, x: f64) -> (SamplePos, SamplePos) {
+    let pos = view.x_to_sample(x.clamp(0.0, f64::from(view.width())));
+    let near = (TOOLTIP_REACH * view.samples_per_pixel()).ceil() as SamplePos;
+    (pos, near)
 }
 
 /// Left button: drag to select, Shift+click to move the nearer edge, a
@@ -1965,6 +2037,24 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
             let Some((_, x)) = mouse_event(&e) else {
                 return;
             };
+            {
+                let mut st = state.borrow_mut();
+                if let Some(press) = st.right_press {
+                    if !press.moved(x, f64::from(e_y(&e))) {
+                        return;
+                    }
+                    // Too far for a click: scrub from where the button
+                    // went down; the code below follows the pointer.
+                    if let Some(msg) = st.begin_right_scrub() {
+                        drop(st);
+                        if p.has_capture() {
+                            p.release_mouse();
+                        }
+                        report(&f, &msg);
+                        return;
+                    }
+                }
+            }
             let error = {
                 let mut guard = state.borrow_mut();
                 let st = &mut *guard;
@@ -2051,9 +2141,13 @@ fn scrub_source_at(st: &State, x: f64) -> Option<SamplePos> {
     Some(v.x_to_sample(x.clamp(0.0, f64::from(v.width()))))
 }
 
-/// Right button: scrub. While it is held, playback follows the pointer
-/// in short pieces (the motion is handled in [`bind_select`]); see
-/// [`State::begin_scrub`] and [`State::end_scrub`].
+/// Right button: a click opens the waveform's menu (see
+/// [`show_context_menu`]); held or dragged, it scrubs. While scrubbing,
+/// playback follows the pointer in short pieces (the motion is handled in
+/// [`bind_select`]); see [`State::begin_scrub`] and [`State::end_scrub`].
+/// Which of the two a press is stays open until the pointer moves or the
+/// button is held a moment ([`RightPress`]), so a click stays silent and
+/// does not move playback.
 fn bind_scrub(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
     let (p, f) = (*panel, *frame);
     {
@@ -2062,28 +2156,34 @@ fn bind_scrub(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
             let Some((_, x)) = mouse_event(&e) else {
                 return;
             };
-            let error = {
+            {
                 let mut st = state.borrow_mut();
-                if st.scrub.is_some() {
-                    // Already scrubbing a selection being dragged.
+                if st.scrub.is_some()
+                    || st.view.is_none()
+                    || st.editor.as_ref().is_some_and(Editor::dragging)
+                {
+                    // Already scrubbing a selection being dragged, or
+                    // dragging one silently: the left button has the mouse.
                     return;
                 }
-                let Some(pos) = scrub_source_at(&st, x) else {
-                    return;
-                };
-                st.begin_scrub(pos, false)
-            };
-            match error {
-                Some(msg) => report(&f, &msg),
-                None => p.capture_mouse(),
+                let y = f64::from(e_y(&e));
+                st.right_press = Some(RightPress::new(x, y, Instant::now()));
             }
-            update_chrome(&f, &state.borrow());
-            p.refresh(false, None);
+            p.capture_mouse();
         });
     }
     {
         let state = Rc::clone(state);
         panel.on_mouse_right_up(move |_| {
+            let press = state.borrow_mut().right_press.take();
+            if let Some(press) = press {
+                // A click.
+                if p.has_capture() {
+                    p.release_mouse();
+                }
+                show_context_menu(&f, &p, &state, press.x());
+                return;
+            }
             if !state.borrow().scrub.as_ref().is_some_and(|s| !s.selecting) {
                 // No right-button scrub (perhaps a selection being dragged,
                 // which keeps the mouse).
@@ -2096,6 +2196,82 @@ fn bind_scrub(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
             update_chrome(&f, &state.borrow());
             p.refresh(false, None);
         });
+    }
+    {
+        // The menu key (or Shift+F10): the menu for where playback would
+        // start. A right click sends this event too, with a position; that
+        // one is handled above.
+        let state = Rc::clone(state);
+        panel.on_context_menu(move |e| {
+            if e.get_context_position().is_some() {
+                return;
+            }
+            let x = {
+                let st = state.borrow();
+                let (Some(v), Some(ed)) = (&st.view, &st.editor) else {
+                    return;
+                };
+                v.sample_to_x(ed.play_from())
+                    .clamp(0.0, f64::from(v.width()))
+            };
+            show_context_menu(&f, &p, &state, x);
+        });
+    }
+}
+
+/// Opens the waveform's right-click menu for the pointer at `x` (see
+/// [`context_menu::waveform`]); the chosen entry arrives as a menu command
+/// ([`context_command`]).
+fn show_context_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, x: f64) {
+    let mut menu = {
+        let mut guard = state.borrow_mut();
+        let st = &mut *guard;
+        let Some(entries) = with_scene(st, |scene, view| {
+            let (pos, near) = pointer_at(view, x);
+            context_menu::waveform(scene, pos, near)
+        }) else {
+            report(frame, "open a file first");
+            return;
+        };
+        let menu = Menu::builder().build();
+        st.menu_actions.clear();
+        for entry in entries {
+            match entry {
+                Entry::Separator => menu.append_separator(),
+                Entry::Item(item) if st.menu_actions.len() < CONTEXT_MAX => {
+                    let id = ID_CONTEXT_FIRST + st.menu_actions.len() as Id;
+                    menu.append(id, &item.label, "", ItemKind::Normal);
+                    menu.enable_item(id, item.enabled);
+                    st.menu_actions.push(item.action);
+                }
+                Entry::Item(_) => {}
+            }
+        }
+        menu
+    };
+    // No borrow while the menu is open: its command borrows the state.
+    panel.popup_menu(&mut menu, None);
+}
+
+/// The index into [`State::menu_actions`] of right-click menu command `id`.
+fn context_index(id: Id) -> Option<usize> {
+    let i = usize::try_from(id.checked_sub(ID_CONTEXT_FIRST)?).ok()?;
+    (i < CONTEXT_MAX).then_some(i)
+}
+
+/// Runs entry `index` of the last right-click menu. Returns an error
+/// message.
+fn context_command(st: &mut State, index: usize) -> Option<String> {
+    let action = st.menu_actions.get(index)?.clone();
+    let rate = st.rate?;
+    let ed = st.editor.as_mut()?;
+    match context_menu::apply(ed, &action, rate) {
+        Effect::Edited(_) => {
+            st.sync_timeline();
+            None
+        }
+        Effect::Play(tl) => st.play_excerpt(tl).err(),
+        Effect::PlayFrom(pos) => st.play_at(pos, false).err(),
     }
 }
 
@@ -2630,6 +2806,46 @@ mod tests {
             assert!(*id > ID_HIGHEST, "{id} is no command of ours");
             assert_eq!(panes::pane_for(*id), None, "{id} toggles a pane");
         }
+    }
+
+    #[test]
+    fn right_click_menu_ids_are_their_own() {
+        assert_eq!(context_index(ID_CONTEXT_FIRST), Some(0));
+        let last = ID_CONTEXT_FIRST + CONTEXT_MAX as Id - 1;
+        assert_eq!(context_index(last), Some(CONTEXT_MAX - 1));
+        assert_eq!(context_index(last + 1), None);
+        assert_eq!(context_index(ID_CHAINED_LINKS), None);
+        for id in ID_CONTEXT_FIRST..=last {
+            assert_eq!(panes::pane_for(id), None, "{id} toggles a pane");
+            assert_eq!(recent::index_of(id), None, "{id} opens a recent file");
+        }
+    }
+
+    #[test]
+    fn right_click_menu_commands_edit_and_play() {
+        let mut st = State {
+            editor: Some(Editor::new(60_000)),
+            rate: Some(1000),
+            ..State::default()
+        };
+        if let Some(e) = &mut st.editor {
+            e.select(10_000, 20_000);
+        }
+        st.menu_actions = vec![
+            context_menu::Action::Split(vec![10_000, 20_000]),
+            context_menu::Action::PlayFrom(5_000),
+        ];
+        assert_eq!(context_command(&mut st, 0), None);
+        assert_eq!(
+            st.editor.as_ref().map(|e| e.splits().to_vec()),
+            Some(vec![10_000, 20_000])
+        );
+        // Playing needs a file; the message says so instead of panicking.
+        assert_eq!(
+            context_command(&mut st, 1).as_deref(),
+            Some("open a file first")
+        );
+        assert_eq!(context_command(&mut st, 2), None, "no such entry");
     }
 
     #[test]
