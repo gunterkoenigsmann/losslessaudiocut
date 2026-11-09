@@ -58,7 +58,9 @@ asks before they are lost.
 
 Ctrl+K starts a new track at the cursor (or the selection start), Ctrl+J
 joins the track under the cursor with the one before it, and F2 names it.
-Track boundaries show as dashed lines with the track number and name; drag
+Track boundaries show as dashed lines with the track number and name, and
+each track is faintly tinted, with the same tint behind its row of the
+track list; drag
 one with the mouse to move it (the pointer turns into a left-right arrow
 over it; the whole drag is one undo step). With
 tracks, File > Export asks for a folder and writes one file per track,
