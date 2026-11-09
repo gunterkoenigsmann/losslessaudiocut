@@ -1741,6 +1741,15 @@ fn bind_track_list(grid: &Grid, frame: &Frame, panel: &Panel, state: &Rc<RefCell
         let (state, f, panel) = (Rc::clone(state), *frame, *panel);
         grid.on_cell_left_dclick(move |e| show_track(e.get_row(), &f, &panel, &state));
     }
+    // Right-clicking a row label or a cell: the track's menu (issue #90).
+    {
+        let (state, g) = (Rc::clone(state), *grid);
+        grid.on_label_right_click(move |e| show_track_menu(&g, &state, e.get_row()));
+    }
+    {
+        let (state, g) = (Rc::clone(state), *grid);
+        grid.on_cell_right_click(move |e| show_track_menu(&g, &state, e.get_row()));
+    }
     {
         let (state, f, panel, g) = (Rc::clone(state), *frame, *panel, *grid);
         grid.on_cell_changed(move |e| {
@@ -2223,17 +2232,39 @@ fn bind_scrub(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
 /// [`context_menu::waveform`]); the chosen entry arrives as a menu command
 /// ([`context_command`]).
 fn show_context_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, x: f64) {
-    let mut menu = {
-        let mut guard = state.borrow_mut();
-        let st = &mut *guard;
-        let Some(entries) = with_scene(st, |scene, view| {
-            let (pos, near) = pointer_at(view, x);
-            context_menu::waveform(scene, pos, near)
-        }) else {
-            report(frame, "open a file first");
-            return;
-        };
-        let menu = Menu::builder().build();
+    let entries = with_scene(&state.borrow(), |scene, view| {
+        let (pos, near) = pointer_at(view, x);
+        context_menu::waveform(scene, pos, near)
+    });
+    match entries {
+        Some(entries) => popup(panel, state, entries),
+        None => report(frame, "open a file first"),
+    }
+}
+
+/// Opens the track list's right-click menu for row `row` (see
+/// [`context_menu::track_list`]); anything but a track's row (such as -1
+/// for a column label) is ignored.
+fn show_track_menu(grid: &Grid, state: &Rc<RefCell<State>>, row: i32) {
+    let Ok(index) = usize::try_from(row) else {
+        return;
+    };
+    let entries = match &state.borrow().editor {
+        Some(ed) => context_menu::track_list(ed, index),
+        None => return,
+    };
+    if !entries.is_empty() {
+        popup(grid, state, entries);
+    }
+}
+
+/// Shows `entries` as a popup menu at the mouse pointer over `window`;
+/// the chosen entry arrives at the frame as a menu command
+/// ([`context_command`]).
+fn popup(window: &impl WxWidget, state: &Rc<RefCell<State>>, entries: Vec<Entry>) {
+    let mut menu = Menu::builder().build();
+    {
+        let mut st = state.borrow_mut();
         st.menu_actions.clear();
         for entry in entries {
             match entry {
@@ -2247,10 +2278,9 @@ fn show_context_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, x
                 Entry::Item(_) => {}
             }
         }
-        menu
-    };
+    }
     // No borrow while the menu is open: its command borrows the state.
-    panel.popup_menu(&mut menu, None);
+    window.popup_menu(&mut menu, None);
 }
 
 /// The index into [`State::menu_actions`] of right-click menu command `id`.
@@ -2272,6 +2302,17 @@ fn context_command(st: &mut State, index: usize) -> Option<String> {
         }
         Effect::Play(tl) => st.play_excerpt(tl).err(),
         Effect::PlayFrom(pos) => st.play_at(pos, false).err(),
+        Effect::ZoomTo(span) => {
+            st.seek_to_cursor();
+            if let Some(v) = &mut st.view {
+                v.zoom_to(&span);
+            }
+            None
+        }
+        Effect::JumpTo(pos) => {
+            jump_to(st, pos);
+            None
+        }
     }
 }
 
