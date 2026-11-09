@@ -11,7 +11,7 @@
 //! The right button also scrubs (hold it, or drag); [`RightPress`] tells a
 //! click, which opens the menu, from the start of a scrub.
 
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::time::{Duration, Instant};
 
 use lac_core::SamplePos;
@@ -113,6 +113,8 @@ pub enum Action {
     JumpTo(SamplePos),
     /// Joins track `index` (0-based) with the one before it.
     JoinWithPrevious(usize),
+    /// Merges these tracks (0-based, inclusive) into one.
+    MergeTracks(RangeInclusive<usize>),
     /// Selects this range (a track) and deletes it.
     DeleteRange(Range<SamplePos>),
     /// Selects this range (a track) and restores what is deleted in it.
@@ -286,6 +288,12 @@ fn selection_items(scene: &Scene, sel: &Range<SamplePos>, pos: SamplePos) -> Vec
     if ed.deleted().is_empty() {
         items.pop();
     }
+    // A selection reaching into several tracks selects them: offer to
+    // merge them, right after "New track from selection".
+    let last = ed.track_at(sel.end.saturating_sub(1).max(sel.start));
+    if let Some(merge) = merge_item(ed.track_at(sel.start)..=last) {
+        items.insert(1, merge);
+    }
     items
 }
 
@@ -337,6 +345,23 @@ fn split_item(ed: &Editor, at: Vec<SamplePos>, label: String) -> Item {
         action: Action::Split(at),
         enabled,
     }
+}
+
+/// "Merge tracks …" for the tracks `tracks` (0-based, inclusive), if
+/// they are at least two (issue #96); `None` for a single track, so the
+/// entry appears only where there is something to merge.
+fn merge_item(tracks: RangeInclusive<usize>) -> Option<Item> {
+    let (first, last) = (*tracks.start() + 1, *tracks.end() + 1);
+    let label = match last.checked_sub(first)? {
+        0 => return None,
+        1 => format!("Merge tracks {first} and {last}"),
+        _ => format!("Merge tracks {first} to {last}"),
+    };
+    Some(Item {
+        label,
+        action: Action::MergeTracks(tracks),
+        enabled: true,
+    })
 }
 
 /// The selection with each edge moved to the nearest detected cutting
@@ -396,6 +421,7 @@ pub fn apply(editor: &mut Editor, action: &Action, rate: u32) -> Effect {
         }
         Action::JumpTo(p) => Effect::JumpTo(*p),
         Action::JoinWithPrevious(i) => Effect::Edited(editor.join_with_previous(*i)),
+        Action::MergeTracks(r) => Effect::Edited(editor.merge_tracks(r.clone())),
         Action::DeleteRange(r) => {
             editor.select(r.start, r.end);
             Effect::Edited(editor.delete_selection())
@@ -411,7 +437,7 @@ pub fn apply(editor: &mut Editor, action: &Action, rate: u32) -> Effect {
 /// showing and playing the track, moving the cursor or the selection's
 /// edges to its ends, joining and deleting it. Empty for a row that is no
 /// track.
-pub fn track_list(editor: &Editor, index: usize) -> Vec<Entry> {
+pub fn track_list(editor: &Editor, index: usize, selected: &[usize]) -> Vec<Entry> {
     let Some(track) = editor.tracks().into_iter().nth(index) else {
         return Vec::new();
     };
@@ -479,6 +505,15 @@ pub fn track_list(editor: &Editor, index: usize) -> Vec<Entry> {
             ),
         ]);
     }
+    // Rows selected in the list, if the clicked one is among them, select
+    // the tracks from the first to the last of them (issue #96).
+    let merge = match (selected.iter().min(), selected.iter().max()) {
+        (Some(&first), Some(&last)) if (first..=last).contains(&index) => {
+            merge_item(first..=last.min(editor.tracks().len() - 1))
+        }
+        _ => None,
+    };
+    groups.push(merge.into_iter().collect());
     groups.push(vec![
         Item {
             label: format!("Join track {n} with the previous one"),
@@ -497,7 +532,7 @@ pub fn track_list(editor: &Editor, index: usize) -> Vec<Entry> {
         },
     ]);
     let mut entries = Vec::new();
-    for g in groups {
+    for g in groups.into_iter().filter(|g| !g.is_empty()) {
         if !entries.is_empty() {
             entries.push(Entry::Separator);
         }
@@ -708,7 +743,7 @@ mod tests {
         let mut e = Editor::new(60_000);
         e.split_at_all([10_000, 30_000]);
         // Row 2 is track 2, 10..30 s.
-        let menu = track_list(&e, 1);
+        let menu = track_list(&e, 1, &[]);
         let zoom = item(&menu, "Zoom to track 2");
         let mut e2 = e.clone();
         assert_eq!(
@@ -733,8 +768,8 @@ mod tests {
         assert_eq!(to_end.action, Action::JumpTo(30_000));
         assert!(to_end.enabled);
         assert!(item(&menu, "Join track 2 with the previous one").enabled);
-        assert!(!item(&track_list(&e, 0), "Join track 1").enabled);
-        assert!(track_list(&e, 3).is_empty(), "no fourth track");
+        assert!(!item(&track_list(&e, 0, &[]), "Join track 1").enabled);
+        assert!(track_list(&e, 3, &[]).is_empty(), "no fourth track");
         // Without a selection there are no selection entries.
         assert!(
             items(&menu)
@@ -744,11 +779,77 @@ mod tests {
     }
 
     #[test]
+    fn selected_rows_offer_to_merge_their_tracks() {
+        let mut e = Editor::new(60_000);
+        e.split_at_all([10_000, 30_000, 45_000]);
+        let merge = |menu: &[Entry]| {
+            items(menu)
+                .into_iter()
+                .find(|i| i.label.starts_with("Merge"))
+                .cloned()
+        };
+        // One row selected, or none: nothing to merge.
+        assert_eq!(merge(&track_list(&e, 1, &[])), None);
+        assert_eq!(merge(&track_list(&e, 1, &[1])), None);
+        // Rows 2 and 3 selected, right-clicking either of them.
+        let m = merge(&track_list(&e, 2, &[1, 2])).expect("offered");
+        assert_eq!(m.label, "Merge tracks 2 and 3");
+        assert_eq!(m.action, Action::MergeTracks(1..=2));
+        assert_eq!(merge(&track_list(&e, 1, &[2, 1])), Some(m.clone()));
+        // Right-clicking a row outside the selected ones is about that
+        // row only.
+        assert_eq!(merge(&track_list(&e, 3, &[1, 2])), None);
+        // Rows 1 and 3: track 2 between them is merged too.
+        let all = merge(&track_list(&e, 0, &[0, 2])).expect("offered");
+        assert_eq!(all.label, "Merge tracks 1 to 3");
+        // Separators only between groups.
+        let menu = track_list(&e, 1, &[1]);
+        assert!(
+            !menu
+                .windows(2)
+                .any(|w| w == [Entry::Separator, Entry::Separator])
+        );
+
+        let mut e2 = e.clone();
+        assert_eq!(apply(&mut e2, &m.action, RATE), Effect::Edited(true));
+        assert_eq!(e2.splits(), &[10_000, 45_000]);
+        assert!(e2.undo());
+        assert_eq!(e2.splits(), e.splits());
+    }
+
+    #[test]
+    fn a_selection_across_tracks_offers_to_merge_them() {
+        let mut e = Editor::new(60_000);
+        e.split_at_all([10_000, 30_000, 45_000]);
+        let merge = |e: &Editor| {
+            let s = scene(e, &[], &[]);
+            let pos = e.selection().map_or(0, |s| s.start);
+            items(&waveform(&s, pos, 10))
+                .into_iter()
+                .find(|i| i.label.starts_with("Merge"))
+                .cloned()
+        };
+        // Inside one track, or ending exactly at the next one's start.
+        e.select(12_000, 20_000);
+        assert_eq!(merge(&e), None);
+        e.select(10_000, 30_000);
+        assert_eq!(merge(&e), None);
+        // Reaching from track 2 into track 4.
+        e.select(25_000, 50_000);
+        let m = merge(&e).expect("offered");
+        assert_eq!(m.label, "Merge tracks 2 to 4");
+        assert_eq!(m.action, Action::MergeTracks(1..=3));
+        let mut e2 = e.clone();
+        apply(&mut e2, &m.action, RATE);
+        assert_eq!(e2.splits(), &[10_000]);
+    }
+
+    #[test]
     fn the_track_list_menu_moves_selection_edges_to_track_ends() {
         let mut e = Editor::new(60_000);
         e.split_at_all([10_000, 30_000]);
         e.select(15_000, 40_000);
-        let menu = track_list(&e, 1);
+        let menu = track_list(&e, 1, &[]);
         let a = item(&menu, "Selection start to start of track 2");
         assert_eq!(a.action, Action::Select(10_000..40_000));
         assert!(a.enabled);
@@ -765,12 +866,12 @@ mod tests {
     fn tracks_are_deleted_and_restored_from_the_track_list() {
         let mut e = Editor::new(60_000);
         e.split_at_all([10_000, 30_000]);
-        let menu = track_list(&e, 1);
+        let menu = track_list(&e, 1, &[]);
         assert!(!item(&menu, "Restore track 2").enabled);
         let del = item(&menu, "Delete track 2");
         assert_eq!(apply(&mut e, &del.action, RATE), Effect::Edited(true));
         assert_eq!(e.deleted(), std::slice::from_ref(&(10_000..30_000)));
-        let menu = track_list(&e, 1);
+        let menu = track_list(&e, 1, &[]);
         assert!(!item(&menu, "Delete track 2").enabled);
         assert!(!item(&menu, "Play start of track 2").enabled);
         let restore = item(&menu, "Restore track 2");

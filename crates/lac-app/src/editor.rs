@@ -25,7 +25,7 @@
 //! operations.
 
 use std::collections::BTreeMap;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 
 use lac_core::{SamplePos, TagField, TagValueError, Tags};
 
@@ -507,6 +507,25 @@ impl Editor {
         let mut next = self.edits.clone();
         let at = next.splits.remove(index - 1);
         next.track_tags.remove(&at);
+        self.commit(next)
+    }
+
+    /// Merges tracks `tracks` (0-based, inclusive) into one: removes the
+    /// split points between them, and the names and tags of all but the
+    /// first, whose name and tags the merged track keeps (issue #96).
+    /// One undo step. Returns false unless the range holds at least two
+    /// existing tracks.
+    pub fn merge_tracks(&mut self, tracks: RangeInclusive<usize>) -> bool {
+        let (first, last) = (*tracks.start(), *tracks.end());
+        // Track i + 1 starts at splits[i]: the splits inside the merged
+        // track are those of tracks first + 1 ..= last.
+        if first >= last || last > self.edits.splits.len() {
+            return false;
+        }
+        let mut next = self.edits.clone();
+        for at in next.splits.drain(first..last) {
+            next.track_tags.remove(&at);
+        }
         self.commit(next)
     }
 
@@ -1244,6 +1263,42 @@ mod tests {
         // One undo step each.
         assert!(e.undo());
         assert_eq!(e.tracks()[1].tags.get(TagField::Artist), Some("Guest"));
+    }
+
+    #[test]
+    fn merging_tracks_keeps_the_first_name_and_is_one_undo_step() {
+        let mut e = Editor::new(1000);
+        for at in [200, 400, 600, 800] {
+            e.split_at(at);
+        }
+        for (i, name) in ["A", "B", "C", "D", "E"].iter().enumerate() {
+            assert!(e.rename_track(i, name));
+        }
+        // Tracks 2 to 4 (B, C, D) become one, named B.
+        assert!(e.merge_tracks(1..=3));
+        assert_eq!(e.splits(), &[200, 800]);
+        let names: Vec<_> = e.tracks().into_iter().map(|t| t.name).collect();
+        assert_eq!(
+            names,
+            [Some("A".into()), Some("B".into()), Some("E".into())]
+        );
+        assert_eq!(e.tracks()[1].span, 200..800);
+        // C's and D's names went with their split points: splitting there
+        // again gives unnamed tracks.
+        e.split_at(400);
+        assert_eq!(e.tracks()[2].name, None);
+        assert!(e.undo());
+        // One undo step brings all five back.
+        assert!(e.undo());
+        assert_eq!(e.tracks().len(), 5);
+        assert_eq!(e.tracks()[3].name.as_deref(), Some("D"));
+        // Fewer than two tracks, or tracks that do not exist.
+        assert!(!e.merge_tracks(2..=2));
+        let (from, to) = (3, 1);
+        assert!(!e.merge_tracks(from..=to), "reversed");
+        assert!(!e.merge_tracks(3..=5));
+        assert!(e.merge_tracks(0..=4));
+        assert_eq!(e.tracks().len(), 1);
     }
 
     #[test]
