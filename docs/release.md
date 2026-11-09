@@ -41,7 +41,7 @@ completions`, see `packaging/shell-integration.sh`):
 - The AppImage has them under `usr/share/` as well.
 
 File associations: the program registers as *a* handler for the audio
-types it opens (MP3, M4A, AC-3, Ogg Vorbis, Opus, Speex, FLAC, WAV, AIFF,
+types it opens (MP3, M4A, AAC, AC-3, Ogg Vorbis, Opus, Speex, FLAC, WAV, AIFF,
 Matroska audio; WebM audio on Linux), offered under "Open with", but never
 takes over the default program:
 

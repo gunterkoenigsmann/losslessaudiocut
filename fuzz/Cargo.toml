@@ -72,6 +72,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "adts"
+path = "fuzz_targets/adts.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "ac3"
 path = "fuzz_targets/ac3.rs"
 test = false

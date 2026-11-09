@@ -6,7 +6,7 @@ A lossless audio cutter in Rust: delete parts of a recording, join the rest
 or split it into tracks, without ever re-encoding lossy audio.
 
 Status: early development. WAV, AIFF, FLAC, Ogg (Vorbis, Opus, Speex), MP3,
-MP4/M4A (AAC, ALAC), AC-3 and Matroska/WebM (Opus) cutting work from the command
+MP4/M4A (AAC, ALAC), raw AAC (ADTS), AC-3 and Matroska/WebM (Opus) cutting work from the command
 line and in the wxWidgets GUI (waveform, zoom, select, delete, split into
 tracks, undo, export, playback of the result, scrubbing, playback speed, a
 track list with per-track tags). See

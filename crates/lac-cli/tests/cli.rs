@@ -504,6 +504,11 @@ fn codec_noise_is_noted() {
     for (name, note) in [
         ("mp4_aac_pns_44k.m4a", Some("perceptual noise substitution")),
         ("ac3_stereo_44k.ac3", Some("dither noise")),
+        (
+            "adts_aac_pns_44k.aac",
+            Some("perceptual noise substitution"),
+        ),
+        ("adts_aac_stereo_44k.aac", None),
         ("mp4_aac_stereo_44k.m4a", None),
     ] {
         let input = fixtures.join(name);

@@ -14,7 +14,8 @@ use lac_container::Container;
 use lac_core::{CutPlan, Tags, plan_cuts};
 
 /// Every format, with a fixture and its file extension.
-const FIXTURES: [&str; 13] = [
+const FIXTURES: [&str; 14] = [
+    "adts_aac_stereo_44k.aac",
     "ac3_stereo_44k.ac3",
     "mp4_alac_mono24_48k.m4a",
     "mp4_aac_stereo_44k.m4a",
@@ -165,10 +166,11 @@ fn check(name: &str, src: &[u8]) {
     let Some(probed) = ffprobe_tags(&tagged_file) else {
         return;
     };
-    // An ID3v2 tag in front of raw AC-3 is a convention, not a standard:
-    // ffmpeg 6.1 reports it, ffmpeg 9 ignores it (no tags at all). Our own
-    // reader checked the tags above; the audio is still compared below.
-    let ignored = name.ends_with(".ac3") && probed.is_empty();
+    // An ID3v2 tag in front of raw AC-3 or AAC is a convention, not a
+    // standard: ffmpeg 6.1 reports it, ffmpeg 9 ignores it (no tags at
+    // all). Our own reader checked the tags above; the audio is still
+    // compared below.
+    let ignored = (name.ends_with(".ac3") || name.ends_with(".aac")) && probed.is_empty();
     if !ignored {
         check_probed(name, &probed);
     }

@@ -36,8 +36,6 @@ pub struct FileType {
 }
 
 /// Everything the program opens, in the order of the open dialog.
-///
-/// Raw AAC in ADTS (`.aac`) is not supported yet, so it is not here.
 pub const FILE_TYPES: &[FileType] = &[
     FileType {
         name: "MP3 audio",
@@ -62,6 +60,15 @@ pub const FILE_TYPES: &[FileType] = &[
         by_extension: true,
         // System-defined (AVFoundation's AVFileTypeAC3).
         uti: "public.ac3-audio",
+    },
+    FileType {
+        name: "AAC audio (ADTS)",
+        extensions: &["aac"],
+        // audio/x-aac is the older name, still used by some systems.
+        mime_types: &["audio/aac", "audio/x-aac"],
+        by_extension: true,
+        // System-defined.
+        uti: "public.aac-audio",
     },
     FileType {
         name: "Ogg Vorbis audio",
@@ -203,10 +210,9 @@ mod tests {
                 assert!(m.starts_with("audio/"), "{m} of {}", t.name);
             }
         }
-        assert!(
-            desktop_mime_types()
-                .starts_with("audio/mpeg;audio/mp4;audio/x-m4a;audio/ac3;audio/ogg;")
-        );
+        assert!(desktop_mime_types().starts_with(
+            "audio/mpeg;audio/mp4;audio/x-m4a;audio/ac3;audio/aac;audio/x-aac;audio/ogg;"
+        ));
         assert!(desktop_mime_types().ends_with("audio/webm;"));
     }
 
@@ -221,7 +227,7 @@ mod tests {
     fn wildcard_lists_everything_first() {
         let w = dialog_wildcard();
         assert!(w.starts_with(
-            "Audio files|*.mp3;*.m4a;*.m4b;*.ac3;*.ogg;*.oga;*.opus;*.spx;*.flac;*.wav;*.aiff;*.aif;*.aifc;*.mka;*.webm;*.mkv;*.mp4|MP3 audio|*.mp3|"
+            "Audio files|*.mp3;*.m4a;*.m4b;*.ac3;*.aac;*.ogg;*.oga;*.opus;*.spx;*.flac;*.wav;*.aiff;*.aif;*.aifc;*.mka;*.webm;*.mkv;*.mp4|MP3 audio|*.mp3|"
         ));
         assert!(w.ends_with("|All files|*"));
         // Description and pattern alternate, so the count is even.

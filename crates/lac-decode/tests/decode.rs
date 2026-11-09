@@ -72,7 +72,9 @@ fn ffmpeg_file(path: &Path) -> Option<Vec<f32>> {
 }
 
 /// Fixtures whose timeline ffmpeg reproduces exactly.
-const EXACT: [&str; 27] = [
+const EXACT: [&str; 29] = [
+    "adts_aac_stereo_44k.aac",
+    "adts_aac_mono_22k.aac",
     "ac3_stereo_44k.ac3",
     "ac3_51_48k.ac3",
     "ac3_mono_32k.ac3",
@@ -226,6 +228,7 @@ fn every_fixture_decodes_to_the_index_length() {
         "mp3_notag_crc.mp3",
         "mp3_junk.mp3",
         "mp4_aac_pns_44k.m4a",
+        "adts_aac_pns_44k.aac",
     ] {
         let (pcm, report, total, channels) = ours(name);
         assert_eq!(report.frames, total, "{name}");
@@ -286,7 +289,9 @@ fn sink_can_stop_decoding() {
 }
 
 /// Every fixture with its chained and damaged variants.
-const ALL: [&str; 40] = [
+const ALL: [&str; 42] = [
+    "adts_aac_stereo_44k.aac",
+    "adts_aac_mono_22k.aac",
     "ac3_stereo_44k.ac3",
     "ac3_51_48k.ac3",
     "ac3_mono_32k.ac3",

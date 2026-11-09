@@ -29,6 +29,7 @@
                 <string>public.mp3</string>
                 <string>public.mpeg-4-audio</string>
                 <string>public.ac3-audio</string>
+                <string>public.aac-audio</string>
                 <string>org.xiph.ogg-audio</string>
                 <string>org.xiph.opus</string>
                 <string>org.xiph.speex</string>
