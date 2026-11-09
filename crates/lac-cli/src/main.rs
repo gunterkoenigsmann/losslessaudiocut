@@ -91,9 +91,11 @@ enum Command {
         /// Do not suggest track starts at changes of timbre.
         #[arg(long)]
         no_timbre: bool,
-        /// Do not suggest track starts at changes of key or harmony.
+        /// Also suggest track starts at changes of key or harmony. Off by
+        /// default: on real music it found few extra track starts but
+        /// many inside songs.
         #[arg(long)]
-        no_key: bool,
+        key: bool,
     },
     /// Print a shell completion script.
     ///
@@ -146,7 +148,7 @@ fn main() -> Result<()> {
             min_gap,
             min_pause,
             no_timbre,
-            no_key,
+            key,
         } => detect(
             &file,
             &DetectParams {
@@ -157,8 +159,8 @@ fn main() -> Result<()> {
                 } else {
                     DetectParams::default().min_novelty_db
                 },
-                min_key_distance: if no_key {
-                    f32::INFINITY
+                min_key_distance: if key {
+                    lac_analysis::KEY_DISTANCE
                 } else {
                     DetectParams::default().min_key_distance
                 },

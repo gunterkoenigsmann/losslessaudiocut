@@ -48,17 +48,36 @@
 //! - after every region inside the recording that lasts at least
 //!   [`DetectParams::min_track_gap_secs`], [`DetectParams::lead_in_secs`]
 //!   before the content resumes (so a fade-in or an attack is not cut),
+//!   provided the [`DetectParams::min_track_secs`] before the pause and after
+//!   it are at least [`DetectParams::min_track_content`] content (rain with
+//!   a few loud drops is no sequence of tracks),
 //! - where the band spectrum averaged over [`DetectParams::novelty_window_secs`]
 //!   before a frame differs by at least [`DetectParams::min_novelty_db`] from
 //!   the one after it, with both windows nearly all content: the next piece
 //!   of a gapless recording (a DJ mix, a live album). This is a simple form
-//!   of Foote's checkerboard novelty on the band spectrum.
+//!   of Foote's checkerboard novelty on the band spectrum. Verse and chorus
+//!   of one song differ as much, but they come back: the change only counts
+//!   when the window after it also differs from every window in the
+//!   [`DetectParams::recurrence_secs`] before it, and the window before it
+//!   from every window in that time after it.
+//!
+//! Of two suggestions closer than [`DetectParams::min_track_secs`] only the
+//! more confident one is kept.
+//!
+//! The defaults were tuned on about 30 h of albums glued together (their
+//! track boundaries known) and 15 h of talks, concerts and rain; the
+//! method and the numbers are in `docs/architecture.md`, section 8.
 
 use std::ops::Range;
 
 use lac_core::SamplePos;
 
 use crate::features::{BANDS, FLOOR_DB, Features};
+
+/// Threshold for [`DetectParams::min_key_distance`] when the key detector
+/// is turned on: the same melody on both sides stays below 0.08, a fifth
+/// apart gives about 0.3.
+pub const KEY_DISTANCE: f32 = 0.25;
 
 /// Tuning of [`detect`]. The defaults are meant for speech and music
 /// recordings; every field is in seconds or dB so it can be shown in a
@@ -125,8 +144,27 @@ pub struct DetectParams {
     /// before and after a frame from which a change of key or harmony
     /// suggests a new track, with the same windows as the timbre. Finds
     /// the next piece when the instruments stay the same. `f32::INFINITY`
-    /// turns this detector off.
+    /// (the default) turns this detector off: on a corpus of real albums
+    /// it found no track start the timbre missed but added false ones
+    /// inside songs; [`KEY_DISTANCE`] is the threshold to turn it on with.
     pub min_key_distance: f32,
+    /// How far (seconds) before and after a timbre or key change to look
+    /// for the same sound again. Sections of a song come back (the chorus
+    /// after the verse), a new piece does not repeat the last one: a
+    /// change only counts when the part after it differs from every
+    /// window in this time before it, and the part before it from every
+    /// window in this time after it. 0 compares only the two neighbouring
+    /// windows.
+    pub recurrence_secs: f32,
+    /// Shortest track (seconds): of two suggested track starts closer than
+    /// this, only the more confident one is kept. Keeps a talk with long
+    /// pauses or rain with a few loud drops from turning into dozens of
+    /// tracks.
+    pub min_track_secs: f32,
+    /// Share (0..1) of content frames a pause needs in the
+    /// [`DetectParams::min_track_secs`] before and after it to suggest a
+    /// track start: a track is mostly voice or music. 0 turns this off.
+    pub min_track_content: f32,
 }
 
 impl Default for DetectParams {
@@ -150,7 +188,10 @@ impl Default for DetectParams {
             lead_in_secs: 0.25,
             novelty_window_secs: 4.0,
             min_novelty_db: 6.0,
-            min_key_distance: 0.25,
+            min_key_distance: f32::INFINITY,
+            recurrence_secs: 60.0,
+            min_track_secs: 30.0,
+            min_track_content: 0.7,
         }
     }
 }
@@ -444,8 +485,13 @@ pub fn detect(f: &Features, p: &DetectParams) -> Detection {
     close_short_runs(&mut content, true, f.frames_for_secs(p.min_content_secs));
 
     let mut regions = Vec::new();
-    let mut splits = Vec::new();
+    let mut splits: Vec<SplitSuggestion> = Vec::new();
     let min_gap = f.frames_for_secs(p.min_track_gap_secs);
+    let track = f.frames_for_secs(p.min_track_secs);
+    let mut content_sum = vec![0usize; n + 1];
+    for (i, &c) in content.iter().enumerate() {
+        content_sum[i + 1] = content_sum[i] + usize::from(c);
+    }
     let lead_in = (f64::from(p.lead_in_secs.max(0.0)) * f64::from(f.sample_rate())) as SamplePos;
     for (is_content, r) in runs(&content) {
         if is_content {
@@ -475,7 +521,17 @@ pub fn detect(f: &Features, p: &DetectParams) -> Detection {
             level_db: level as f32,
         });
         let interior = r.start > 0 && r.end < n;
-        if interior && r.len() >= min_gap {
+        // A track is mostly content: rain with a few loud drops, or a
+        // fan with someone briefly talking, is no sequence of tracks.
+        let mostly_content = |a: usize, b: usize| {
+            b > a
+                && (content_sum[b] - content_sum[a]) as f32 >= p.min_track_content * (b - a) as f32
+        };
+        if interior
+            && r.len() >= min_gap
+            && mostly_content(r.start.saturating_sub(track), r.start)
+            && mostly_content(r.end, (r.end + track).min(n))
+        {
             splits.push(SplitSuggestion {
                 pos: range.end.saturating_sub(lead_in).max(range.start),
                 reason: SplitReason::Gap { gap: range },
@@ -485,16 +541,45 @@ pub fn detect(f: &Features, p: &DetectParams) -> Detection {
     }
 
     if p.min_novelty_db.is_finite() || p.min_key_distance.is_finite() {
-        timbre_changes(f, &content, thresholds.quiet_db, p, &mut splits);
+        splits.extend(timbre_changes(f, &content, thresholds.quiet_db, p));
     }
     splits.retain(|s| s.pos > 0 && s.pos < f.total_samples());
-    splits.sort_by_key(|s| s.pos);
-    splits.dedup_by_key(|s| s.pos);
+    let splits = keep_apart(splits, f, p);
     Detection {
         thresholds,
         regions,
         splits,
     }
+}
+
+/// Keeps the most confident suggestions at least
+/// [`DetectParams::min_track_secs`] (and one novelty window) apart, a pause
+/// winning a tie; returns them sorted by position.
+fn keep_apart(
+    mut splits: Vec<SplitSuggestion>,
+    f: &Features,
+    p: &DetectParams,
+) -> Vec<SplitSuggestion> {
+    let secs = p.min_track_secs.max(p.novelty_window_secs).max(0.0);
+    let min_dist = (f64::from(secs) * f64::from(f.sample_rate())) as SamplePos;
+    let is_gap = |s: &SplitSuggestion| matches!(s.reason, SplitReason::Gap { .. });
+    splits.sort_by(|a, b| {
+        b.confidence
+            .total_cmp(&a.confidence)
+            .then(is_gap(b).cmp(&is_gap(a)))
+            .then(a.pos.cmp(&b.pos))
+    });
+    let mut kept: Vec<SplitSuggestion> = Vec::new();
+    for s in splits {
+        if kept
+            .iter()
+            .all(|k| k.pos.abs_diff(s.pos) >= min_dist.max(1))
+        {
+            kept.push(s);
+        }
+    }
+    kept.sort_by_key(|s| s.pos);
+    kept
 }
 
 /// How far below the quiet threshold (dB) band powers still count for
@@ -509,9 +594,75 @@ fn confidence(value: f32, min: f32) -> f32 {
     (value / min / 2.0).clamp(0.0, 1.0)
 }
 
-/// Adds [`SplitReason::TimbreChange`] and [`SplitReason::KeyChange`]
-/// suggestions to `splits`, at least one novelty window away from every
-/// split already there.
+/// Mean band spectrum (dB) and chroma of the content frames in a span,
+/// from prefix sums, so that every window costs O(BANDS + 12).
+struct WindowMeans {
+    bands: Vec<[f64; BANDS]>,
+    chroma: Vec<[f64; 12]>,
+    content: Vec<usize>,
+    /// Content frames a window needs to be compared at all.
+    min_content: usize,
+}
+
+/// Mean band spectrum and chroma of one window.
+type Means = ([f64; BANDS], [f64; 12]);
+
+impl WindowMeans {
+    /// Prefix sums over `f`'s frames; pause frames are left out of the
+    /// means (a little noise at the edge of a window must not look like a
+    /// change), band values are floored at `band_floor`.
+    fn new(f: &Features, content: &[bool], band_floor: f32, min_content: usize) -> Self {
+        let n = f.frames().len();
+        let mut bands = vec![[0f64; BANDS]; n + 1];
+        let mut chroma = vec![[0f64; 12]; n + 1];
+        let mut count = vec![0usize; n + 1];
+        for (i, fr) in f.frames().iter().enumerate() {
+            let weight = if content[i] { 1.0 } else { 0.0 };
+            let prev = bands[i];
+            bands[i + 1] = std::array::from_fn(|b| {
+                prev[b] + weight * f64::from(fr.band_db(b).max(band_floor))
+            });
+            let prev = chroma[i];
+            chroma[i + 1] = std::array::from_fn(|c| prev[c] + weight * f64::from(fr.chroma(c)));
+            count[i + 1] = count[i] + usize::from(content[i]);
+        }
+        WindowMeans {
+            bands,
+            chroma,
+            content: count,
+            min_content,
+        }
+    }
+
+    /// The means of frames `a..b`, or `None` when fewer than
+    /// `min_content` of them are content (a pause or a fade).
+    fn get(&self, a: usize, b: usize) -> Option<Means> {
+        let c = self.content[b] - self.content[a];
+        if c < self.min_content.max(1) {
+            return None;
+        }
+        let c = c as f64;
+        Some((
+            std::array::from_fn(|k| (self.bands[b][k] - self.bands[a][k]) / c),
+            std::array::from_fn(|k| (self.chroma[b][k] - self.chroma[a][k]) / c),
+        ))
+    }
+}
+
+/// Timbre distance (dB, see [`SplitReason::TimbreChange`]) and chroma
+/// distance (0..1) of two windows.
+fn distances(x: &Means, y: &Means) -> (f32, f32) {
+    let d: [f64; BANDS] = std::array::from_fn(|b| y.0[b] - x.0[b]);
+    let mean = d.iter().sum::<f64>() / BANDS as f64;
+    let var = d.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / BANDS as f64;
+    let timbre = (var.sqrt() + 0.5 * mean.abs()) as f32;
+    (timbre, cosine_distance(&x.1, &y.1))
+}
+
+/// Finds [`SplitReason::TimbreChange`] and [`SplitReason::KeyChange`]
+/// candidates: peaks of the novelty between the windows before and after
+/// a frame, at least one window apart, that survive the recurrence test
+/// (see [`DetectParams::recurrence_secs`]).
 ///
 /// Band values are compared only down to [`INAUDIBLE_BELOW_QUIET_DB`] below
 /// `quiet_db`: what happens below that (dither, an encoder emptying a band,
@@ -521,94 +672,100 @@ fn timbre_changes(
     content: &[bool],
     quiet_db: f32,
     p: &DetectParams,
-    splits: &mut Vec<SplitSuggestion>,
-) {
-    let frames = f.frames();
-    let n = frames.len();
+) -> Vec<SplitSuggestion> {
+    let n = f.frames().len();
     let w = f.frames_for_secs(p.novelty_window_secs);
     if n < 2 * w {
-        return;
-    }
-    // Prefix sums of the band dB values and chroma of content frames and
-    // of the content mask, so each window mean costs O(BANDS + 12). Pause
-    // frames are left out of the means: a little noise at the edge of a
-    // window must not look like a change.
-    let mut sums = vec![[0f64; BANDS]; n + 1];
-    let mut chroma = vec![[0f64; 12]; n + 1];
-    let mut content_sum = vec![0usize; n + 1];
-    let band_floor = quiet_db - INAUDIBLE_BELOW_QUIET_DB;
-    for (i, fr) in frames.iter().enumerate() {
-        let weight = if content[i] { 1.0 } else { 0.0 };
-        let prev = sums[i];
-        sums[i + 1] =
-            std::array::from_fn(|b| prev[b] + weight * f64::from(fr.band_db(b).max(band_floor)));
-        let prev = chroma[i];
-        chroma[i + 1] = std::array::from_fn(|c| prev[c] + weight * f64::from(fr.chroma(c)));
-        content_sum[i + 1] = content_sum[i] + usize::from(content[i]);
+        return Vec::new();
     }
     // Both windows must be at least this much content, so that pauses
-    // (handled above) and fades do not count as a change.
+    // (handled by the gap rule) and fades do not count as a change.
     let min_content = (w as f64 * 0.9).ceil() as usize;
+    let means = WindowMeans::new(f, content, quiet_db - INAUDIBLE_BELOW_QUIET_DB, min_content);
+    // Each criterion as a multiple of its threshold; NaN (a threshold of
+    // infinity divided into 0) counts as 0.
+    let ratio = |(timbre, key): (f32, f32)| {
+        (
+            (timbre / p.min_novelty_db).max(0.0),
+            (key / p.min_key_distance).max(0.0),
+        )
+    };
     // (timbre novelty in dB, chroma distance) at every frame boundary.
     let novelty: Vec<(f32, f32)> = (0..=n)
         .map(|t| {
             if t < w || t + w > n {
                 return (0.0, 0.0);
             }
-            let (before, after) = (
-                content_sum[t] - content_sum[t - w],
-                content_sum[t + w] - content_sum[t],
-            );
-            if before < min_content || after < min_content {
-                return (0.0, 0.0);
+            match (means.get(t - w, t), means.get(t, t + w)) {
+                (Some(a), Some(b)) => distances(&a, &b),
+                _ => (0.0, 0.0),
             }
-            let d: [f64; BANDS] = std::array::from_fn(|b| {
-                (sums[t + w][b] - sums[t][b]) / after as f64
-                    - (sums[t][b] - sums[t - w][b]) / before as f64
-            });
-            let mean = d.iter().sum::<f64>() / BANDS as f64;
-            let var = d.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / BANDS as f64;
-            let timbre = (var.sqrt() + 0.5 * mean.abs()) as f32;
-            let a: [f64; 12] = std::array::from_fn(|c| chroma[t][c] - chroma[t - w][c]);
-            let b: [f64; 12] = std::array::from_fn(|c| chroma[t + w][c] - chroma[t][c]);
-            (timbre, cosine_distance(&a, &b))
         })
         .collect();
-
-    // Each criterion as a multiple of its threshold; a frame is a
-    // candidate when either reaches 1.
-    let ratio = |(timbre, key): (f32, f32)| {
-        let t = timbre / p.min_novelty_db;
-        let k = key / p.min_key_distance;
-        // NaN (a threshold of infinity divided into 0) counts as 0.
-        (t.max(0.0), k.max(0.0))
-    };
     let score = |t: usize| {
         let (a, b) = ratio(novelty[t]);
         a.max(b)
     };
-    // Greedy peak picking: strongest first, keeping a window's distance to
-    // every accepted split (including the gap splits).
+    // Greedy peak picking: strongest first, a window's distance apart.
     let mut candidates: Vec<usize> = (0..=n).filter(|&t| score(t) >= 1.0).collect();
     candidates.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(a.cmp(&b)));
-    let min_dist = f.frame_start(w);
+    let mut peaks: Vec<usize> = Vec::new();
     for t in candidates {
-        let pos = f.frame_start(t);
-        if splits.iter().all(|s| s.pos.abs_diff(pos) >= min_dist) {
-            let (timbre, key) = novelty[t];
-            let (rt, rk) = ratio(novelty[t]);
-            let reason = if rt >= rk {
-                SplitReason::TimbreChange { novelty_db: timbre }
-            } else {
-                SplitReason::KeyChange { distance: key }
-            };
-            splits.push(SplitSuggestion {
-                pos,
-                reason,
-                confidence: confidence(rt.max(rk), 1.0),
-            });
+        if peaks.iter().all(|&q| q.abs_diff(t) >= w) {
+            peaks.push(t);
         }
     }
+
+    // Recurrence: the smallest distance of the window after `t` to any
+    // window in the `l` frames before it, and of the window before `t` to
+    // any window in the `l` frames after it.
+    let l = if p.recurrence_secs > 0.0 {
+        f.frames_for_secs(p.recurrence_secs)
+    } else {
+        0
+    };
+    let step = f.frames_for_secs(0.5);
+    let mut out = Vec::new();
+    for t in peaks {
+        let (Some(before), Some(after)) = (means.get(t - w, t), means.get(t, t + w)) else {
+            continue;
+        };
+        let (mut timbre, mut key) = novelty[t];
+        // Windows ending at e, from t − l + w up to t − w (the one ending
+        // at t is the neighbour already compared).
+        let back = (t.saturating_sub(l)..=t.saturating_sub(w)).step_by(step);
+        let earlier = back.filter(|&e| e >= w && e + w <= t).map(|e| (e - w, e));
+        // Windows starting at s, from t + w on.
+        let fwd = (t + w..=(t + l).min(n)).step_by(step);
+        let later = fwd
+            .filter(|&s| s + w <= n && s + w <= t + l)
+            .map(|s| (s, s + w));
+        for ((a, b), other) in earlier
+            .map(|r| (r, &after))
+            .chain(later.map(|r| (r, &before)))
+        {
+            if let Some(m) = means.get(a, b) {
+                let (dt, dk) = distances(&m, other);
+                timbre = timbre.min(dt);
+                key = key.min(dk);
+            }
+        }
+        let (rt, rk) = ratio((timbre, key));
+        if rt.max(rk) < 1.0 {
+            continue;
+        }
+        let reason = if rt >= rk {
+            SplitReason::TimbreChange { novelty_db: timbre }
+        } else {
+            SplitReason::KeyChange { distance: key }
+        };
+        out.push(SplitSuggestion {
+            pos: f.frame_start(t),
+            reason,
+            confidence: confidence(rt.max(rk), 1.0),
+        });
+    }
+    out
 }
 
 /// `1 − cos` of the angle between `a` and `b`: 0 for the same direction,
@@ -842,6 +999,7 @@ mod tests {
         let s = recording(&[(10.0, &a), (10.0, &b)]);
         let key_only = DetectParams {
             min_novelty_db: f32::INFINITY,
+            min_key_distance: KEY_DISTANCE,
             ..DetectParams::default()
         };
         let d = detect(&analyse(&s), &key_only);
@@ -858,11 +1016,104 @@ mod tests {
             ..key_only.clone()
         };
         assert!(detect(&analyse(&s), &off).splits.is_empty());
+        // Off by default.
+        let d = detect(&analyse(&s), &DetectParams::default());
+        assert!(
+            d.splits
+                .iter()
+                .all(|s| !matches!(s.reason, SplitReason::KeyChange { .. })),
+            "{:?}",
+            d.splits
+        );
 
         // The same melody throughout: nothing.
         let s = recording(&[(20.0, &a)]);
         let d = detect(&analyse(&s), &DetectParams::default());
         assert!(d.splits.is_empty(), "{:?}", d.splits);
+    }
+
+    #[test]
+    fn sections_that_come_back_are_no_track_start() {
+        // Verse and chorus of one song: a dull and a bright section,
+        // alternating every 8 s. Each change is as large as the one
+        // between two pieces in gapless_change_of_timbre_is_a_track_start,
+        // but the sound after it was heard before (or the sound before it
+        // comes back), which a new piece never does. Real songs gave over
+        // a hundred false track starts per hour without this test.
+        let a = |n| tone(n, RATE, 110.0, 4, 0.4);
+        let b = |n| {
+            let t = tone(n, RATE, 880.0, 4, 0.3);
+            let h = noise(n, 0.02, 3);
+            t.iter().zip(h).map(|(x, y)| x + y).collect()
+        };
+        let parts: Vec<(f32, Generator)> = (0..8)
+            .map(|k| (8.0, if k % 2 == 0 { &a as Generator } else { &b }))
+            .collect();
+        let s = recording(&parts);
+        let d = detect(&analyse(&s), &DetectParams::default());
+        assert!(d.splits.is_empty(), "{:?}", d.splits);
+
+        // Comparing only the neighbouring windows finds every change,
+        // as far apart as the shortest track allows.
+        let neighbours_only = DetectParams {
+            recurrence_secs: 0.0,
+            min_track_secs: 0.0,
+            ..DetectParams::default()
+        };
+        let d = detect(&analyse(&s), &neighbours_only);
+        assert_eq!(d.splits.len(), 7, "{:?}", d.splits);
+    }
+
+    #[test]
+    fn track_starts_are_at_least_a_shortest_track_apart() {
+        // Talk with a 3 s pause every 10 s: each pause is a deletable
+        // region, but not each one a new track.
+        let talk = music(220.0);
+        let mut parts: Vec<(f32, Generator)> = Vec::new();
+        for _ in 0..9 {
+            parts.push((7.0, &talk));
+            parts.push((3.0, &silence));
+        }
+        parts.push((7.0, &talk));
+        let s = recording(&parts);
+        let d = detect(&analyse(&s), &DetectParams::default());
+        assert_eq!(d.regions.len(), 9, "{:?}", d.regions);
+        let min = DetectParams::default().min_track_secs;
+        assert!(!d.splits.is_empty());
+        for w in d.splits.windows(2) {
+            assert!(secs(w[1].pos - w[0].pos) >= min, "{:?}", d.splits);
+        }
+        assert!(d.splits.len() <= 3, "{:?}", d.splits);
+
+        let unlimited = DetectParams {
+            min_track_secs: 0.0,
+            ..DetectParams::default()
+        };
+        assert_eq!(detect(&analyse(&s), &unlimited).splits.len(), 9);
+    }
+
+    #[test]
+    fn pauses_between_short_blips_are_no_track_starts() {
+        // Rain: 4 s of quiet, then 1 s of something loud, over and over
+        // for two minutes. Each quiet stretch is a deletable pause, but
+        // the "tracks" between them would be mostly pause; real rain
+        // recordings got a track start every 30 s without this rule.
+        let blip = music(440.0);
+        let mut parts: Vec<(f32, Generator)> = Vec::new();
+        for _ in 0..24 {
+            parts.push((4.0, &silence));
+            parts.push((1.0, &blip));
+        }
+        let s = recording(&parts);
+        let d = detect(&analyse(&s), &DetectParams::default());
+        assert!(d.regions.len() >= 20, "{:?}", d.regions);
+        assert!(d.splits.is_empty(), "{:?}", d.splits);
+
+        let any_share = DetectParams {
+            min_track_content: 0.0,
+            ..DetectParams::default()
+        };
+        assert!(!detect(&analyse(&s), &any_share).splits.is_empty());
     }
 
     #[test]

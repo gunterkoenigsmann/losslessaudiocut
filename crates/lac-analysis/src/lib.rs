@@ -27,8 +27,8 @@ mod detect;
 mod features;
 
 pub use detect::{
-    DetectParams, Detection, FrameClass, Region, RegionKind, SplitReason, SplitSuggestion,
-    Thresholds, classify, detect,
+    DetectParams, Detection, FrameClass, KEY_DISTANCE, Region, RegionKind, SplitReason,
+    SplitSuggestion, Thresholds, classify, detect,
 };
 pub use features::{
     BANDS, CHROMA_HIGH_HZ, CHROMA_LOW_HZ, FLATNESS_HIGH_HZ, FLATNESS_LOW_HZ, FeatureExtractor,
