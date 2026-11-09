@@ -79,6 +79,7 @@ lac-cli`):
 | `packaging/macos/dmg.sh VERSION OUTDIR` | `.dmg` (needs Homebrew's `dylibbundler` and `librsvg`) |
 | `packaging/windows/package.ps1 -Version V -Arch A -FfmpegDir D -OutDir O` | zip and installer (needs Inno Setup 6.3+) |
 | `packaging/icons/generate.sh` | `losslessaudiocut.ico` from the SVG icon |
+| `crates/lac-gui/build.rs` (Windows targets only) | links the icon, the version information and `packaging/windows/losslessaudiocut.exe.manifest` (current control look, per-monitor DPI awareness) into `losslessaudiocut.exe` |
 | `packaging/shell-integration.sh LAC PREFIX [NAME]` | manpages and shell completions under `PREFIX/share` |
 
 ## Testing in CI
@@ -140,6 +141,6 @@ The packages are not code-signed yet, so the systems warn on first start:
   version of the build runner or newer, and both bundle more of FFmpeg than
   we use; an own minimal FFmpeg build would fix all three:
   [#61](https://github.com/gunterkoenigsmann/losslessaudiocut/issues/61).
-- `losslessaudiocut.exe` has no embedded icon, and the AppImage only
-  starts the GUI:
+- The AppImage only starts the GUI (the command line tool is inside but
+  not reachable without `--appimage-extract`):
   [#62](https://github.com/gunterkoenigsmann/losslessaudiocut/issues/62).

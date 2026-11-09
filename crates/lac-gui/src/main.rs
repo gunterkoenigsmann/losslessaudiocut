@@ -2349,3 +2349,9 @@ mod tests {
         assert_eq!(State::default().title(), "losslessaudiocut");
     }
 }
+
+/// The Windows resource script that `build.rs` compiles, included here so
+/// that its unit tests run on every platform.
+#[cfg(test)]
+#[path = "../build/resources.rs"]
+mod resources;

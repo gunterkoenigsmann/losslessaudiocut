@@ -172,6 +172,22 @@ jobs:
       # advances) fails here with its log instead of eating the job limit.
       - run: cargo test --workspace
         timeout-minutes: 10
+      # The GUI's Windows resources (crates/lac-gui/build.rs, issue #62):
+      # the version that Explorer shows must be the crate's. The icon and
+      # manifest are in the same resource script, so a linked version
+      # block means they are linked too.
+      - name: Check the version resource of losslessaudiocut.exe (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build -p lac-gui
+          $exe = (Resolve-Path target\debug\losslessaudiocut.exe).Path
+          $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
+          $want = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+            Where-Object name -eq 'lac-gui').version
+          Write-Host "ProductVersion '$($info.ProductVersion)', FileVersion '$($info.FileVersion)', crate '$want'"
+          if ($info.ProductVersion -ne $want) { throw "ProductVersion is not the crate version" }
+          if ($info.OriginalFilename -ne 'losslessaudiocut.exe') { throw "OriginalFilename is '$($info.OriginalFilename)'" }
       - name: Documentation
         run: cargo doc --workspace --no-deps
         env:

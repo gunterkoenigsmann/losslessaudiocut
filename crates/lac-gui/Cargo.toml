@@ -21,5 +21,10 @@ lac-playback.workspace = true
 # panes (toolbar and friends, see `panes.rs`).
 wxdragon = { version = "0.9.24", default-features = false, features = ["aui"] }
 
+[build-dependencies]
+# Compiles the Windows resources (icon, version, manifest) with rc.exe or
+# windres; see build.rs. Unused on other targets.
+embed-resource = "3.0.12"
+
 [lints]
 workspace = true
