@@ -50,9 +50,9 @@ pub struct Scene<'a> {
 /// marks within `near` samples of it counting as under the pointer.
 /// `None` where there is nothing to explain (plain waveform).
 ///
-/// Marks the user can grab come first (selection edges, playhead,
-/// cursor, track boundaries), then suggestions in their strips, then the
-/// area the pointer is in (deleted, selected).
+/// Marks the user can grab come first (track boundaries, which a press
+/// drags, then selection edges, playhead, cursor), then suggestions in
+/// their strips, then the area the pointer is in (deleted, selected).
 pub fn tooltip(scene: &Scene, pos: SamplePos, zone: Zone, near: SamplePos) -> Option<String> {
     let t = |p| format_samples(p, scene.rate);
     let close = |p: SamplePos| p.abs_diff(pos) <= near;
@@ -61,6 +61,20 @@ pub fn tooltip(scene: &Scene, pos: SamplePos, zone: Zone, near: SamplePos) -> Op
         return Some(format!(
             "Time ruler: {} under the pointer (View > Time ruler hides it)",
             t(pos)
+        ));
+    }
+    // First, as a press there drags the boundary (see the GUI).
+    if let Some(track) = ed
+        .tracks()
+        .into_iter()
+        .skip(1)
+        .find(|tr| close(tr.span.start))
+    {
+        let name = track.name.map(|n| format!(" \"{n}\"")).unwrap_or_default();
+        return Some(format!(
+            "Track {}{name} starts at {}; drag to move it",
+            track.number,
+            t(track.span.start)
         ));
     }
     if let Some(sel) = ed.selection() {
@@ -92,19 +106,6 @@ pub fn tooltip(scene: &Scene, pos: SamplePos, zone: Zone, near: SamplePos) -> Op
         return Some(format!(
             "Suggested track start {} (Edit > Split at suggested track starts)",
             t(s)
-        ));
-    }
-    if let Some(track) = ed
-        .tracks()
-        .into_iter()
-        .skip(1)
-        .find(|tr| close(tr.span.start))
-    {
-        let name = track.name.map(|n| format!(" \"{n}\"")).unwrap_or_default();
-        return Some(format!(
-            "Track {}{name} starts at {}",
-            track.number,
-            t(track.span.start)
         ));
     }
     if zone == Zone::Bottom
@@ -209,7 +210,18 @@ mod tests {
         e.clear_selection();
         let s = scene(&e, &[], &[]);
         let tip = tooltip(&s, 20_005, Zone::Lanes, 10).expect("boundary");
-        assert_eq!(tip, "Track 2 \"Encore\" starts at 0:20.000");
+        assert_eq!(
+            tip,
+            "Track 2 \"Encore\" starts at 0:20.000; drag to move it"
+        );
+        // A boundary at a selection edge is named as the boundary: a
+        // press there drags it.
+        e.select(19_000, 20_000);
+        let s = scene(&e, &[], &[]);
+        let tip = tooltip(&s, 20_000, Zone::Lanes, 10).expect("boundary");
+        assert!(tip.starts_with("Track 2"), "{tip}");
+        e.clear_selection();
+        let s = scene(&e, &[], &[]);
         let tip = tooltip(&s, 30_500, Zone::Lanes, 10).expect("deleted");
         assert!(tip.starts_with("Deleted 0:30.000–0:31.000"), "{tip}");
     }

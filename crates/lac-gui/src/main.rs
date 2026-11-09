@@ -346,6 +346,9 @@ struct State {
     ruler_height: std::cell::Cell<i32>,
     /// The waveform's tooltip as last set, so it is set only on changes.
     tooltip: String,
+    /// Whether the pointer shows that the track boundary under it can be
+    /// dragged, so its shape is only set on changes.
+    pointer_on_boundary: bool,
     /// The right button is down, and it is not yet known whether this is
     /// a click (the menu) or a scrub.
     right_press: Option<RightPress>,
@@ -2018,6 +2021,27 @@ fn update_tooltip(st: &mut State, panel: &Panel, x: f64, y: i32) {
     }
 }
 
+/// Shows a left-right arrow as the pointer over a track boundary, which
+/// can be dragged, and the normal pointer elsewhere.
+fn update_pointer_shape(st: &mut State, panel: &Panel, x: f64) {
+    let on_boundary = match (&st.view, &st.editor) {
+        (Some(v), Some(ed)) => {
+            let (pos, near) = pointer_at(v, x);
+            ed.track_start_near(pos, near).is_some()
+        }
+        _ => false,
+    };
+    if on_boundary != st.pointer_on_boundary {
+        st.pointer_on_boundary = on_boundary;
+        let stock = if on_boundary {
+            StockCursor::SizeWE
+        } else {
+            StockCursor::Arrow
+        };
+        panel.set_cursor(Cursor::from_stock(stock).as_ref());
+    }
+}
+
 /// Calls `f` with what the waveform shows (for its tooltips and menu)
 /// and the view; `None` until a file is read.
 fn with_scene<R>(st: &State, f: impl FnOnce(&hover::Scene, &WaveformView) -> R) -> Option<R> {
@@ -2074,8 +2098,13 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
                 };
                 let pos = v.x_to_sample(x);
                 st.drag_scrub_tried = false;
+                let (_, near) = pointer_at(v, x);
+                let boundary = ed.track_start_near(pos, near);
                 if ev.shift_down() {
                     ed.begin_extend(pos);
+                } else if let Some(index) = boundary {
+                    // On a track boundary: drag it (issue #84).
+                    ed.begin_moving_track_start(index);
                 } else {
                     ed.begin_drag(pos);
                 }
@@ -2119,10 +2148,16 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
                     }
                     return;
                 }
-                if !st.editor.as_ref().is_some_and(Editor::dragging) {
-                    // Just moving: explain what is under the pointer.
+                let held = st
+                    .editor
+                    .as_ref()
+                    .is_some_and(|ed| ed.dragging() || ed.moving_track_start().is_some());
+                if !held {
+                    // Just moving: explain what is under the pointer, and
+                    // show that a track boundary can be dragged.
                     let y = e_y(&e);
                     update_tooltip(st, &p, x, y);
+                    update_pointer_shape(st, &p, x);
                     return;
                 }
                 let (Some(v), Some(ed)) = (&mut st.view, &mut st.editor) else {
@@ -2135,8 +2170,13 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
                     v.scroll_by(x - width);
                 }
                 let pos = v.x_to_sample(x.clamp(0.0, width));
-                ed.drag_to(pos);
-                let moved = ed.selection().is_some();
+                let moved = if ed.moving_track_start().is_some() {
+                    ed.move_track_start_to(pos);
+                    true
+                } else {
+                    ed.drag_to(pos);
+                    ed.selection().is_some()
+                };
                 // Scrub the dragged edge, once the pointer has moved: a
                 // plain click stays silent.
                 if st.scrub.is_some() {
@@ -2170,10 +2210,20 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
                 let (Some(v), Some(ed)) = (&st.view, &mut st.editor) else {
                     return;
                 };
+                let pos = v.x_to_sample(x.clamp(0.0, f64::from(v.width())));
+                if ed.moving_track_start().is_some() {
+                    ed.move_track_start_to(pos);
+                    if !ed.end_moving_track_start() {
+                        // Not moved: a plain click near the boundary puts
+                        // the cursor.
+                        ed.begin_drag(pos);
+                        ed.end_drag();
+                    }
+                }
                 if ed.dragging() {
                     // A click without movement ends with an empty range,
                     // i.e. no selection.
-                    ed.drag_to(v.x_to_sample(x.clamp(0.0, f64::from(v.width()))));
+                    ed.drag_to(pos);
                     ed.end_drag();
                 }
                 if st.scrub.as_ref().is_some_and(|s| s.selecting) {
