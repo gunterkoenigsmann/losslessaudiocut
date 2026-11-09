@@ -65,6 +65,7 @@ use lac_app::layout::Pane;
 use lac_app::minimap::Minimap;
 use lac_app::peak_cache::PeakCache;
 use lac_app::peak_job::{JobStatus, PeakJob};
+use lac_app::playback::End;
 use lac_app::recent_files::RecentFiles;
 use lac_app::track_list::Bound;
 use lac_app::waveform::{DrawMode, WaveformView};
@@ -106,6 +107,8 @@ const ID_RULER: Id = ID_HIGHEST + 24;
 const ID_SUGGESTED_SPLITS: Id = ID_HIGHEST + 25;
 const ID_SUGGESTED_PAUSES: Id = ID_HIGHEST + 26;
 const ID_CHAINED_LINKS: Id = ID_HIGHEST + 27;
+const ID_PLAY_TRACK_START: Id = ID_HIGHEST + 28;
+const ID_PLAY_TRACK_END: Id = ID_HIGHEST + 29;
 /// The waveform's right-click menu: entry `i` has id `ID_CONTEXT_FIRST + i`
 /// (above the panes' ids, `ID_HIGHEST + 100` on).
 const ID_CONTEXT_FIRST: Id = ID_HIGHEST + 200;
@@ -162,6 +165,16 @@ const TOOLS: &[Tool] = &[
         id: ID_PLAY,
         icon: Icon::Play,
         tip: "Play or stop (Space)",
+    },
+    Tool::Button {
+        id: ID_PLAY_TRACK_START,
+        icon: Icon::PlayTrackStart,
+        tip: "Play the first 3 seconds of the track (Ctrl+Shift+B)",
+    },
+    Tool::Button {
+        id: ID_PLAY_TRACK_END,
+        icon: Icon::PlayTrackEnd,
+        tip: "Play the last 3 seconds of the track (Ctrl+Shift+E)",
     },
     Tool::Speed {
         tip: "Playback speed (Ctrl+Up, Ctrl+Down; Ctrl+1 for normal)",
@@ -463,6 +476,17 @@ impl State {
             t => t.min(tl.len() - 1),
         };
         self.play_timeline(tl, start)
+    }
+
+    /// Plays the first or last seconds (`end`) of the track where
+    /// playback would start (the selection or the cursor). Returns an
+    /// error message.
+    fn play_track_end(&mut self, end: End) -> Option<String> {
+        let (Some(ed), Some(rate)) = (&self.editor, self.rate) else {
+            return Some("open a file first".to_string());
+        };
+        let tl = lac_app::playback::track_excerpt(ed, ed.play_from(), end, rate);
+        self.play_excerpt(tl).err()
     }
 
     /// Plays `tl` from its start and stops at its end: an excerpt from
@@ -1209,6 +1233,16 @@ fn menu_bar(options: Options) -> MenuBar {
             "Cursor to &start\tHome",
             "Put the cursor at the beginning",
         )
+        .append_item(
+            ID_PLAY_TRACK_START,
+            "Play track &beginning\tCtrl+Shift+B",
+            "Play the first 3 seconds of the track at the cursor or selection",
+        )
+        .append_item(
+            ID_PLAY_TRACK_END,
+            "Play track &end\tCtrl+Shift+E",
+            "Play the last 3 seconds of the track at the cursor or selection",
+        )
         .append_separator()
         .append_item(ID_FASTER, "&Faster\tCtrl+Up", "Play faster (up to 3×)")
         .append_item(
@@ -1333,6 +1367,16 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
     } else if id == ID_EXIT {
         f.close(false);
         return;
+    } else if id == ID_PLAY_TRACK_START || id == ID_PLAY_TRACK_END {
+        let end = if id == ID_PLAY_TRACK_START {
+            End::Start
+        } else {
+            End::End
+        };
+        let msg = state.borrow_mut().play_track_end(end);
+        if let Some(msg) = msg {
+            report(&f, &msg);
+        }
     } else if id == ID_PLAY {
         let msg = state.borrow_mut().toggle_play();
         if let Some(msg) = msg {
@@ -2887,6 +2931,25 @@ mod tests {
             Some("open a file first")
         );
         assert_eq!(context_command(&mut st, 2), None, "no such entry");
+    }
+
+    #[test]
+    fn playing_a_track_end_explains_why_nothing_plays() {
+        let mut st = State::default();
+        assert_eq!(
+            st.play_track_end(End::Start).as_deref(),
+            Some("open a file first")
+        );
+        st.editor = Some(Editor::new(60_000));
+        st.rate = Some(1000);
+        if let Some(e) = &mut st.editor {
+            e.select_all();
+            e.delete_selection();
+        }
+        assert_eq!(
+            st.play_track_end(End::End).as_deref(),
+            Some("all of it is deleted; nothing to play")
+        );
     }
 
     #[test]
