@@ -264,6 +264,12 @@ impl Source {
         self.container.tags()
     }
 
+    /// The parts the file marks as tracks, with their tags; empty for most
+    /// files (see [`lac_container::Container::chapters`]).
+    pub fn chapters(&self) -> &[lac_container::Chapter] {
+        self.container.chapters()
+    }
+
     /// Writes the part of the source selected by `request` to `output`,
     /// without re-encoding, and reports what each kept range became. The
     /// file gets `tags` if given, else it keeps the source's tags.

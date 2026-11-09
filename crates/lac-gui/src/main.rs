@@ -52,6 +52,7 @@ use std::time::{Duration, Instant};
 use icons::Icon;
 use lac_analysis::{DetectParams, Detection, RegionKind};
 use lac_app::analysis_job::{AnalysisJob, AnalysisStatus};
+use lac_app::chapters::{Chapter, SuggestedStart, suggested_starts};
 use lac_app::detail::{Detail, DetailLoader};
 use lac_app::editor::{Editor, Edits};
 use lac_app::export_job::{ExportJob, default_output, describe_outcomes, track_tasks};
@@ -294,6 +295,9 @@ struct State {
     drag_scrub_tried: bool,
     /// The file's tags, once the peak job has opened it.
     tags: Option<Arc<Tags>>,
+    /// The parts the file marks as tracks (the links of a chained Ogg
+    /// file), with their tags; offered as suggested track starts.
+    chapters: Arc<[Chapter]>,
     /// The track list under the waveform.
     grid: Option<Grid>,
     /// The dockable panes around the waveform.
@@ -349,6 +353,29 @@ impl State {
         self.analysis_error = None;
         self.detection = None;
         self.tags = None;
+        self.chapters = Arc::default();
+    }
+
+    /// The suggested track starts: the file's own (chained Ogg links, with
+    /// their tags) and the analysis' (once it is done) that are not the
+    /// same boundary; see [`lac_app::chapters::suggested_starts`].
+    fn suggested_starts(&self) -> Vec<SuggestedStart> {
+        let detected = self
+            .detection
+            .iter()
+            .flat_map(|d| d.splits.iter().map(|s| s.pos));
+        suggested_starts(&self.chapters, detected, self.rate.unwrap_or(1))
+    }
+
+    /// For the status bar after reading a chained file: its links are
+    /// offered as tracks.
+    fn chapter_note(&self) -> String {
+        match self.chapters.len() {
+            0 | 1 => String::new(),
+            n => format!(
+                "; {n} chained streams, offered as track starts (Edit > Split at suggested track starts)"
+            ),
+        }
     }
 
     /// The track list's rows, empty until the file is read.
@@ -681,13 +708,13 @@ impl State {
             }
             AnalysisStatus::Done { detection, .. } => {
                 self.analysis = None;
-                let msg = format!(
-                    "found {} pause(s), {} track start(s) (Edit menu)",
-                    detection.regions.len(),
-                    detection.splits.len()
-                );
+                let pauses = detection.regions.len();
                 self.detection = Some(detection);
-                Some(msg)
+                // Counts a chained file's link starts too.
+                Some(format!(
+                    "found {pauses} pause(s), {} track start(s) (Edit menu)",
+                    self.suggested_starts().len()
+                ))
             }
             AnalysisStatus::Failed(e) => {
                 self.analysis = None;
@@ -701,10 +728,13 @@ impl State {
     /// Edit > Split at suggested track starts / Delete suggested pauses,
     /// each one undoable step. Returns the message for the status bar.
     fn apply_suggestions(&mut self, id: Id) -> String {
-        let Some(e) = &mut self.editor else {
+        if self.editor.is_none() {
             return "open a file first".to_string();
-        };
-        let Some(d) = &self.detection else {
+        }
+        // A chained file's links are known from the start; the analysis'
+        // suggestions join them when it is done.
+        let have_chapters = id == ID_SUGGESTED_SPLITS && !self.chapters.is_empty();
+        if self.detection.is_none() && !have_chapters {
             return match &self.analysis_error {
                 Some(err) => format!("no suggestions: {err}"),
                 None => format!(
@@ -712,13 +742,18 @@ impl State {
                     self.analysis_percent
                 ),
             };
+        }
+        let starts = self.suggested_starts();
+        let tags = self.tags.clone().unwrap_or_default();
+        let Some(e) = &mut self.editor else {
+            return "open a file first".to_string();
         };
         if id == ID_SUGGESTED_SPLITS {
-            match e.split_at_all(d.splits.iter().map(|s| s.pos)) {
+            match e.split_at_suggestions(&starts, &tags) {
                 0 => "no new track starts suggested".to_string(),
                 n => format!("added {n} track start(s); Ctrl+Z takes them back"),
             }
-        } else {
+        } else if let Some(d) = &self.detection {
             match e.delete_ranges(d.regions.iter().map(|r| r.range.clone())) {
                 0 => "no suggested pauses left to delete".to_string(),
                 n => format!(
@@ -727,6 +762,9 @@ impl State {
                         .map_or_else(|| format!("{n} samples"), |r| format_samples(n, r))
                 ),
             }
+        } else {
+            // Ruled out above: pauses come from the analysis only.
+            "no suggested pauses left to delete".to_string()
         }
     }
 
@@ -740,6 +778,9 @@ impl State {
         }
         if u.tags.is_some() {
             self.tags = u.tags;
+        }
+        if let Some(c) = u.chapters {
+            self.chapters = c;
         }
         if let Some(p) = u.peaks {
             if self.view.is_none() {
@@ -761,15 +802,20 @@ impl State {
             }
             JobStatus::Done(report) if report.warnings.is_empty() => {
                 self.job = None;
+                let note = self.chapter_note();
                 if u.cached {
-                    format!("{name} (waveform from cache)")
+                    format!("{name} (waveform from cache){note}")
                 } else {
-                    name
+                    format!("{name}{note}")
                 }
             }
             JobStatus::Done(report) => {
                 self.job = None;
-                format!("{name}: {}", report.warnings.join("; "))
+                format!(
+                    "{name}: {}{}",
+                    report.warnings.join("; "),
+                    self.chapter_note()
+                )
             }
             JobStatus::Failed(msg) => {
                 self.job = None;
@@ -1934,13 +1980,18 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
                     SUGGESTION_MARK,
                 );
             }
-            let split = editor.map_or(&[][..], Editor::splits);
-            dc.set_pen(SUGGESTED_SPLIT, 2, PenStyle::Solid);
-            for s in d.splits.iter().filter(|s| !split.contains(&s.pos)) {
-                let x = view.sample_to_x(s.pos).round();
-                if (0.0..f64::from(view.width())).contains(&x) {
-                    dc.draw_line(x as i32, 0, x as i32, 2 * SUGGESTION_MARK);
-                }
+        }
+        // The chained links' starts are there before the analysis is done.
+        let split = editor.map_or(&[][..], Editor::splits);
+        dc.set_pen(SUGGESTED_SPLIT, 2, PenStyle::Solid);
+        for s in st
+            .suggested_starts()
+            .iter()
+            .filter(|s| !split.contains(&s.pos))
+        {
+            let x = view.sample_to_x(s.pos).round();
+            if (0.0..f64::from(view.width())).contains(&x) {
+                dc.draw_line(x as i32, 0, x as i32, 2 * SUGGESTION_MARK);
             }
         }
         // Track boundaries (dashed) and labels at the top of each track.
@@ -2174,6 +2225,43 @@ mod tests {
         assert!(e.undo());
         assert!(e.deleted().is_empty(), "pauses come back in one step");
         assert_eq!(e.splits(), [7000]);
+    }
+
+    #[test]
+    fn chained_links_are_suggested_before_the_analysis_is_done() {
+        let titled = |t: &str| Tags {
+            title: Some(t.into()),
+            ..Tags::default()
+        };
+        let mut st = State {
+            editor: Some(Editor::new(10_000)),
+            rate: Some(1000),
+            tags: Some(Arc::new(titled("One"))),
+            chapters: Arc::from(vec![
+                Chapter {
+                    start: 0,
+                    tags: titled("One"),
+                },
+                Chapter {
+                    start: 4000,
+                    tags: titled("Two"),
+                },
+            ]),
+            ..State::default()
+        };
+        assert!(st.chapter_note().contains("2 chained streams"));
+        assert_eq!(
+            st.apply_suggestions(ID_SUGGESTED_PAUSES),
+            "still looking for pauses and track starts (0 %)",
+            "pauses need the analysis"
+        );
+        assert_eq!(
+            st.apply_suggestions(ID_SUGGESTED_SPLITS),
+            "added 1 track start(s); Ctrl+Z takes them back"
+        );
+        let e = st.editor.as_ref().expect("set above");
+        assert_eq!(e.splits(), [4000]);
+        assert_eq!(e.tracks()[1].name.as_deref(), Some("Two"));
     }
 
     #[test]

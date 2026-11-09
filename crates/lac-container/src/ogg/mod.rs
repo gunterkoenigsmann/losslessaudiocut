@@ -147,6 +147,9 @@ pub struct OggFile {
     index: PacketIndex,
     /// Tags of the first link.
     tags: Tags,
+    /// Start and tags of each link with audible packets, if there are
+    /// several; empty for a single link.
+    chapters: Vec<crate::Chapter>,
     warnings: Vec<String>,
 }
 
@@ -223,25 +226,47 @@ impl OggFile {
         }
         let index = PacketIndex::new(info, packets)
             .map_err(|e| ContainerError::InvalidPlan(format!("internal index error: {e}")))?;
-        let tags = match links[0].headers.get(1) {
-            Some(h) => {
+        // Each link's comment header; the first link's are the file's tags.
+        let link_tags = links
+            .iter()
+            .map(|l| {
+                let Some(h) = l.headers.get(1) else {
+                    return Ok(Tags::default());
+                };
                 let bytes = read_pieces(r, h)?;
-                match CommentHeader::parse(links[0].info.kind, &bytes) {
+                Ok(match CommentHeader::parse(l.info.kind, &bytes) {
                     Some(c) => c.comment.tags(),
                     None => {
-                        warnings.push("the comment header is not readable".into());
+                        warnings.push("a comment header is not readable".into());
                         Tags::default()
                     }
-                }
+                })
+            })
+            .collect::<Result<Vec<Tags>>>()?;
+        let tags = link_tags[0].clone();
+        // A link starts at its first index entry. Links without audible
+        // packets have none and are no part of their own.
+        let mut chapters: Vec<crate::Chapter> = Vec::new();
+        for (entry, &raw_i) in entry_raw.iter().enumerate() {
+            let link = raw[raw_i].link;
+            let first_of_link = entry == 0 || raw[entry_raw[entry - 1]].link != link;
+            if first_of_link {
+                chapters.push(crate::Chapter {
+                    start: index.packets()[entry].first_sample,
+                    tags: link_tags[link].clone(),
+                });
             }
-            None => Tags::default(),
-        };
+        }
+        if chapters.len() < 2 {
+            chapters.clear();
+        }
         Ok(Self {
             links,
             raw,
             entry_raw,
             index,
             tags,
+            chapters,
             warnings,
         })
     }
@@ -249,6 +274,13 @@ impl OggFile {
     /// The tags of the first link (see the module documentation).
     pub fn tags(&self) -> &Tags {
         &self.tags
+    }
+
+    /// Start and tags of each link, when the file is a chain of several:
+    /// stream rippers start a link per song, with its title in the link's
+    /// comment header. Empty for a file of one link.
+    pub fn chapters(&self) -> &[crate::Chapter] {
+        &self.chapters
     }
 
     /// The codec of the audio stream.
@@ -1062,10 +1094,15 @@ mod tests {
     /// Pages of a Speex stream with `n` audio packets of `len` bytes, each
     /// filled with its packet number.
     fn speex_stream(serial: u32, n: u8, len: usize) -> Vec<u8> {
+        titled_speex_stream(serial, n, len, "Title")
+    }
+
+    /// Like [`speex_stream`], with `title` in the comment header.
+    fn titled_speex_stream(serial: u32, n: u8, len: usize, title: &str) -> Vec<u8> {
         let mut p = Paginator::new(serial);
         p.push(&speex_header(), 0);
         p.flush();
-        p.push(&speex_comment("Title"), 0);
+        p.push(&speex_comment(title), 0);
         p.flush();
         for i in 0..n {
             p.push(&vec![i; len], (i64::from(i) + 1) * 320);
@@ -1166,6 +1203,34 @@ mod tests {
         let f = open(&bytes);
         assert_eq!(f.links(), 2);
         assert_eq!(f.index().total_samples(), 7 * 320);
+    }
+
+    #[test]
+    fn links_are_chapters_with_their_own_titles() {
+        let bytes = [
+            titled_speex_stream(1, 3, 10, "One"),
+            titled_speex_stream(2, 4, 10, "Two"),
+            titled_speex_stream(3, 2, 10, "Three"),
+        ]
+        .concat();
+        let f = open(&bytes);
+        let got: Vec<(u64, Option<&str>)> = f
+            .chapters()
+            .iter()
+            .map(|c| (c.start, c.tags.title.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (0, Some("One")),
+                (3 * 320, Some("Two")),
+                (7 * 320, Some("Three"))
+            ]
+        );
+        // The file's tags are the first link's.
+        assert_eq!(f.tags().title.as_deref(), Some("One"));
+        // One link is no chapter list.
+        assert!(open(&speex_stream(1, 3, 10)).chapters().is_empty());
     }
 
     #[test]

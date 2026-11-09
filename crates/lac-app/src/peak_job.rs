@@ -21,6 +21,7 @@ use lac_decode::{DecodeError, DecodeReport, Flow};
 use lac_peaks::PeakSummary;
 
 use crate::Source;
+use crate::chapters::Chapter;
 use crate::peak_cache::PeakCache;
 
 /// Where a [`PeakJob`] is.
@@ -53,6 +54,9 @@ pub struct JobUpdate {
     /// The file's tags, `None` until the file is open. Shared, because
     /// every poll copies the update and tags can hold pictures.
     pub tags: Option<Arc<Tags>>,
+    /// The parts the file marks as tracks (see [`Source::chapters`]),
+    /// `None` until the file is open.
+    pub chapters: Option<Arc<[Chapter]>>,
 }
 
 /// A background thread building the waveform summary of one file.
@@ -83,6 +87,7 @@ impl PeakJob {
             cached: false,
             info: None,
             tags: None,
+            chapters: None,
         }));
         let cancel = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -157,6 +162,7 @@ fn run(
     // Become visible with the first publication below.
     lock(shared).info = Some(source.info());
     lock(shared).tags = Some(Arc::new(source.tags().clone()));
+    lock(shared).chapters = Some(source.chapters().into());
     if let Some((peaks, warnings)) = cache.and_then(|c| c.load(&source)) {
         let report = DecodeReport {
             frames: peaks.total_samples(),
@@ -221,6 +227,19 @@ mod tests {
         let info = u.info.expect("info");
         assert_eq!((info.sample_rate, info.channels), (44_100, 2));
         assert!(u.tags.expect("tags").is_empty(), "the fixture has none");
+        assert!(u.chapters.expect("chapters").is_empty(), "one part");
+    }
+
+    #[test]
+    fn publishes_the_links_of_a_chained_file() {
+        let u = PeakJob::start(fixture("ogg_opus_chained.opus"), Duration::ZERO, None).wait();
+        let starts: Vec<u64> = u
+            .chapters
+            .expect("chapters")
+            .iter()
+            .map(|c| c.start)
+            .collect();
+        assert_eq!(starts, [0, 24_000], "two links, the first 0.5 s long");
     }
 
     #[test]
