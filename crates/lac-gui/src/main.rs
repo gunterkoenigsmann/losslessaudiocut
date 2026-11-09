@@ -66,6 +66,7 @@ use lac_app::layout::Pane;
 use lac_app::minimap::Minimap;
 use lac_app::peak_cache::PeakCache;
 use lac_app::peak_job::{JobStatus, PeakJob};
+use lac_app::perspective::Perspective;
 use lac_app::playback::End;
 use lac_app::recent_files::RecentFiles;
 use lac_app::track_list::Bound;
@@ -110,6 +111,9 @@ const ID_SUGGESTED_PAUSES: Id = ID_HIGHEST + 26;
 const ID_CHAINED_LINKS: Id = ID_HIGHEST + 27;
 const ID_PLAY_TRACK_START: Id = ID_HIGHEST + 28;
 const ID_PLAY_TRACK_END: Id = ID_HIGHEST + 29;
+/// View > Perspective: entry `i` of [`Perspective::ALL`] has id
+/// `ID_PERSPECTIVE_FIRST + i` (up to `ID_HIGHEST + 35`).
+const ID_PERSPECTIVE_FIRST: Id = ID_HIGHEST + 30;
 /// The waveform's right-click menu: entry `i` has id `ID_CONTEXT_FIRST + i`
 /// (above the panes' ids, `ID_HIGHEST + 100` on).
 const ID_CONTEXT_FIRST: Id = ID_HIGHEST + 200;
@@ -178,7 +182,7 @@ const TOOLS: &[Tool] = &[
         tip: "Play the last 3 seconds of the track (Ctrl+Shift+E)",
     },
     Tool::Speed {
-        tip: "Playback speed (Ctrl+Up, Ctrl+Down; Ctrl+1 for normal)",
+        tip: "Playback speed (Ctrl+Up, Ctrl+Down; Ctrl+Shift+N for normal)",
     },
     Tool::Gap,
     Tool::Button {
@@ -1256,7 +1260,7 @@ fn menu_bar(options: Options) -> MenuBar {
         )
         .append_item(
             ID_NORMAL_SPEED,
-            "&Normal speed\tCtrl+1",
+            "&Normal speed\tCtrl+Shift+N",
             "Play at normal speed",
         )
         .append_check_item(
@@ -1278,22 +1282,28 @@ fn menu_bar(options: Options) -> MenuBar {
         )
         .append_item(ID_ZOOM_OUT, "Zoom &out\tCtrl+-", "Show more time")
         .append_item(ID_ZOOM_FIT, "Zoom to &fit\tCtrl+0", "Show the whole file")
-        .append_check_item(
-            ID_RULER,
-            "Time &ruler",
-            "Show the time scale along the bottom of the waveform",
-        )
-        .append_separator();
-    let view = Pane::ALL
-        .into_iter()
-        .fold(view, |m, p| {
-            m.append_check_item(
-                panes::menu_id(p),
-                &panes::menu_label(p),
-                panes::menu_help(p),
-            )
-        })
         .build();
+    // The builder takes no submenus; the rest is appended to the menu.
+    view.append_submenu(
+        perspective_menu(),
+        "&Perspective",
+        "Views of the selection's edges in context",
+    );
+    view.append(
+        ID_RULER,
+        "Time &ruler",
+        "Show the time scale along the bottom of the waveform",
+        ItemKind::Check,
+    );
+    view.append_separator();
+    for p in Pane::ALL {
+        view.append(
+            panes::menu_id(p),
+            &panes::menu_label(p),
+            panes::menu_help(p),
+            ItemKind::Check,
+        );
+    }
     let bar = MenuBar::builder()
         .append(file, "&File")
         .append(edit, "&Edit")
@@ -1312,6 +1322,31 @@ fn bind_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
     let state = Rc::clone(state);
     let (f, panel) = (*frame, *panel);
     frame.on_menu(move |e| command(&f, &panel, &state, e.get_id(), e.is_checked()));
+}
+
+/// View > Perspective: Ctrl+1 to Ctrl+6 show the whole file or the
+/// selection's edges in context (issue #100).
+fn perspective_menu() -> Menu {
+    Perspective::ALL
+        .iter()
+        .enumerate()
+        .fold(Menu::builder(), |m, (i, p)| {
+            m.append_item(
+                ID_PERSPECTIVE_FIRST + i as Id,
+                &format!("{}\tCtrl+{}", p.label(), i + 1),
+                &format!(
+                    "Zoom to this part, with {} s around the selection's edges",
+                    lac_app::perspective::CONTEXT_SECONDS
+                ),
+            )
+        })
+        .build()
+}
+
+/// The perspective that View > Perspective command `id` shows.
+fn perspective_of(id: Id) -> Option<Perspective> {
+    let i = usize::try_from(id.checked_sub(ID_PERSPECTIVE_FIRST)?).ok()?;
+    Perspective::ALL.get(i).copied()
 }
 
 /// Runs command `id`, from the menu or the toolbar. `checked` is the new
@@ -1339,6 +1374,12 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
             && let Some(path) = dialog.get_path()
         {
             open_file(&f, state, PathBuf::from(path));
+        }
+    } else if let Some(p) = perspective_of(id) {
+        let mut st = state.borrow_mut();
+        let st = &mut *st;
+        if let (Some(v), Some(ed), Some(rate)) = (&mut st.view, &st.editor, st.rate) {
+            v.zoom_exactly_to(&p.range(ed.total(), rate, ed.selection(), ed.cursor()));
         }
     } else if let Some(i) = context_index(id) {
         let msg = context_command(&mut state.borrow_mut(), i);
@@ -3013,6 +3054,19 @@ mod tests {
             st.play_track_end(End::End).as_deref(),
             Some("all of it is deleted; nothing to play")
         );
+    }
+
+    #[test]
+    fn perspective_ids_map_to_the_six_perspectives() {
+        for (i, p) in Perspective::ALL.iter().enumerate() {
+            let id = ID_PERSPECTIVE_FIRST + i as Id;
+            assert_eq!(perspective_of(id), Some(*p));
+            assert_eq!(panes::pane_for(id), None, "{id} toggles a pane");
+            assert_eq!(recent::index_of(id), None);
+        }
+        assert_eq!(perspective_of(ID_PERSPECTIVE_FIRST + 6), None);
+        assert_eq!(perspective_of(ID_PLAY_TRACK_END), None);
+        const { assert!(ID_PERSPECTIVE_FIRST + 6 <= recent::ID_CLEAR) };
     }
 
     #[test]
