@@ -32,7 +32,7 @@ pub use detect::{
 };
 pub use features::{
     BANDS, CHROMA_HIGH_HZ, CHROMA_LOW_HZ, FLATNESS_HIGH_HZ, FLATNESS_LOW_HZ, FeatureExtractor,
-    Features, Frame, hop_for_rate,
+    Features, FeaturesFormatError, Frame, hop_for_rate,
 };
 
 pub use lac_core::SamplePos;
