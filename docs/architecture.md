@@ -283,7 +283,10 @@ them, so we must too:
   like the analysis' suggestions; splitting there gives the track the
   link's comment header tags where they differ from the file's (the first
   link's), and a detected start within 2 s of a link boundary is taken to
-  be that boundary *(implemented, issue #47)*.
+  be that boundary *(implemented, issue #47)*. Captured web radio can
+  change its title, and so start a new link, every few seconds; Edit >
+  Suggest chained streams as tracks (a remembered option, to move into
+  the settings dialog of issue #103) turns these suggestions off.
   All links must share codec, rate and channel count; other files are
   refused (open question, issue #46).
 - Captures can start mid-stream or contain damaged pages from network
