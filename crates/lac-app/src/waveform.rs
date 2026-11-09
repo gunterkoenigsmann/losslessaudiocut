@@ -19,6 +19,10 @@ use crate::detail::Detail;
 /// Most zoomed-in view: this many pixels per sample frame.
 pub const MAX_PIXELS_PER_SAMPLE: f64 = 32.0;
 
+/// Room left of and right of a range [`WaveformView::zoom_to`] shows, as a
+/// fraction of the range's length.
+pub const ZOOM_TO_MARGIN: f64 = 0.05;
+
 /// How the visible part should be drawn (see `docs/architecture.md`,
 /// "Rendering rule").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +95,27 @@ impl WaveformView {
     pub fn zoom_to_fit(&mut self) {
         self.spp = self.max_spp();
         self.start = 0;
+    }
+
+    /// Zooms so that `r` fills the window, with a margin of
+    /// [`ZOOM_TO_MARGIN`] of its length on either side so its edges stay
+    /// visible. Never zooms in beyond [`MAX_PIXELS_PER_SAMPLE`] (a short
+    /// range is then centred) nor out beyond the whole timeline. An empty
+    /// `r` changes nothing.
+    pub fn zoom_to(&mut self, r: &Range<SamplePos>) {
+        let r = r.start.min(self.total)..r.end.min(self.total);
+        if r.is_empty() {
+            return;
+        }
+        let len = (r.end - r.start) as f64;
+        let shown = len * (1.0 + 2.0 * ZOOM_TO_MARGIN);
+        self.spp =
+            (shown / f64::from(self.width)).clamp(1.0 / MAX_PIXELS_PER_SAMPLE, self.max_spp());
+        // Centre the range in the window, whatever the zoom became.
+        let centre = r.start as f64 + len / 2.0;
+        let half = self.spp * f64::from(self.width) / 2.0;
+        self.start = (centre - half).max(0.0).round() as SamplePos;
+        self.clamp_start();
     }
 
     /// Zooms by `factor` (> 1 zooms in) keeping the sample under pixel `x`
@@ -277,6 +302,44 @@ mod tests {
         v.scroll_to(500);
         assert_eq!(v.pixel_span(&(0..600)), Some(0..10));
         assert_eq!(v.pixel_span(&(0..500)), None);
+    }
+
+    #[test]
+    fn zoom_to_shows_the_range_with_a_margin() {
+        let mut v = WaveformView::new(1_000_000, 1100);
+        v.zoom_to(&(200_000..300_000));
+        // 100 000 samples plus 5 % on either side in 1100 pixels.
+        assert!((v.samples_per_pixel() - 100.0).abs() < 1e-9);
+        assert_eq!(v.visible(), 195_000..305_000);
+        // The range's edges are inside the window.
+        assert!(v.sample_to_x(200_000) > 0.0);
+        assert!(v.sample_to_x(300_000) < 1100.0);
+    }
+
+    #[test]
+    fn zoom_to_stays_inside_the_timeline_and_the_zoom_limits() {
+        let mut v = WaveformView::new(1_000_000, 1000);
+        // At the start: the margin cannot go before sample 0.
+        v.zoom_to(&(0..100_000));
+        assert_eq!(v.start(), 0);
+        assert!(v.visible().contains(&99_999));
+        // At the end: the view ends at the timeline's end.
+        v.zoom_to(&(900_000..1_000_000));
+        assert_eq!(v.visible().end, 1_000_000);
+        assert!(v.visible().contains(&900_000));
+        // Longer than the file (with the margin): everything is shown.
+        v.zoom_to(&(0..1_000_000));
+        assert_eq!(v.visible(), 0..1_000_000);
+        // Two samples: zoomed in only as far as allowed, centred.
+        v.zoom_to(&(500_000..500_002));
+        assert_eq!(v.samples_per_pixel(), 1.0 / MAX_PIXELS_PER_SAMPLE);
+        let x = v.sample_to_x(500_001);
+        assert!((x - 500.0).abs() <= 32.0, "{x}");
+        // Empty or beyond the end: nothing changes.
+        let before = v.clone();
+        v.zoom_to(&(10..10));
+        v.zoom_to(&(2_000_000..3_000_000));
+        assert_eq!(v, before);
     }
 
     #[test]

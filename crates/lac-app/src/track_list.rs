@@ -130,6 +130,12 @@ pub fn track_start(editor: &Editor, index: usize) -> Option<SamplePos> {
     editor.tracks().get(index).map(|t| t.span.start)
 }
 
+/// The source span of track `index`, to select it and zoom to it when
+/// its row is double-clicked.
+pub fn track_span(editor: &Editor, index: usize) -> Option<std::ops::Range<SamplePos>> {
+    editor.tracks().get(index).map(|t| t.span.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +244,16 @@ mod tests {
         assert_eq!(r[0].cells[col(TagField::TrackNumber)].text, "4");
         assert_eq!(r[0].cells[col(TagField::TrackTotal)].text, "");
         assert_eq!(track_start(&e, 2), None);
+    }
+
+    #[test]
+    fn track_spans_cover_the_source_from_split_to_split() {
+        let mut e = Editor::new(3000);
+        e.split_at(1000);
+        e.split_at(2500);
+        assert_eq!(track_span(&e, 0), Some(0..1000));
+        assert_eq!(track_span(&e, 1), Some(1000..2500));
+        assert_eq!(track_span(&e, 2), Some(2500..3000));
+        assert_eq!(track_span(&e, 3), None);
     }
 }

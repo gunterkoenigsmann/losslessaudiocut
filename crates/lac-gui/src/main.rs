@@ -1603,8 +1603,20 @@ fn rename_track(frame: &Frame, state: &Rc<RefCell<State>>) {
 }
 
 /// Edits in the track list: a changed cell becomes a tag edit of its
-/// track, and selecting a cell puts the cursor at the start of its track.
+/// track, selecting a cell puts the cursor at the start of its track, and
+/// double-clicking a track's row selects the track and zooms to it.
 fn bind_track_list(grid: &Grid, frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
+    // Double-clicking the row label or any cell of the row. On a tag cell
+    // wxGrid then also opens the cell editor, as a double-click there
+    // always did; wxdragon's grid events cannot be consumed to prevent it.
+    {
+        let (state, f, panel) = (Rc::clone(state), *frame, *panel);
+        grid.on_label_left_dclick(move |e| show_track(e.get_row(), &f, &panel, &state));
+    }
+    {
+        let (state, f, panel) = (Rc::clone(state), *frame, *panel);
+        grid.on_cell_left_dclick(move |e| show_track(e.get_row(), &f, &panel, &state));
+    }
     {
         let (state, f, panel, g) = (Rc::clone(state), *frame, *panel, *grid);
         grid.on_cell_changed(move |e| {
@@ -1664,6 +1676,38 @@ fn bind_track_list(grid: &Grid, frame: &Frame, panel: &Panel, state: &Rc<RefCell
             // Not vetoed, so the grid moves its cursor there.
         });
     }
+}
+
+/// Selects track `row` of the track list (0-based; anything else, such as
+/// -1 for a column label, is ignored), puts the cursor at its start and
+/// zooms the waveform to it.
+fn show_track(row: i32, frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
+    let Ok(index) = usize::try_from(row) else {
+        return;
+    };
+    // Busy elsewhere (e.g. a refresh in progress): the click is dropped.
+    let Ok(mut st) = state.try_borrow_mut() else {
+        return;
+    };
+    let Some(span) = st
+        .editor
+        .as_ref()
+        .and_then(|ed| lac_app::track_list::track_span(ed, index))
+    else {
+        return;
+    };
+    if let Some(ed) = &mut st.editor {
+        ed.select(span.start, span.end);
+        ed.set_cursor(span.start);
+    }
+    st.seek_to_cursor();
+    if let Some(v) = &mut st.view {
+        v.zoom_to(&span);
+    }
+    // Title, status bar (selection, time) and the menus' enabled state.
+    update_chrome(frame, &st);
+    drop(st);
+    panel.refresh(false, None);
 }
 
 /// Edit > Use for all tracks: gives every track the value of the track
