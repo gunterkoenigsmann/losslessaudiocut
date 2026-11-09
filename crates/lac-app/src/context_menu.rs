@@ -1,7 +1,8 @@
-//! The waveform's right-click menu (issue #82): what can be done with the
-//! selection, the playback position or the place under the pointer.
+//! The right-click menus of the waveform (issue #82: what can be done with
+//! the selection, the playback position or the place under the pointer)
+//! and of the track list (issue #90: what can be done with a track).
 //!
-//! [`waveform`] lists the entries for a right-click; each carries an
+//! [`waveform`] and [`track_list`] list the entries; each carries an
 //! [`Action`] with the concrete positions it was offered for, so the menu
 //! can say what an entry does and grey out what would change nothing.
 //! [`apply`] runs an action on the [`Editor`]; playing is left to the GUI,
@@ -104,6 +105,18 @@ pub enum Action {
     },
     /// Plays from this source position on.
     PlayFrom(SamplePos),
+    /// Selects this range (a track), puts the cursor at its start and
+    /// zooms to it.
+    ShowTrack(Range<SamplePos>),
+    /// Clears the selection and puts the cursor (and, while playing, the
+    /// playback position) here.
+    JumpTo(SamplePos),
+    /// Joins track `index` (0-based) with the one before it.
+    JoinWithPrevious(usize),
+    /// Selects this range (a track) and deletes it.
+    DeleteRange(Range<SamplePos>),
+    /// Selects this range (a track) and restores what is deleted in it.
+    RestoreRange(Range<SamplePos>),
 }
 
 /// One entry of the menu.
@@ -136,6 +149,10 @@ pub enum Effect {
     Play(Timeline),
     /// Play from this source position on.
     PlayFrom(SamplePos),
+    /// Zoom the waveform to this range (selected already).
+    ZoomTo(Range<SamplePos>),
+    /// Move the cursor (and playback) here, see [`Action::JumpTo`].
+    JumpTo(SamplePos),
 }
 
 /// The menu for a right-click at source position `pos`, with marks within
@@ -372,7 +389,121 @@ pub fn apply(editor: &mut Editor, action: &Action, rate: u32) -> Effect {
             Effect::Play(playback::excerpt(editor, range.clone(), *end, len))
         }
         Action::PlayFrom(p) => Effect::PlayFrom(*p),
+        Action::ShowTrack(r) => {
+            editor.select(r.start, r.end);
+            editor.set_cursor(r.start);
+            Effect::ZoomTo(r.clone())
+        }
+        Action::JumpTo(p) => Effect::JumpTo(*p),
+        Action::JoinWithPrevious(i) => Effect::Edited(editor.join_with_previous(*i)),
+        Action::DeleteRange(r) => {
+            editor.select(r.start, r.end);
+            Effect::Edited(editor.delete_selection())
+        }
+        Action::RestoreRange(r) => {
+            editor.select(r.start, r.end);
+            Effect::Edited(editor.restore_selection())
+        }
     }
+}
+
+/// The menu for a right-click on row `index` (0-based) of the track list:
+/// showing and playing the track, moving the cursor or the selection's
+/// edges to its ends, joining and deleting it. Empty for a row that is no
+/// track.
+pub fn track_list(editor: &Editor, index: usize) -> Vec<Entry> {
+    let Some(track) = editor.tracks().into_iter().nth(index) else {
+        return Vec::new();
+    };
+    let span = track.span.clone();
+    let n = track.number;
+    let any_kept = !track.kept.is_empty();
+    let any_deleted = track
+        .kept
+        .iter()
+        .map(|k| k.end - k.start)
+        .sum::<SamplePos>()
+        < span.end - span.start;
+    let excerpt = |end, label: String| Item {
+        label: format!("{label} ({EXCERPT_SECONDS} s)"),
+        enabled: any_kept,
+        action: Action::PlayExcerpt {
+            range: span.clone(),
+            end,
+        },
+    };
+    let jump = |to: SamplePos, label: String| Item {
+        enabled: editor.selection().is_some() || editor.cursor() != to,
+        label,
+        action: Action::JumpTo(to),
+    };
+    let mut groups = vec![
+        vec![
+            Item {
+                label: format!("Zoom to track {n}"),
+                action: Action::ShowTrack(span.clone()),
+                enabled: true,
+            },
+            excerpt(End::Start, format!("Play start of track {n}")),
+            excerpt(End::End, format!("Play end of track {n}")),
+        ],
+        vec![
+            jump(span.start, format!("Cursor to start of track {n}")),
+            jump(span.end, format!("Cursor to end of track {n}")),
+        ],
+    ];
+    if let Some(sel) = editor.selection() {
+        // Each edge to each end of the track; the selection must keep
+        // something selected.
+        let select = |r: Range<SamplePos>, label: String| Item {
+            enabled: r.start < r.end && r != sel,
+            label,
+            action: Action::Select(r),
+        };
+        groups.push(vec![
+            select(
+                span.start..sel.end,
+                format!("Selection start to start of track {n}"),
+            ),
+            select(
+                span.end..sel.end,
+                format!("Selection start to end of track {n}"),
+            ),
+            select(
+                sel.start..span.start,
+                format!("Selection end to start of track {n}"),
+            ),
+            select(
+                sel.start..span.end,
+                format!("Selection end to end of track {n}"),
+            ),
+        ]);
+    }
+    groups.push(vec![
+        Item {
+            label: format!("Join track {n} with the previous one"),
+            action: Action::JoinWithPrevious(index),
+            enabled: index > 0,
+        },
+        Item {
+            label: format!("Delete track {n}"),
+            action: Action::DeleteRange(span.clone()),
+            enabled: any_kept,
+        },
+        Item {
+            label: format!("Restore track {n}"),
+            action: Action::RestoreRange(span.clone()),
+            enabled: any_deleted,
+        },
+    ]);
+    let mut entries = Vec::new();
+    for g in groups {
+        if !entries.is_empty() {
+            entries.push(Entry::Separator);
+        }
+        entries.extend(g.into_iter().map(Entry::Item));
+    }
+    entries
 }
 
 #[cfg(test)]
@@ -570,5 +701,81 @@ mod tests {
                 .iter()
                 .all(|i| !i.label.contains("playback position"))
         );
+    }
+
+    #[test]
+    fn the_track_list_menu_shows_plays_and_moves_to_a_track() {
+        let mut e = Editor::new(60_000);
+        e.split_at_all([10_000, 30_000]);
+        // Row 2 is track 2, 10..30 s.
+        let menu = track_list(&e, 1);
+        let zoom = item(&menu, "Zoom to track 2");
+        let mut e2 = e.clone();
+        assert_eq!(
+            apply(&mut e2, &zoom.action, RATE),
+            Effect::ZoomTo(10_000..30_000)
+        );
+        assert_eq!(e2.selection(), Some(10_000..30_000));
+        assert_eq!(e2.cursor(), 10_000);
+
+        let start = item(&menu, "Play start of track 2 (3 s)");
+        let Effect::Play(tl) = apply(&mut e2, &start.action, RATE) else {
+            panic!("plays");
+        };
+        assert_eq!(tl.segments(), std::slice::from_ref(&(10_000..13_000)));
+        let end = item(&menu, "Play end of track 2 (3 s)");
+        let Effect::Play(tl) = apply(&mut e2, &end.action, RATE) else {
+            panic!("plays");
+        };
+        assert_eq!(tl.segments(), std::slice::from_ref(&(27_000..30_000)));
+
+        let to_end = item(&menu, "Cursor to end of track 2");
+        assert_eq!(to_end.action, Action::JumpTo(30_000));
+        assert!(to_end.enabled);
+        assert!(item(&menu, "Join track 2 with the previous one").enabled);
+        assert!(!item(&track_list(&e, 0), "Join track 1").enabled);
+        assert!(track_list(&e, 3).is_empty(), "no fourth track");
+        // Without a selection there are no selection entries.
+        assert!(
+            items(&menu)
+                .iter()
+                .all(|i| !i.label.starts_with("Selection"))
+        );
+    }
+
+    #[test]
+    fn the_track_list_menu_moves_selection_edges_to_track_ends() {
+        let mut e = Editor::new(60_000);
+        e.split_at_all([10_000, 30_000]);
+        e.select(15_000, 40_000);
+        let menu = track_list(&e, 1);
+        let a = item(&menu, "Selection start to start of track 2");
+        assert_eq!(a.action, Action::Select(10_000..40_000));
+        assert!(a.enabled);
+        let b = item(&menu, "Selection end to end of track 2");
+        assert_eq!(b.action, Action::Select(15_000..30_000));
+        let c = item(&menu, "Selection end to start of track 2");
+        assert!(!c.enabled, "would select nothing");
+        let mut e2 = e.clone();
+        apply(&mut e2, &b.action, RATE);
+        assert_eq!(e2.selection(), Some(15_000..30_000));
+    }
+
+    #[test]
+    fn tracks_are_deleted_and_restored_from_the_track_list() {
+        let mut e = Editor::new(60_000);
+        e.split_at_all([10_000, 30_000]);
+        let menu = track_list(&e, 1);
+        assert!(!item(&menu, "Restore track 2").enabled);
+        let del = item(&menu, "Delete track 2");
+        assert_eq!(apply(&mut e, &del.action, RATE), Effect::Edited(true));
+        assert_eq!(e.deleted(), std::slice::from_ref(&(10_000..30_000)));
+        let menu = track_list(&e, 1);
+        assert!(!item(&menu, "Delete track 2").enabled);
+        assert!(!item(&menu, "Play start of track 2").enabled);
+        let restore = item(&menu, "Restore track 2");
+        assert!(restore.enabled);
+        assert_eq!(apply(&mut e, &restore.action, RATE), Effect::Edited(true));
+        assert!(e.deleted().is_empty());
     }
 }

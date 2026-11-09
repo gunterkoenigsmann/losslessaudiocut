@@ -72,7 +72,10 @@ change it (the title is the track's name); changed values are shown in
 bold blue, and typing the original value back undoes the change. Edit > Use
 for all tracks (Ctrl+Shift+A) gives every track the value of the selected
 cell, e.g. the album. Selecting a row moves the cursor to that track. Tag
-changes are undone with Ctrl+Z like any other edit.
+changes are undone with Ctrl+Z like any other edit. Right-clicking a row
+opens the track's menu: zoom to it, play its first or last 3 seconds, move
+the cursor or a selection edge to its start or end, join it with the
+previous track, delete or restore it.
 
 A time ruler along the bottom of the waveform shows the time scale at any
 zoom, down to fractions of a millisecond (View > Time ruler switches it
