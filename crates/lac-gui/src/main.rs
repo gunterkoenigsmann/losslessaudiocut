@@ -39,6 +39,7 @@ mod minimap;
 mod options;
 mod panes;
 mod position_bar;
+mod recent;
 mod toolbar;
 mod track_list;
 
@@ -61,6 +62,7 @@ use lac_app::layout::Pane;
 use lac_app::minimap::Minimap;
 use lac_app::peak_cache::PeakCache;
 use lac_app::peak_job::{JobStatus, PeakJob};
+use lac_app::recent_files::RecentFiles;
 use lac_app::waveform::{DrawMode, WaveformView};
 use lac_core::{SamplePos, Tags};
 use lac_peaks::PeakSummary;
@@ -289,6 +291,8 @@ struct State {
     speed: Speed,
     /// Menu options, remembered between runs.
     options: Options,
+    /// File > Open recent, remembered between runs.
+    recent: RecentFiles,
     /// Whether the current left-button drag has tried to start a scrub
     /// (at most once per drag, so a failing audio device is reported once).
     drag_scrub_tried: bool,
@@ -807,6 +811,10 @@ fn main() {
         status.set_status_widths(&[-4, -4, -2]);
         let options = Options::load();
         frame.set_menu_bar(menu_bar(options));
+        let recent_files = recent::load();
+        if let Some(bar) = frame.get_menu_bar() {
+            recent::refresh(&bar, &recent_files);
+        }
 
         let panel = Panel::builder(&frame).build();
         // We paint every pixel ourselves; letting the system erase first
@@ -830,6 +838,7 @@ fn main() {
             cache,
             speed: Speed::new(100, options.keep_pitch),
             options,
+            recent: recent_files,
             grid: Some(grid),
             ..State::default()
         }));
@@ -970,6 +979,13 @@ fn menu_bar(options: Options) -> MenuBar {
         .append_separator()
         .append_item(ID_EXIT, "&Quit\tCtrl+Q", "Quit losslessaudiocut")
         .build();
+    // The builder cannot add submenus; right below Open, like elsewhere.
+    file.insert_submenu(
+        1,
+        recent::submenu(),
+        "Open &recent",
+        "Open one of the recently opened files",
+    );
     let edit = Menu::builder()
         .append_item(ID_UNDO, "&Undo\tCtrl+Z", "Undo the last delete or restore")
         .append_item(ID_REDO, "&Redo\tCtrl+Y", "Redo what was undone")
@@ -1127,6 +1143,14 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
         {
             open_file(&f, state, PathBuf::from(path));
         }
+    } else if let Some(i) = recent::index_of(id) {
+        open_recent(&f, state, i);
+        return;
+    } else if id == recent::ID_CLEAR {
+        let mut st = state.borrow_mut();
+        st.recent.clear();
+        remember_recent(&f, &st.recent);
+        return;
     } else if id == ID_EXPORT {
         export(&f, state);
     } else if id == ID_RENAME {
@@ -1359,9 +1383,51 @@ fn confirm_discard(frame: &Frame, state: &Rc<RefCell<State>>) -> bool {
 /// Starts reading `path` (from File > Open, the command line or the
 /// macOS Finder). Unexported edits must have been confirmed before.
 fn open_file(frame: &Frame, state: &Rc<RefCell<State>>, path: PathBuf) {
-    state.borrow_mut().open(path);
+    // Absolute, so that a file opened from the command line in different
+    // directories is listed once and still found from elsewhere. If that
+    // fails (the file is gone), opening it reports the error anyway.
+    let listed = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    {
+        let mut st = state.borrow_mut();
+        st.recent.add(listed);
+        remember_recent(frame, &st.recent);
+        st.open(path);
+    }
     report(frame, "reading…");
     update_chrome(frame, &state.borrow());
+}
+
+/// File > Open recent > entry `index`: opens that file, or takes it off
+/// the list if it is gone (moved, deleted, on an unplugged drive).
+fn open_recent(frame: &Frame, state: &Rc<RefCell<State>>, index: usize) {
+    let Some(path) = state.borrow().recent.get(index).map(Path::to_path_buf) else {
+        return;
+    };
+    if !path.is_file() {
+        let mut st = state.borrow_mut();
+        st.recent.remove(&path);
+        remember_recent(frame, &st.recent);
+        drop(st);
+        report(
+            frame,
+            &format!(
+                "{} no longer exists; removed it from the list",
+                path.display()
+            ),
+        );
+        return;
+    }
+    if confirm_discard(frame, state) {
+        open_file(frame, state, path);
+    }
+}
+
+/// Stores the recent files and shows them in the menu.
+fn remember_recent(frame: &Frame, list: &RecentFiles) {
+    recent::save(list);
+    if let Some(bar) = frame.get_menu_bar() {
+        recent::refresh(&bar, list);
+    }
 }
 
 /// File > Export: asks for the output file and starts writing it.

@@ -89,6 +89,9 @@ end, an end or a length keeps the start; without a selection, a start moves
 the cursor. Times are seconds, `m:ss`, `h:mm:ss` (all with optional
 decimals) or `@frames`.
 
+*File > Open recent* lists the last nine files opened; the list is kept
+between runs, and a file that no longer exists is taken off it when chosen.
+
 View > Log opens a pane that keeps every message of the status bar with
 its time, so a warning that flashed by can be read again.
 
