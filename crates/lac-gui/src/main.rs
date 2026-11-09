@@ -64,6 +64,7 @@ use lac_app::minimap::Minimap;
 use lac_app::peak_cache::PeakCache;
 use lac_app::peak_job::{JobStatus, PeakJob};
 use lac_app::recent_files::RecentFiles;
+use lac_app::track_list::Bound;
 use lac_app::waveform::{DrawMode, WaveformView};
 use lac_core::{SamplePos, Tags};
 use lac_peaks::PeakSummary;
@@ -1686,14 +1687,28 @@ fn bind_track_list(grid: &Grid, frame: &Frame, panel: &Panel, state: &Rc<RefCell
                     return;
                 };
                 let tags = st.tags.clone().unwrap_or_default();
-                let (Some(ed), Some(field), Ok(index)) =
-                    (&mut st.editor, track_list::field(col), usize::try_from(row))
-                else {
+                let rate = st.rate.unwrap_or(1);
+                let Ok(index) = usize::try_from(row) else {
                     return;
                 };
-                lac_app::track_list::edit(ed, &tags, index, field, &text, false)
-                    .err()
-                    .map(|e| e.to_string())
+                if let (Some(ed), Some(bound)) = (&mut st.editor, track_list::bound(col)) {
+                    // A typed start or end moves the track boundary, and
+                    // the cursor jumps there (issues #88, #89).
+                    match lac_app::track_list::edit_time(ed, index, bound, &text, rate) {
+                        Ok(Some(pos)) => {
+                            jump_to(&mut st, pos);
+                            None
+                        }
+                        Ok(None) => None,
+                        Err(e) => Some(e.to_string()),
+                    }
+                } else if let (Some(ed), Some(field)) = (&mut st.editor, track_list::field(col)) {
+                    lac_app::track_list::edit(ed, &tags, index, field, &text, false)
+                        .err()
+                        .map(|e| e.to_string())
+                } else {
+                    return;
+                }
             };
             if let Some(m) = &msg {
                 report(&f, m);
@@ -1711,22 +1726,19 @@ fn bind_track_list(grid: &Grid, frame: &Frame, panel: &Panel, state: &Rc<RefCell
             let Ok(mut st) = state.try_borrow_mut() else {
                 return;
             };
-            if let Ok(index) = usize::try_from(e.get_row()) {
-                let start = st
-                    .editor
-                    .as_ref()
-                    .and_then(|ed| lac_app::track_list::track_start(ed, index));
-                if let (Some(start), Some(ed)) = (start, &mut st.editor)
-                    && ed.track_at(ed.play_from()) != index
-                {
-                    ed.clear_selection();
-                    ed.set_cursor(start);
-                    st.seek_to_cursor();
-                    if let Some(v) = &mut st.view
-                        && !v.visible().contains(&start)
-                    {
-                        v.scroll_to(start);
-                    }
+            if let (Ok(index), Some(ed)) = (usize::try_from(e.get_row()), &st.editor) {
+                // The end cell goes to the track's end; any other cell to
+                // its start, unless the cursor is in that track already
+                // (moving between its tag cells keeps the cursor).
+                let target = if track_list::bound(e.get_col()) == Some(Bound::End) {
+                    lac_app::track_list::track_end(ed, index)
+                        .filter(|&end| ed.selection().is_some() || ed.cursor() != end)
+                } else {
+                    lac_app::track_list::track_start(ed, index)
+                        .filter(|_| ed.track_at(ed.play_from()) != index)
+                };
+                if let Some(pos) = target {
+                    jump_to(&mut st, pos);
                     f.set_status_text(&st.time_status(), FIELD_TIME);
                     f.set_status_text(&st.edit_status(), FIELD_EDIT);
                     panel.refresh(false, None);
@@ -1734,6 +1746,21 @@ fn bind_track_list(grid: &Grid, frame: &Frame, panel: &Panel, state: &Rc<RefCell
             }
             // Not vetoed, so the grid moves its cursor there.
         });
+    }
+}
+
+/// Clears the selection and puts the cursor (and the playback position)
+/// at `pos`, scrolling the waveform there if it is out of view.
+fn jump_to(st: &mut State, pos: SamplePos) {
+    if let Some(ed) = &mut st.editor {
+        ed.clear_selection();
+        ed.set_cursor(pos);
+    }
+    st.seek_to_cursor();
+    if let Some(v) = &mut st.view
+        && !v.visible().contains(&pos)
+    {
+        v.scroll_to(pos);
     }
 }
 

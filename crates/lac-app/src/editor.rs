@@ -323,6 +323,41 @@ impl Editor {
         added
     }
 
+    /// Moves the start of track `index` (0-based, so split point
+    /// `index - 1`) to `to`, keeping the track's own tags with it. The
+    /// order of the tracks cannot change: `to` must lie strictly after the
+    /// previous track's start and strictly before the next one's (or the
+    /// end of the recording). Returns false for the first track, an index
+    /// out of range, a position outside those bounds, or no change.
+    pub fn move_track_start(&mut self, index: usize, to: SamplePos) -> bool {
+        let Some(range) = self.track_start_range(index) else {
+            return false;
+        };
+        if !range.contains(&to) {
+            return false;
+        }
+        let mut next = self.edits.clone();
+        let from = std::mem::replace(&mut next.splits[index - 1], to);
+        if let Some(tags) = next.track_tags.remove(&from) {
+            next.track_tags.insert(to, tags);
+        }
+        self.commit(next)
+    }
+
+    /// Where the start of track `index` may be moved to with
+    /// [`Editor::move_track_start`]: between the previous track's start
+    /// and the next track's start (both excluded). `None` for the first
+    /// track, which always starts at 0, and for indices out of range.
+    pub fn track_start_range(&self, index: usize) -> Option<Range<SamplePos>> {
+        let splits = &self.edits.splits;
+        if index == 0 || index > splits.len() {
+            return None;
+        }
+        let prev = if index >= 2 { splits[index - 2] } else { 0 };
+        let next = splits.get(index).copied().unwrap_or(self.total);
+        Some(prev + 1..next)
+    }
+
     /// Joins track `index` (0-based) with the one before it: removes the
     /// split point it starts at, and its name. Returns false for the first
     /// track or an index out of range.
@@ -654,6 +689,29 @@ pub fn describe_export(kept: &[KeptRange], rate: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moving_a_track_start_keeps_its_tags_and_the_order() {
+        let mut e = Editor::new(10_000);
+        e.split_at_all([3000, 6000]);
+        assert!(e.rename_track(1, "Middle"));
+        assert_eq!(e.track_start_range(0), None, "track 1 starts at 0");
+        assert_eq!(e.track_start_range(1), Some(1..6000));
+        assert_eq!(e.track_start_range(2), Some(3001..10_000));
+        assert_eq!(e.track_start_range(3), None);
+        assert!(e.move_track_start(1, 2500));
+        assert_eq!(e.splits(), [2500, 6000]);
+        assert_eq!(e.tracks()[1].name.as_deref(), Some("Middle"));
+        // Not past a neighbour, not onto one, not the first track.
+        assert!(!e.move_track_start(1, 6000));
+        assert!(!e.move_track_start(2, 2500));
+        assert!(!e.move_track_start(0, 100));
+        assert!(!e.move_track_start(1, 2500), "no change");
+        // One undo step.
+        assert!(e.undo());
+        assert_eq!(e.splits(), [3000, 6000]);
+        assert_eq!(e.tracks()[1].name.as_deref(), Some("Middle"));
+    }
 
     #[test]
     fn delete_ranges_is_one_undo_step_and_counts_only_new_frames() {
