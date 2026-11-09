@@ -94,6 +94,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: Swatinem/rust-cache@v2
       # ffmpeg, the reference flac tool, oggdec (libvorbisfile) and mpg123
       # are the independent decoders for cross-checks; groff checks the
       # generated manpages. They are installed (and therefore required) on Linux;
@@ -139,25 +140,6 @@ jobs:
       - name: Install GUI and audio build dependencies (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get install -y --no-install-recommends libgtk-3-dev ninja-build libasound2-dev
-      # ffmpeg-sys-next's build script checks the FFmpeg headers once and
-      # is not rerun when the system's FFmpeg changes, so a cache built
-      # against an older FFmpeg links against functions the new one no
-      # longer has (FFmpeg 8 removed avcodec_close). The installed FFmpeg
-      # version is therefore part of the cache key, and the cache is
-      # restored only after FFmpeg is installed.
-      - name: FFmpeg version for the cache key
-        shell: bash
-        run: |
-          if [ -n "${FFMPEG_DIR:-}" ]; then
-            v=$(basename "$FFMPEG_DIR")
-          else
-            v=$(pkg-config --modversion libavcodec)
-          fi
-          echo "FFmpeg (libavcodec): $v"
-          echo "FFMPEG_CACHE_KEY=ffmpeg-$v" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ env.FFMPEG_CACHE_KEY }}
       - name: Require cross-checks
         if: runner.os == 'Linux'
         shell: bash
