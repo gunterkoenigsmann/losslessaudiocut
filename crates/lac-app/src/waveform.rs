@@ -103,12 +103,26 @@ impl WaveformView {
     /// range is then centred) nor out beyond the whole timeline. An empty
     /// `r` changes nothing.
     pub fn zoom_to(&mut self, r: &Range<SamplePos>) {
+        self.zoom_with_margin(r, ZOOM_TO_MARGIN);
+    }
+
+    /// Zooms so that `r` fills the window exactly, like
+    /// [`WaveformView::zoom_to`] without the margin: for views whose
+    /// range already includes the context to show (see
+    /// [`crate::perspective`]).
+    pub fn zoom_exactly_to(&mut self, r: &Range<SamplePos>) {
+        self.zoom_with_margin(r, 0.0);
+    }
+
+    /// [`WaveformView::zoom_to`] with a margin of `margin` times the
+    /// range's length on either side.
+    fn zoom_with_margin(&mut self, r: &Range<SamplePos>, margin: f64) {
         let r = r.start.min(self.total)..r.end.min(self.total);
         if r.is_empty() {
             return;
         }
         let len = (r.end - r.start) as f64;
-        let shown = len * (1.0 + 2.0 * ZOOM_TO_MARGIN);
+        let shown = len * (1.0 + 2.0 * margin);
         self.spp =
             (shown / f64::from(self.width)).clamp(1.0 / MAX_PIXELS_PER_SAMPLE, self.max_spp());
         // Centre the range in the window, whatever the zoom became.
@@ -302,6 +316,14 @@ mod tests {
         v.scroll_to(500);
         assert_eq!(v.pixel_span(&(0..600)), Some(0..10));
         assert_eq!(v.pixel_span(&(0..500)), None);
+    }
+
+    #[test]
+    fn zoom_exactly_to_fills_the_window_with_the_range() {
+        let mut v = WaveformView::new(1_000_000, 1000);
+        v.zoom_exactly_to(&(200_000..300_000));
+        assert!((v.samples_per_pixel() - 100.0).abs() < 1e-9);
+        assert_eq!(v.visible(), 200_000..300_000);
     }
 
     #[test]

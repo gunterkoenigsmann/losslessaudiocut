@@ -81,6 +81,14 @@ opens the track's menu: zoom to it, play its first or last 3 seconds, move
 the cursor or a selection edge to its start or end, join it with the
 previous track, delete or restore it.
 
+*View > Perspective* (Ctrl+1 to Ctrl+6) zooms to the whole file, from the
+start to just after the selection start, around the selection start, the
+selection with some context, around the selection end, or from just before
+the selection end to the end; the context is 5 seconds, capped at the ends
+of the file. Without a selection the cursor stands in for both edges. With
+these keys a selection's edges can be checked and dragged one after the
+other.
+
 A time ruler along the bottom of the waveform shows the time scale at any
 zoom, down to fractions of a millisecond (View > Time ruler switches it
 off).
@@ -141,7 +149,7 @@ cut point can be placed by ear (a plain click stays silent). *Play > Scrub
 while selecting* switches that off; it and *Keep pitch* are remembered
 between runs.
 
-Ctrl+Up and Ctrl+Down play faster or slower (0.5× to 3×), Ctrl+1 returns to
+Ctrl+Up and Ctrl+Down play faster or slower (0.5× to 3×), Ctrl+Shift+N returns to
 normal speed; the list next to the Play button in the toolbar picks a speed
 directly. By default the pitch stays the same, so speech stays
 intelligible when skimming through long recordings; with *Play > Keep pitch*

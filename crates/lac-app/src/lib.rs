@@ -40,6 +40,7 @@
 //! - [`hover`]: the waveform's tooltips, naming the mark under the
 //!   pointer.
 //! - [`context_menu`]: the waveform's right-click menu.
+//! - [`perspective`]: views of the waveform around the selection's edges.
 //!
 //! See `docs/architecture.md` in the repository for how this crate fits in.
 
@@ -57,6 +58,7 @@ pub mod log;
 pub mod minimap;
 pub mod peak_cache;
 pub mod peak_job;
+pub mod perspective;
 pub mod playback;
 pub mod positions;
 pub mod ranges;
