@@ -7,12 +7,20 @@
 //! setting only those that differ, so it needs no state of its own and a
 //! refresh while nothing changed costs no redraw.
 
-use lac_app::track_list::{COLUMNS, Row};
+use lac_app::track_list::{Bound, COLUMNS, Row};
 use lac_core::TagField;
 use wxdragon::prelude::*;
 
-/// Grid columns before the tag columns: start and length of the track.
-const FIXED_COLUMNS: i32 = 2;
+/// Grid columns before the tag columns: start, end and length of the
+/// track. Start and end can be typed into (except the recording's own
+/// start and end), length is computed.
+const FIXED_COLUMNS: i32 = 3;
+/// Grid column of the track's start.
+const START_COLUMN: i32 = 0;
+/// Grid column of the track's end.
+const END_COLUMN: i32 = 1;
+/// Grid column of the track's length.
+const LENGTH_COLUMN: i32 = 2;
 
 /// Text of cells the user changed.
 const EDITED: Colour = Colour::rgb(0x10, 0x50, 0xb0);
@@ -29,8 +37,9 @@ pub fn create(parent: &dyn WxWidget) -> Grid {
         FIXED_COLUMNS + COLUMNS.len() as i32,
         GridSelectionMode::Cells,
     );
-    grid.set_col_label_value(0, "Start");
-    grid.set_col_label_value(1, "Length");
+    grid.set_col_label_value(START_COLUMN, "Start");
+    grid.set_col_label_value(END_COLUMN, "End");
+    grid.set_col_label_value(LENGTH_COLUMN, "Length");
     for (i, f) in COLUMNS.iter().enumerate() {
         grid.set_col_label_value(FIXED_COLUMNS + i as i32, f.label());
     }
@@ -48,6 +57,15 @@ pub fn field(col: i32) -> Option<TagField> {
     usize::try_from(col - FIXED_COLUMNS)
         .ok()
         .and_then(|i| COLUMNS.get(i).copied())
+}
+
+/// The track boundary grid column `col` shows, `None` for the others.
+pub fn bound(col: i32) -> Option<Bound> {
+    match col {
+        START_COLUMN => Some(Bound::Start),
+        END_COLUMN => Some(Bound::End),
+        _ => None,
+    }
 }
 
 /// Shows `rows`. Does nothing while a cell is being edited, so that a
@@ -75,8 +93,12 @@ pub fn refresh(grid: &Grid, rows: &[Row]) {
     let normal = grid.get_default_cell_font();
     for (r, row) in rows.iter().enumerate() {
         let r = r as i32;
-        set(grid, r, 0, &row.start, true);
-        set(grid, r, 1, &row.length, true);
+        // The recording's own start and end cannot be moved.
+        let first = r == 0;
+        let last = r + 1 == want;
+        set(grid, r, START_COLUMN, &row.start, first);
+        set(grid, r, END_COLUMN, &row.end, last);
+        set(grid, r, LENGTH_COLUMN, &row.length, true);
         for (c, cell) in row.cells.iter().enumerate() {
             let c = FIXED_COLUMNS + c as i32;
             set(grid, r, c, &cell.text, false);
@@ -109,8 +131,9 @@ fn set(grid: &Grid, row: i32, col: i32, text: &str, read_only: bool) {
 fn rows_match(grid: &Grid, rows: &[Row]) -> bool {
     rows.iter().enumerate().all(|(r, row)| {
         let r = r as i32;
-        grid.get_cell_value(r, 0) == row.start
-            && grid.get_cell_value(r, 1) == row.length
+        grid.get_cell_value(r, START_COLUMN) == row.start
+            && grid.get_cell_value(r, END_COLUMN) == row.end
+            && grid.get_cell_value(r, LENGTH_COLUMN) == row.length
             && row.cells.iter().enumerate().all(|(c, cell)| {
                 let c = FIXED_COLUMNS + c as i32;
                 let colour = match (row.deleted, cell.edited) {

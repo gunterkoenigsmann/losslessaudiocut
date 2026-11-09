@@ -11,11 +11,14 @@
 //! (the source's value, or the counted number) removes the change, so the
 //! track follows the source and the counting again.
 
+use std::ops::Range;
+
 use lac_core::{SamplePos, TagField, TagValueError, Tags};
 
 use crate::editor::Editor;
 use crate::export_job::track_numbers;
 use crate::format_samples;
+use crate::time::{TimeError, TimeSpec};
 
 /// The tag columns, in display order.
 pub const COLUMNS: [TagField; 9] = TagField::ALL;
@@ -34,6 +37,8 @@ pub struct Cell {
 pub struct Row {
     /// Where the track starts in the source, e.g. `1:02.500`.
     pub start: String,
+    /// Where it ends in the source (where the next one starts).
+    pub end: String,
     /// How long its file will be.
     pub length: String,
     /// Whether it is deleted entirely and so gets no file.
@@ -58,6 +63,7 @@ pub fn rows(editor: &Editor, source: &Tags, rate: u32) -> Vec<Row> {
         .zip(numbers)
         .map(|(t, n)| Row {
             start: format_samples(t.span.start, rate),
+            end: format_samples(t.span.end, rate),
             length: format_samples(t.kept_len(), rate),
             deleted: t.kept.is_empty(),
             cells: COLUMNS
@@ -130,9 +136,76 @@ pub fn track_start(editor: &Editor, index: usize) -> Option<SamplePos> {
     editor.tracks().get(index).map(|t| t.span.start)
 }
 
+/// Which end of a track a time cell is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    /// The track's start.
+    Start,
+    /// The track's end: the next track's start.
+    End,
+}
+
+/// Why a typed track start or end is not taken.
+///
+/// The messages are meant to be shown to the user as they are.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TrackTimeError {
+    /// The text is no time.
+    #[error(transparent)]
+    Time(#[from] TimeError),
+    /// The first track's start and the last one's end are those of the
+    /// recording.
+    #[error("the {0} of the recording cannot be moved")]
+    Fixed(&'static str),
+    /// Tracks would overlap or change their order.
+    #[error("must lie between {after} and {before}")]
+    OutOfRange {
+        /// The earliest allowed time minus one frame, formatted.
+        after: String,
+        /// The first time that is too late, formatted.
+        before: String,
+    },
+}
+
+/// The user typed `text` into the start or end cell of track `index`
+/// (0-based): moves that track boundary there, which is also the start
+/// of the next track or the end of the previous one, so tracks stay
+/// contiguous and keep their order. Returns the new position, for the
+/// cursor to jump to, or `None` if the boundary was there already.
+pub fn edit_time(
+    editor: &mut Editor,
+    index: usize,
+    bound: Bound,
+    text: &str,
+    rate: u32,
+) -> Result<Option<SamplePos>, TrackTimeError> {
+    let to = text.trim().parse::<TimeSpec>()?.to_samples(rate);
+    // The start of track i+1 is the end of track i.
+    let (start_of, what) = match bound {
+        Bound::Start => (index, "start"),
+        Bound::End => (index + 1, "end"),
+    };
+    let range = editor
+        .track_start_range(start_of)
+        .ok_or(TrackTimeError::Fixed(what))?;
+    if !range.contains(&to) {
+        return Err(TrackTimeError::OutOfRange {
+            after: format_samples(range.start - 1, rate),
+            before: format_samples(range.end, rate),
+        });
+    }
+    Ok(editor.move_track_start(start_of, to).then_some(to))
+}
+
+/// Where track `index` ends in the source, to move the cursor there when
+/// its end cell is selected.
+pub fn track_end(editor: &Editor, index: usize) -> Option<SamplePos> {
+    editor.tracks().get(index).map(|t| t.span.end)
+}
+
 /// The source span of track `index`, to select it and zoom to it when
 /// its row is double-clicked.
-pub fn track_span(editor: &Editor, index: usize) -> Option<std::ops::Range<SamplePos>> {
+pub fn track_span(editor: &Editor, index: usize) -> Option<Range<SamplePos>> {
     editor.tracks().get(index).map(|t| t.span.clone())
 }
 
@@ -244,6 +317,51 @@ mod tests {
         assert_eq!(r[0].cells[col(TagField::TrackNumber)].text, "4");
         assert_eq!(r[0].cells[col(TagField::TrackTotal)].text, "");
         assert_eq!(track_start(&e, 2), None);
+    }
+
+    #[test]
+    fn typing_a_start_or_end_moves_the_boundary() {
+        let mut e = Editor::new(10_000);
+        e.split_at_all([3000, 6000]);
+        let r = rows(&e, &source(), 1000);
+        assert_eq!(
+            r.iter().map(|r| r.end.as_str()).collect::<Vec<_>>(),
+            ["0:03.000", "0:06.000", "0:10.000"]
+        );
+        // Track 1's end and track 2's start are the same boundary.
+        assert_eq!(
+            edit_time(&mut e, 0, Bound::End, "2.5", 1000),
+            Ok(Some(2500))
+        );
+        assert_eq!(e.splits(), [2500, 6000]);
+        assert_eq!(
+            edit_time(&mut e, 2, Bound::Start, "0:07", 1000),
+            Ok(Some(7000))
+        );
+        assert_eq!(e.splits(), [2500, 7000]);
+        assert_eq!(edit_time(&mut e, 1, Bound::Start, "2.5", 1000), Ok(None));
+        assert_eq!(track_end(&e, 1), Some(7000));
+    }
+
+    #[test]
+    fn typed_times_must_keep_the_tracks_in_order() {
+        let mut e = Editor::new(10_000);
+        e.split_at_all([3000, 6000]);
+        assert_eq!(
+            edit_time(&mut e, 0, Bound::Start, "1", 1000),
+            Err(TrackTimeError::Fixed("start"))
+        );
+        assert_eq!(
+            edit_time(&mut e, 2, Bound::End, "9", 1000),
+            Err(TrackTimeError::Fixed("end"))
+        );
+        let err = edit_time(&mut e, 1, Bound::End, "0:02", 1000).expect_err("before track 2");
+        assert_eq!(err.to_string(), "must lie between 0:03.000 and 0:10.000");
+        assert!(matches!(
+            edit_time(&mut e, 1, Bound::Start, "soon", 1000),
+            Err(TrackTimeError::Time(_))
+        ));
+        assert_eq!(e.splits(), [3000, 6000], "nothing changed");
     }
 
     #[test]
