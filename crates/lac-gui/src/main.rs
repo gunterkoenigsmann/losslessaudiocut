@@ -72,7 +72,7 @@ use lac_playback::{Player, Speed, Timeline};
 use options::Options;
 use panes::Panes;
 use position_bar::PositionBar;
-use toolbar::Tool;
+use toolbar::{Tool, Toolbar};
 use wxdragon::prelude::*;
 
 /// Menu command ids (above wxWidgets' reserved range).
@@ -153,6 +153,9 @@ const TOOLS: &[Tool] = &[
         id: ID_PLAY,
         icon: Icon::Play,
         tip: "Play or stop (Space)",
+    },
+    Tool::Speed {
+        tip: "Playback speed (Ctrl+Up, Ctrl+Down; Ctrl+1 for normal)",
     },
     Tool::Gap,
     Tool::Button {
@@ -290,6 +293,8 @@ struct State {
     scrub: Option<Scrub>,
     /// Playback speed; kept when another file is opened.
     speed: Speed,
+    /// The toolbar, whose speed selector shows `speed`.
+    toolbar: Option<Toolbar>,
     /// Menu options, remembered between runs.
     options: Options,
     /// File > Open recent, remembered between runs.
@@ -446,6 +451,9 @@ impl State {
     /// for the status bar.
     fn set_speed(&mut self, speed: Speed) -> String {
         self.speed = speed;
+        if let Some(t) = &self.toolbar {
+            t.show_speed(speed);
+        }
         if let Some(p) = &mut self.player {
             p.engine_mut().set_speed(speed);
         }
@@ -894,12 +902,27 @@ fn main() {
         bind_select(&panel, &frame, &state);
         let tools = {
             let (state, f, p) = (Rc::clone(&state), frame, panel);
-            toolbar::create(&frame, TOOLS, move |id| {
-                command(&f, &p, &state, id, None);
-                // Keys belong to the waveform, not to the clicked button
-                // (Space would press it again rather than stop).
-                p.set_focus();
-            })
+            let speed_state = Rc::clone(&state);
+            toolbar::create(
+                &frame,
+                TOOLS,
+                move |id| {
+                    command(&f, &p, &state, id, None);
+                    // Keys belong to the waveform, not to the clicked button
+                    // (Space would press it again rather than stop).
+                    p.set_focus();
+                },
+                move |step| {
+                    let msg = {
+                        let mut st = speed_state.borrow_mut();
+                        let keep_pitch = st.speed.keep_pitch;
+                        st.set_speed(Speed::at_step(step, keep_pitch))
+                    };
+                    report(&f, &msg);
+                    // As above; and Space should not open the list again.
+                    p.set_focus();
+                },
+            )
         };
         let bar = {
             let (state, f, p) = (Rc::clone(&state), frame, panel);
@@ -909,11 +932,20 @@ fn main() {
         };
         bind_minimap(&map, &panel, &state);
         let log = log_pane::create(&frame);
-        let panes = Panes::new(&frame, &panel, &tools, &map, &bar.panel(), &grid, &log);
+        let panes = Panes::new(
+            &frame,
+            &panel,
+            &tools.panel,
+            &map,
+            &bar.panel(),
+            &grid,
+            &log,
+        );
         panes.restore();
         {
             let mut st = state.borrow_mut();
             st.panes = Some(panes);
+            st.toolbar = Some(tools);
             st.position_bar = Some(bar);
         }
         bind_menu(&frame, &panel, &state);
@@ -2435,7 +2467,7 @@ mod tests {
             .iter()
             .filter_map(|t| match t {
                 Tool::Button { id, .. } => Some(*id),
-                Tool::Gap => None,
+                Tool::Speed { .. } | Tool::Gap => None,
             })
             .collect();
         for (i, id) in ids.iter().enumerate() {
