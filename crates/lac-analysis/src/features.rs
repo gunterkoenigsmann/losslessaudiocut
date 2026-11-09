@@ -243,8 +243,11 @@ impl Features {
         if total.div_ceil(hop as u64) != n {
             return Err(Damaged("length"));
         }
+        // The length was checked above, so there is no remainder.
         let frames = bytes[36..]
-            .chunks_exact(FRAME_BYTES)
+            .as_chunks::<FRAME_BYTES>()
+            .0
+            .iter()
             .map(|b| {
                 let f32_at = |i: usize| f32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
                 Frame {
