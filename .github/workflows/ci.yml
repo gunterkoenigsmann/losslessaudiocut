@@ -94,7 +94,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
       # ffmpeg, the reference flac tool, oggdec (libvorbisfile) and mpg123
       # are the independent decoders for cross-checks; groff checks the
       # generated manpages. They are installed (and therefore required) on Linux;
@@ -137,9 +136,33 @@ jobs:
       # lac-playback: cpal talks to ALSA on Linux. The tests never open a
       # device (they drive the audio callback themselves), so no sound
       # server is needed.
+      # wxWidgets links the system libjpeg and libtiff; on Ubuntu 26.04
+      # libgtk-3-dev no longer pulls in their development files.
       - name: Install GUI and audio build dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y --no-install-recommends libgtk-3-dev ninja-build libasound2-dev
+        run: sudo apt-get install -y --no-install-recommends libgtk-3-dev libjpeg-dev libtiff-dev ninja-build libasound2-dev
+      # The cache holds ffmpeg-sys-next's build output, i.e. bindings and
+      # feature flags for the FFmpeg it was built against. Restored onto a
+      # runner with another FFmpeg (ubuntu-latest moving from 24.04 with
+      # FFmpeg 6.1 to 26.04 with FFmpeg 8.0, a new Homebrew or BtbN build),
+      # ffmpeg-next then calls functions that FFmpeg no longer has, e.g.
+      # avcodec_close, and linking fails. So the FFmpeg version is part of
+      # the cache key, and the cache is restored only after FFmpeg is
+      # installed.
+      - name: FFmpeg version for the cache key
+        id: ffmpeg
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            version=$(basename "$FFMPEG_DIR")
+          else
+            version=$(pkg-config --modversion libavcodec)
+          fi
+          echo "FFmpeg (libavcodec) $version on $ImageOS"
+          echo "key=$ImageOS-libavcodec-$version" >> "$GITHUB_OUTPUT"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ steps.ffmpeg.outputs.key }}
       - name: Require cross-checks
         if: runner.os == 'Linux'
         shell: bash
