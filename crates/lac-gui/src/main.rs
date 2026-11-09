@@ -2489,6 +2489,7 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
     panel.on_paint(move |_| {
         let dc = AutoBufferedPaintDC::new(&p);
         let size = p.get_client_size();
+        let line = marker_width(&p);
         dc.set_background(BACKGROUND);
         dc.clear();
         let st = state.borrow();
@@ -2606,7 +2607,7 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
         }
         // The chained links' starts are there before the analysis is done.
         let split = editor.map_or(&[][..], Editor::splits);
-        dc.set_pen(SUGGESTED_SPLIT, 2, PenStyle::Solid);
+        dc.set_pen(SUGGESTED_SPLIT, 2 * line, PenStyle::Solid);
         for s in st
             .suggested_starts()
             .iter()
@@ -2620,7 +2621,7 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
         // Track boundaries (dashed) and labels at the top of each track.
         if let Some(e) = editor.filter(|e| !e.splits().is_empty()) {
             let width = f64::from(view.width());
-            dc.set_pen(TRACK, 1, PenStyle::ShortDash);
+            dc.set_pen(TRACK, line, PenStyle::ShortDash);
             dc.set_text_foreground(TRACK);
             dc.set_background_mode(BackgroundMode::Transparent);
             for t in e.tracks() {
@@ -2655,7 +2656,7 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
         for (pos, colour) in marks {
             let x = view.sample_to_x(pos).round();
             if (0.0..f64::from(view.width())).contains(&x) {
-                dc.set_pen(colour, 1, PenStyle::Solid);
+                dc.set_pen(colour, line, PenStyle::Solid);
                 let x = x as i32;
                 dc.draw_line(x, 0, x, size.height);
             }
@@ -2682,7 +2683,7 @@ fn bind_minimap(map: &Panel, waveform: &Panel, state: &Rc<RefCell<State>>) {
                     visible: view.visible(),
                     playhead: st.playhead(),
                 };
-                minimap::draw(&dc, size, &scene);
+                minimap::draw(&dc, size, marker_width(&m), &scene);
             } else {
                 dc.set_background(BACKGROUND);
                 dc.clear();
@@ -2780,6 +2781,21 @@ fn draw_ruler(dc: &impl DeviceContext, view: &WaveformView, rate: u32, size: Siz
             dc.draw_text(label, x + 3, top + RULER_MINOR + 1);
         }
     }
+}
+
+/// Width, in device units, of the pen for marker lines (cursor, selection
+/// edges, playhead, track boundaries, the minimap's frame) on `window`: one
+/// device-independent pixel.
+///
+/// Where wxWidgets draws in logical points (macOS, GTK with `GDK_SCALE`),
+/// that is 1 and the toolkit already makes it 2 physical pixels on a
+/// Retina/2x screen. On Windows a DC counts physical pixels, so a hard 1
+/// would shrink to half its visual width at 200 % (the manifest declares
+/// per-monitor DPI awareness, issue #62); `FromDIP` scales it there and
+/// follows the window to another monitor. The waveform's own columns stay
+/// 1 wide: they are one per device pixel by design.
+fn marker_width(window: &impl WxWidget) -> i32 {
+    window.from_dip_int(1).max(1)
 }
 
 /// A pixel coordinate for the device context.

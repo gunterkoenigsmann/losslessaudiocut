@@ -41,8 +41,10 @@ pub struct Scene<'a> {
     pub playhead: Option<SamplePos>,
 }
 
-/// Paints `scene` onto `dc`, `size` being the panel's client size.
-pub fn draw(dc: &impl DeviceContext, size: Size, scene: &Scene) {
+/// Paints `scene` onto `dc`, `size` being the panel's client size and
+/// `line` the pen width of the marker lines (track splits, playhead, the
+/// frame) in device units; see `marker_width` in `main.rs`.
+pub fn draw(dc: &impl DeviceContext, size: Size, line: i32, scene: &Scene) {
     let view = scene.map.view();
     dc.set_background(BACKGROUND);
     dc.clear();
@@ -85,19 +87,19 @@ pub fn draw(dc: &impl DeviceContext, size: Size, scene: &Scene) {
         }
     }
     if let Some(e) = scene.editor {
-        dc.set_pen(crate::TRACK, 1, PenStyle::ShortDash);
+        dc.set_pen(crate::TRACK, line, PenStyle::ShortDash);
         for &s in e.splits() {
             let x = px(view.sample_to_x(s));
             dc.draw_line(x, 0, x, size.height);
         }
     }
     if let Some(pos) = scene.playhead {
-        dc.set_pen(crate::PLAYHEAD, 1, PenStyle::Solid);
+        dc.set_pen(crate::PLAYHEAD, line, PenStyle::Solid);
         let x = px(view.sample_to_x(pos));
         dc.draw_line(x, 0, x, size.height);
     }
     // The frame's outline last, over everything.
-    dc.set_pen(FRAME, 1, PenStyle::Solid);
+    dc.set_pen(FRAME, line, PenStyle::Solid);
     dc.set_brush(FRAME, BrushStyle::Transparent);
     dc.draw_rectangle(
         px(frame.start),
