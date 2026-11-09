@@ -1013,6 +1013,7 @@ dependencies = [
  "lac-core",
  "proptest",
  "rustfft",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 lac-core.workspace = true
 rustfft = "6.4.1"
+thiserror.workspace = true
 
 
 [dev-dependencies]

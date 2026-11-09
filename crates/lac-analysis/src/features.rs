@@ -160,6 +160,110 @@ impl Features {
     }
 }
 
+/// Why [`Features::from_bytes`] rejected its input.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FeaturesFormatError {
+    /// The bytes do not start with [`Features::MAGIC`].
+    #[error("not stored analysis features")]
+    Magic,
+    /// Written by another version of the format.
+    #[error("analysis features format {0}, expected {expected}", expected = Features::FORMAT_VERSION)]
+    Version(u32),
+    /// Cut short, inconsistent or with trailing bytes.
+    #[error("damaged analysis features: {0}")]
+    Damaged(&'static str),
+}
+
+/// Bytes of one stored [`Frame`]: level and flatness as `f32`, then the
+/// band and chroma bytes.
+const FRAME_BYTES: usize = 8 + BANDS + 12;
+
+impl Features {
+    /// First bytes of [`Features::to_bytes`].
+    pub const MAGIC: [u8; 8] = *b"LACFEAT\0";
+    /// Version of the byte format; bumped whenever it or the meaning of a
+    /// feature changes, so stale caches are recomputed.
+    pub const FORMAT_VERSION: u32 = 1;
+
+    /// The features as bytes (little-endian): [`Features::MAGIC`], format
+    /// version, sample rate, hop, total length, frame count, then per
+    /// frame level, flatness, bands and chroma. Lets an analysis be kept
+    /// (a cache, or a tuning corpus) and [`crate::detect`] re-run on it.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(36 + self.frames.len() * FRAME_BYTES);
+        out.extend(Self::MAGIC);
+        out.extend(Self::FORMAT_VERSION.to_le_bytes());
+        out.extend(self.sample_rate.to_le_bytes());
+        out.extend((self.hop as u32).to_le_bytes());
+        out.extend(self.total.to_le_bytes());
+        out.extend((self.frames.len() as u64).to_le_bytes());
+        for f in &self.frames {
+            out.extend(f.level_db.to_le_bytes());
+            out.extend(f.flatness.to_le_bytes());
+            out.extend(f.bands);
+            out.extend(f.chroma);
+        }
+        out
+    }
+
+    /// Reads bytes written by [`Features::to_bytes`]. Anything else
+    /// (another version, truncation, inconsistent sizes) is an error and
+    /// never a panic.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, FeaturesFormatError> {
+        use FeaturesFormatError::{Damaged, Magic, Version};
+        let take = |at: usize, n: usize| bytes.get(at..at + n).ok_or(Damaged("truncated"));
+        let u32_at = |at: usize| -> Result<u32, FeaturesFormatError> {
+            let b = take(at, 4)?;
+            Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        };
+        let u64_at = |at: usize| -> Result<u64, FeaturesFormatError> {
+            let b = take(at, 8)?;
+            Ok(u64::from_le_bytes(std::array::from_fn(|i| b[i])))
+        };
+        if take(0, 8).map_err(|_| Magic)? != Self::MAGIC {
+            return Err(Magic);
+        }
+        let version = u32_at(8)?;
+        if version != Self::FORMAT_VERSION {
+            return Err(Version(version));
+        }
+        let sample_rate = u32_at(12)?;
+        let hop = u32_at(16)? as usize;
+        let total = u64_at(20)?;
+        let n = u64_at(28)?;
+        if sample_rate == 0 || hop != hop_for_rate(sample_rate) {
+            return Err(Damaged("sample rate and hop"));
+        }
+        // Checked before allocating, so a damaged count cannot ask for
+        // terabytes.
+        let body = bytes.len() - 36;
+        if (n as u128) * FRAME_BYTES as u128 != body as u128 {
+            return Err(Damaged("frame count"));
+        }
+        if total.div_ceil(hop as u64) != n {
+            return Err(Damaged("length"));
+        }
+        let frames = bytes[36..]
+            .chunks_exact(FRAME_BYTES)
+            .map(|b| {
+                let f32_at = |i: usize| f32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+                Frame {
+                    level_db: f32_at(0),
+                    flatness: f32_at(4),
+                    bands: std::array::from_fn(|i| b[8 + i]),
+                    chroma: std::array::from_fn(|i| b[8 + BANDS + i]),
+                }
+            })
+            .collect();
+        Ok(Features {
+            sample_rate,
+            hop,
+            total,
+            frames,
+        })
+    }
+}
+
 /// Computes [`Features`] from decoded samples in timeline order.
 pub struct FeatureExtractor {
     sample_rate: u32,
@@ -514,5 +618,45 @@ pub(crate) mod tests {
         let mut x = FeatureExtractor::new(rate, 2);
         x.push(&stereo);
         assert_eq!(x.finish(), features_of(&s, rate));
+    }
+
+    #[test]
+    fn bytes_round_trip() {
+        let rate = 8000;
+        let mut s = tone(5000, rate, 440.0, 5, 0.5);
+        s.extend(noise(3333, 0.1, 9));
+        let f = features_of(&s, rate);
+        assert_eq!(Features::from_bytes(&f.to_bytes()), Ok(f.clone()));
+        let empty = features_of(&[], rate);
+        assert_eq!(Features::from_bytes(&empty.to_bytes()), Ok(empty));
+    }
+
+    #[test]
+    fn damaged_bytes_are_errors() {
+        let f = features_of(&noise(3000, 0.5, 3), 8000);
+        let b = f.to_bytes();
+        // Every truncation, without a panic.
+        for n in 0..b.len() {
+            assert!(Features::from_bytes(&b[..n]).is_err(), "{n}");
+        }
+        let mut extra = b.clone();
+        extra.push(0);
+        assert!(Features::from_bytes(&extra).is_err());
+        let mut magic = b.clone();
+        magic[0] = b'X';
+        assert_eq!(
+            Features::from_bytes(&magic),
+            Err(FeaturesFormatError::Magic)
+        );
+        let mut version = b.clone();
+        version[8] = 99;
+        assert_eq!(
+            Features::from_bytes(&version),
+            Err(FeaturesFormatError::Version(99))
+        );
+        // A frame count that would need terabytes.
+        let mut count = b;
+        count[28..36].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(Features::from_bytes(&count).is_err());
     }
 }
