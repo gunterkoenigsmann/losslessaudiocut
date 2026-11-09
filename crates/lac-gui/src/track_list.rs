@@ -11,6 +11,8 @@ use lac_app::track_list::{Bound, COLUMNS, Row};
 use lac_core::TagField;
 use wxdragon::prelude::*;
 
+use crate::tints;
+
 /// Grid columns before the tag columns: start, end and length of the
 /// track. Start and end can be typed into (except the recording's own
 /// start and end), length is computed.
@@ -116,9 +118,24 @@ pub fn refresh(grid: &Grid, rows: &[Row]) {
             let colour = if row.deleted { DELETED } else { NORMAL };
             grid.set_cell_text_colour(r, c, &colour);
         }
+        let tint = row_tint(r as usize, rows.len());
+        for c in 0..grid.get_number_cols() {
+            grid.set_cell_background_colour(r, c, &tint);
+        }
     }
     grid.end_batch();
     grid.force_refresh();
+}
+
+/// Background of row `row` of `rows`: the track's tint, the same hue as
+/// behind its part of the waveform (issue #98); plain with one track,
+/// which the waveform does not tint either.
+fn row_tint(row: usize, rows: usize) -> Colour {
+    if rows > 1 {
+        tints::list(row)
+    } else {
+        tints::LIST_PLAIN
+    }
 }
 
 /// Sets one cell's text, read-only or editable.
@@ -143,5 +160,7 @@ fn rows_match(grid: &Grid, rows: &[Row]) -> bool {
                 };
                 grid.get_cell_value(r, c) == cell.text && grid.get_cell_text_colour(r, c) == colour
             })
+            // Going from one track to two tints the first row too.
+            && grid.get_cell_background_colour(r, 0) == row_tint(r as usize, rows.len())
     })
 }

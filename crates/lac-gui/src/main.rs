@@ -40,6 +40,7 @@ mod options;
 mod panes;
 mod position_bar;
 mod recent;
+mod tints;
 mod toolbar;
 mod track_list;
 
@@ -2470,6 +2471,18 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
         let spans = |ranges: &mut dyn Iterator<Item = Range<SamplePos>>| -> Vec<Range<u32>> {
             ranges.filter_map(|r| view.pixel_span(&r)).collect()
         };
+        // Each track tinted, when there are several (issue #83).
+        if let Some(e) = editor.filter(|e| !e.splits().is_empty()) {
+            for (i, t) in e.tracks().iter().enumerate() {
+                let Some(r) = view.pixel_span(&t.span) else {
+                    continue;
+                };
+                let tint = tints::waveform(i, BACKGROUND);
+                dc.set_pen(tint, 1, PenStyle::Solid);
+                dc.set_brush(tint, BrushStyle::Solid);
+                dc.draw_rectangle(px(r.start), 0, px(r.end - r.start), size.height);
+            }
+        }
         let deleted = editor.map_or_else(Vec::new, |e| spans(&mut e.deleted().iter().cloned()));
         let selected = editor.map_or_else(Vec::new, |e| spans(&mut e.selection().into_iter()));
         for (colour, list) in [(DELETED_BACKGROUND, &deleted), (SELECTION, &selected)] {
