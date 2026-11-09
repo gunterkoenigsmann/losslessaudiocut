@@ -84,6 +84,9 @@ pub struct Editor {
     /// The edits at the last export, to tell whether they are saved
     /// anywhere.
     exported: Option<Edits>,
+    /// A track start being dragged with the mouse: the track's index and
+    /// the edits before the drag, which become one undo step at its end.
+    moving: Option<(usize, Edits)>,
 }
 
 impl Editor {
@@ -98,6 +101,7 @@ impl Editor {
             undo: Vec::new(),
             redo: Vec::new(),
             exported: None,
+            moving: None,
         }
     }
 
@@ -429,6 +433,68 @@ impl Editor {
             }
         }
         Some(next)
+    }
+
+    /// The track whose start lies within `near` frames of `pos` (the
+    /// nearest one), as an index for [`Editor::begin_moving_track_start`].
+    /// The first track's start is fixed at 0, so it is never returned.
+    pub fn track_start_near(&self, pos: SamplePos, near: SamplePos) -> Option<usize> {
+        self.edits
+            .splits
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.abs_diff(pos) <= near)
+            .min_by_key(|(_, s)| s.abs_diff(pos))
+            .map(|(i, _)| i + 1)
+    }
+
+    /// Starts dragging the start of track `index` (the end of the one
+    /// before). While dragging, [`Editor::move_track_start_to`] moves it
+    /// at once (tracks, tags and the track list follow), and
+    /// [`Editor::end_moving_track_start`] makes the whole drag one undo
+    /// step. Returns false for the first track or an index out of range.
+    pub fn begin_moving_track_start(&mut self, index: usize) -> bool {
+        if self.track_start_range(index).is_none() {
+            return false;
+        }
+        self.moving = Some((index, self.edits.clone()));
+        true
+    }
+
+    /// The track whose start is being dragged.
+    pub fn moving_track_start(&self) -> Option<usize> {
+        self.moving.as_ref().map(|(i, _)| *i)
+    }
+
+    /// Moves the start being dragged to `pos`, clamped between its
+    /// neighbours so the tracks keep their order and none becomes empty.
+    /// Not recorded for undo by itself. Ignored without a drag.
+    pub fn move_track_start_to(&mut self, pos: SamplePos) {
+        let Some(index) = self.moving_track_start() else {
+            return;
+        };
+        let Some(range) = self.track_start_range(index) else {
+            return;
+        };
+        let to = pos.clamp(range.start, range.end - 1);
+        let from = std::mem::replace(&mut self.edits.splits[index - 1], to);
+        if let Some(tags) = self.edits.track_tags.remove(&from) {
+            self.edits.track_tags.insert(to, tags);
+        }
+    }
+
+    /// Ends dragging a track start. Returns whether it moved; if so, the
+    /// drag is one undo step.
+    pub fn end_moving_track_start(&mut self) -> bool {
+        let Some((_, before)) = self.moving.take() else {
+            return false;
+        };
+        if before == self.edits {
+            return false;
+        }
+        self.undo.push(before);
+        self.redo.clear();
+        true
     }
 
     /// Joins track `index` (0-based) with the one before it: removes the
@@ -784,6 +850,46 @@ mod tests {
         assert!(e.undo());
         assert_eq!(e.splits(), [3000, 6000]);
         assert_eq!(e.tracks()[1].name.as_deref(), Some("Middle"));
+    }
+
+    #[test]
+    fn dragging_a_track_start_is_one_undo_step() {
+        let mut e = Editor::new(10_000);
+        e.split_at_all([3000, 6000]);
+        assert!(e.rename_track(1, "Middle"));
+        assert_eq!(e.track_start_near(3010, 20), Some(1));
+        assert_eq!(e.track_start_near(5990, 20), Some(2));
+        assert_eq!(e.track_start_near(4500, 20), None);
+        assert_eq!(e.track_start_near(5, 20), None, "track 1 starts at 0");
+        let undo_depth = e.undo.len();
+
+        assert!(e.begin_moving_track_start(1));
+        assert_eq!(e.moving_track_start(), Some(1));
+        e.move_track_start_to(2000);
+        assert_eq!(e.splits(), [2000, 6000], "moves at once");
+        assert_eq!(e.tracks()[1].name.as_deref(), Some("Middle"));
+        // Clamped: not onto or past a neighbour.
+        e.move_track_start_to(9000);
+        assert_eq!(e.splits(), [5999, 6000]);
+        e.move_track_start_to(0);
+        assert_eq!(e.splits(), [1, 6000]);
+        e.move_track_start_to(2500);
+        assert!(e.end_moving_track_start());
+        assert_eq!(e.moving_track_start(), None);
+        assert_eq!(e.undo.len(), undo_depth + 1, "one step for the drag");
+        assert!(e.undo());
+        assert_eq!(e.splits(), [3000, 6000]);
+        assert_eq!(e.tracks()[1].name.as_deref(), Some("Middle"));
+
+        // A drag that ends where it began records nothing.
+        assert!(e.begin_moving_track_start(2));
+        e.move_track_start_to(7000);
+        e.move_track_start_to(6000);
+        assert!(!e.end_moving_track_start());
+        assert!(!e.begin_moving_track_start(0), "track 1 starts at 0");
+        assert!(!e.begin_moving_track_start(3));
+        e.move_track_start_to(100);
+        assert_eq!(e.splits(), [3000, 6000], "no drag, no move");
     }
 
     #[test]
