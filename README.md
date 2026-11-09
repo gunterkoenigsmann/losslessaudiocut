@@ -79,7 +79,9 @@ cell, e.g. the album. Selecting a row moves the cursor to that track. Tag
 changes are undone with Ctrl+Z like any other edit. Right-clicking a row
 opens the track's menu: zoom to it, play its first or last 3 seconds, move
 the cursor or a selection edge to its start or end, join it with the
-previous track, delete or restore it.
+previous track, delete or restore it. With several rows selected (drag over
+them, or Shift-click), it offers to merge their tracks into one; so does
+the waveform's menu for a selection that reaches into several tracks.
 
 *View > Perspective* (Ctrl+1 to Ctrl+6) zooms to the whole file, from the
 start to just after the selection start, around the selection start, the

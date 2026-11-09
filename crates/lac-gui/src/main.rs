@@ -2386,12 +2386,30 @@ fn show_track_menu(grid: &Grid, state: &Rc<RefCell<State>>, row: i32) {
     let Ok(index) = usize::try_from(row) else {
         return;
     };
-    let entries = match &state.borrow().editor {
-        Some(ed) => context_menu::track_list(ed, index),
+    // Rows the user selected (by dragging, or Shift- or Ctrl-clicking
+    // cells or row labels), so the menu can offer to merge them.
+    let selected: Vec<usize> = grid
+        .get_selected_blocks()
+        .iter()
+        .flat_map(|b| b.top_row..=b.bottom_row)
+        .filter_map(|r| usize::try_from(r).ok())
+        .collect();
+    let track_count = |st: &State| st.editor.as_ref().map(|e| e.splits().len());
+    let (entries, before) = match &state.borrow().editor {
+        Some(ed) => (
+            context_menu::track_list(ed, index, &selected),
+            ed.splits().len(),
+        ),
         None => return,
     };
     if !entries.is_empty() {
+        // The menu is modal: its command has run when it returns.
         popup(grid, state, entries);
+        // After a merge or join the selected rows are other tracks; keep
+        // them from offering a merge nobody chose.
+        if track_count(&state.borrow()) != Some(before) {
+            grid.clear_selection();
+        }
     }
 }
 
