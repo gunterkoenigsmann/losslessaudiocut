@@ -122,6 +122,52 @@ pub fn restore(stored: Option<&str>, default_shown: impl Fn(Pane) -> bool) -> Re
     }
 }
 
+/// `perspective` with the best size of each pane in `sizes` replaced by
+/// the given `(width, height)`.
+///
+/// A perspective stores every pane's best size (`bestw`, `besth`) and
+/// `wxAuiManager::LoadPerspective` restores it. For panes whose content
+/// is laid out by the program, such as the toolbar and the position bar,
+/// the stored size is that of the version that saved it; after the content
+/// grew (a new button, a wider clock, issue #94) it would crop the new
+/// content until the user resets the layout. So the GUI puts in the
+/// current best sizes before loading. Everything else (place, docking,
+/// visibility, sizes of panes the user resizes) is kept as stored.
+pub fn with_best_sizes(perspective: &str, sizes: &[(Pane, (i32, i32))]) -> String {
+    let Some(prefix) = PERSPECTIVE_PREFIXES
+        .iter()
+        .find(|p| perspective.starts_with(*p))
+    else {
+        return perspective.to_owned();
+    };
+    let body = &perspective[prefix.len()..];
+    let mut out = String::from(*prefix);
+    for part in split_unescaped(body, '|') {
+        let fields = split_unescaped(&part, ';');
+        let size = fields.iter().find_map(|f| match f.split_once('=') {
+            Some(("name", v)) => Pane::from_name(&unescape(v))
+                .and_then(|pane| sizes.iter().find(|(p, _)| *p == pane))
+                .map(|(_, size)| *size),
+            _ => None,
+        });
+        let fields: Vec<String> = match size {
+            Some((w, h)) => fields
+                .into_iter()
+                .map(|f| match f.split_once('=') {
+                    Some(("bestw", _)) => format!("bestw={w}"),
+                    Some(("besth", _)) => format!("besth={h}"),
+                    _ => f,
+                })
+                .collect(),
+            None => fields,
+        };
+        out.push_str(&fields.join(";"));
+        // wxWidgets ends every part, the last one too, with a `|`.
+        out.push('|');
+    }
+    out
+}
+
 /// The panes in a perspective string: each name with whether it is shown.
 /// Unknown names are kept (they may belong to a newer version).
 pub fn panes(perspective: &str) -> Vec<(String, bool)> {
@@ -319,6 +365,33 @@ mod tests {
                 Pane::ALL.map(|p| (p, p.shown_by_default())),
                 "{stored:?}"
             );
+        }
+    }
+
+    #[test]
+    fn stored_best_sizes_of_program_laid_out_panes_are_replaced() {
+        let fixed = with_best_sizes(
+            SAVED,
+            &[(Pane::Toolbar, (400, 30)), (Pane::Positions, (500, 40))],
+        );
+        // Only the toolbar's best size changed; the position bar is not in
+        // this layout, and nothing else of it is touched.
+        assert_eq!(
+            fixed,
+            SAVED.replace("bestw=328;besth=24", "bestw=400;besth=30")
+        );
+        assert_eq!(panes(&fixed), panes(SAVED));
+    }
+
+    #[test]
+    fn best_sizes_keep_escapes_and_ignore_other_formats() {
+        let p = r"layout2|name=a\|b;bestw=1;besth=2|name=positions;caption=x\;y;bestw=3;besth=4|dock_size(3,10,0)=40|";
+        assert_eq!(
+            with_best_sizes(p, &[(Pane::Positions, (30, 40))]),
+            r"layout2|name=a\|b;bestw=1;besth=2|name=positions;caption=x\;y;bestw=30;besth=40|dock_size(3,10,0)=40|"
+        );
+        for other in ["", "garbage", "layout9|name=positions;bestw=1"] {
+            assert_eq!(with_best_sizes(other, &[(Pane::Positions, (5, 5))]), other);
         }
     }
 

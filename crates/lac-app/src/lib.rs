@@ -40,6 +40,7 @@
 //! See `docs/architecture.md` in the repository for how this crate fits in.
 
 pub mod analysis_job;
+pub mod chapters;
 pub mod detail;
 pub mod editor;
 pub mod export_job;

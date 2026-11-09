@@ -27,8 +27,9 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-use lac_core::{SamplePos, TagField, TagValueError};
+use lac_core::{SamplePos, TagField, TagValueError, Tags};
 
+use crate::chapters::SuggestedStart;
 use crate::{CutRequest, KeptRange, TagEdits, format_samples, ranges};
 
 /// Everything the user changed, as one undoable value.
@@ -279,6 +280,45 @@ impl Editor {
         next.splits.sort_unstable();
         next.splits.dedup();
         let added = next.splits.len() - before;
+        self.commit(next);
+        added
+    }
+
+    /// Splits at each of `starts` in one undoable step, like
+    /// [`Editor::split_at_all`], and gives each track that starts at a
+    /// suggestion with tags (a chained Ogg link's, see
+    /// [`crate::chapters`]) those tags: every field where they differ from
+    /// `source` (the file's tags, which every track starts with), unless
+    /// the user already set that field for the track. A field the link
+    /// lacks is cleared, so a song without an artist does not inherit the
+    /// first song's. Returns the number of new track starts.
+    pub fn split_at_suggestions(&mut self, starts: &[SuggestedStart], source: &Tags) -> usize {
+        let mut next = self.edits.clone();
+        let before = next.splits.len();
+        next.splits.extend(
+            starts
+                .iter()
+                .map(|s| s.pos)
+                .filter(|&p| p > 0 && p < self.total),
+        );
+        next.splits.sort_unstable();
+        next.splits.dedup();
+        let added = next.splits.len() - before;
+        for s in starts.iter().filter(|s| s.pos > 0 && s.pos < self.total) {
+            let Some(tags) = &s.tags else { continue };
+            let edits = next.track_tags.entry(s.pos).or_default();
+            for field in TagField::ALL {
+                let want = tags.get(field);
+                if edits.get(field).is_none() && want != source.get(field) {
+                    // Values read from a tag are valid; a numeric one that
+                    // is not (cannot happen) is simply not taken over.
+                    let _ = edits.set(field, want.as_deref().unwrap_or(""));
+                }
+            }
+            if edits.is_empty() {
+                next.track_tags.remove(&s.pos);
+            }
+        }
         self.commit(next);
         added
     }
@@ -650,6 +690,63 @@ mod tests {
         assert_eq!(e.splits(), &[300]);
         assert_eq!(e.split_at_all([300, 0]), 0);
         assert!(e.can_redo(), "a no-op leaves the redo history alone");
+    }
+
+    #[test]
+    fn splitting_at_chained_links_takes_over_their_tags() {
+        let tags = |title: &str, artist: Option<&str>| Tags {
+            title: Some(title.into()),
+            artist: artist.map(Into::into),
+            album: Some("Radio".into()),
+            ..Tags::default()
+        };
+        let source = tags("One", Some("A"));
+        let mut e = Editor::new(1000);
+        // The user split at 600 already and named that track.
+        assert!(e.split_at(600));
+        assert!(e.rename_track(1, "Mine"));
+        let starts = [
+            SuggestedStart {
+                pos: 0,
+                tags: Some(source.clone()),
+            },
+            SuggestedStart {
+                pos: 200,
+                tags: None,
+            },
+            SuggestedStart {
+                pos: 400,
+                tags: Some(tags("Two", Some("A"))),
+            },
+            SuggestedStart {
+                pos: 600,
+                tags: Some(tags("Three", None)),
+            },
+        ];
+        assert_eq!(e.split_at_suggestions(&starts, &source), 2);
+        assert_eq!(e.splits(), [200, 400, 600]);
+        let edits: Vec<Vec<(TagField, String)>> = e
+            .tracks()
+            .iter()
+            .map(|t| t.tags.iter().map(|(f, v)| (f, v.to_string())).collect())
+            .collect();
+        assert_eq!(
+            edits,
+            [
+                vec![],
+                vec![],
+                // Only what differs from the file's tags.
+                vec![(TagField::Title, "Two".to_string())],
+                // The user's title stays; the missing artist is cleared.
+                vec![
+                    (TagField::Title, "Mine".to_string()),
+                    (TagField::Artist, String::new())
+                ],
+            ]
+        );
+        assert!(e.undo(), "one undo step");
+        assert_eq!(e.splits(), [600]);
+        assert_eq!(e.tracks()[1].name.as_deref(), Some("Mine"));
     }
 
     #[test]

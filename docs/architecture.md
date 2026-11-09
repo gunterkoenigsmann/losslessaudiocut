@@ -278,8 +278,12 @@ them, so we must too:
   separately and decoded with a fresh decoder *(implemented)*; a cut
   across a link boundary becomes one output stream per link. Tests check
   that a chained file decodes bit for bit like its links decoded as
-  separate files. A link boundary with a new comment header is offered as
-  a track boundary and its title tag as the track's title *(planned, issue #47)*.
+  separate files. Each link boundary is offered as a suggested track
+  start (`Container::chapters`, `lac_app::chapters`), shown and applied
+  like the analysis' suggestions; splitting there gives the track the
+  link's comment header tags where they differ from the file's (the first
+  link's), and a detected start within 2 s of a link boundary is taken to
+  be that boundary *(implemented, issue #47)*.
   All links must share codec, rate and channel count; other files are
   refused (open question, issue #46).
 - Captures can start mid-stream or contain damaged pages from network

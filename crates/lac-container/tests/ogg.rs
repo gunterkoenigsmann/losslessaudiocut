@@ -378,6 +378,10 @@ fn chained_files_are_one_timeline() {
         assert_eq!(f.links(), 2, "{name}");
         // 0.5 s + 0.8 s of input (see generate.sh), nothing more.
         assert_eq!(f.index().total_samples(), rate * 13 / 10, "{name}");
+        // Each link is offered as a track; the second starts after the
+        // first one's 0.5 s (its end trim applied).
+        let starts: Vec<u64> = f.chapters().iter().map(|c| c.start).collect();
+        assert_eq!(starts, [0, rate / 2], "{name}");
         // The reference decoder agrees on the length.
         let path = temp_file(name, &src);
         if let Some(d) = decode(codec, &path) {
