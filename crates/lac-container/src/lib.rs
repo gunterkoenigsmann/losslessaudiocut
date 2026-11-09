@@ -29,7 +29,7 @@ mod window;
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use lac_core::{CutCapabilities, CutPlan, PacketIndex, Tags};
+use lac_core::{CutCapabilities, CutPlan, PacketIndex, SamplePos, Tags};
 
 pub use decode::{Codec, DecodeSection};
 
@@ -40,6 +40,18 @@ impl<T: Read + Seek + ?Sized> ReadSeek for T {}
 /// Anything that can be written and seeked; used for trait objects.
 pub trait WriteSeek: Write + Seek {}
 impl<T: Write + Seek + ?Sized> WriteSeek for T {}
+
+/// A part of the source that the file itself marks as a track of its own,
+/// with that part's tags: a link of a chained Ogg file (stream rippers
+/// start one per song). Matroska chapters or ID3 `CHAP` frames could be
+/// offered the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chapter {
+    /// Where the part starts (index position, i.e. output sample frames).
+    pub start: SamplePos,
+    /// The part's own tags.
+    pub tags: Tags,
+}
 
 /// The operations every supported container offers.
 ///
@@ -58,6 +70,12 @@ pub trait Container: Send {
     fn warnings(&self) -> &[String];
     /// The source's tags, as far as [`Tags`] can hold them.
     fn tags(&self) -> &Tags;
+    /// The parts the file marks as tracks of their own, sorted by start,
+    /// the first starting at 0. Empty when the file is one part, which is
+    /// the case for every format except chained Ogg so far.
+    fn chapters(&self) -> &[Chapter] {
+        &[]
+    }
     /// Notes that apply to every cut of this file, for the export report:
     /// where a cut decodes differently in some players although every
     /// packet is copied verbatim (codec noise from a random generator, see
@@ -244,6 +262,9 @@ impl Container for ogg::OggFile {
     }
     fn tags(&self) -> &Tags {
         ogg::OggFile::tags(self)
+    }
+    fn chapters(&self) -> &[Chapter] {
+        ogg::OggFile::chapters(self)
     }
     fn write_cut(
         &self,
