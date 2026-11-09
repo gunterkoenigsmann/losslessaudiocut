@@ -496,7 +496,8 @@ exact cut point:
 - Speed only affects listening. It is never applied to exported files.
 
 **Implemented so far:** speeds from 0.5x to 3x in steps (Ctrl+Up/Down,
-Ctrl+1 for normal, *Play > Keep pitch*). The time-stretcher is our own
+Ctrl+1 for normal, a drop-down list next to Play in the toolbar,
+*Play > Keep pitch*). The time-stretcher is our own
 WSOLA (`lac_playback::stretch`, 30 ms Hann windows at 50 % overlap, the
 window moved by up to a quarter window to the best cross-correlation,
 searched coarse to fine); it needs no extra dependency. Varispeed needs no

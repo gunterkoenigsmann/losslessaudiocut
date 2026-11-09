@@ -123,7 +123,8 @@ while selecting* switches that off; it and *Keep pitch* are remembered
 between runs.
 
 Ctrl+Up and Ctrl+Down play faster or slower (0.5× to 3×), Ctrl+1 returns to
-normal speed. By default the pitch stays the same, so speech stays
+normal speed; the list next to the Play button in the toolbar picks a speed
+directly. By default the pitch stays the same, so speech stays
 intelligible when skimming through long recordings; with *Play > Keep pitch*
 switched off, the pitch follows the speed like a tape. The speed only
 affects listening, never the exported files.
