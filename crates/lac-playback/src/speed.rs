@@ -70,6 +70,22 @@ impl Speed {
         Speed { percent, ..self }
     }
 
+    /// The index into [`STEPS`] of this speed, or of the nearest step
+    /// (the slower one when two are equally near), for a selector listing
+    /// the steps.
+    pub fn step_index(self) -> usize {
+        // `min_by_key` keeps the first of equal keys, so ties go to the
+        // slower step.
+        (0..STEPS.len())
+            .min_by_key(|&i| STEPS[i].abs_diff(self.percent))
+            .unwrap_or(0)
+    }
+
+    /// The speed of step `index` of [`STEPS`] (clamped to the last one).
+    pub fn at_step(index: usize, keep_pitch: bool) -> Self {
+        Speed::new(STEPS[index.min(STEPS.len() - 1)], keep_pitch)
+    }
+
     /// For display, e.g. `1.25×`.
     pub fn label(self) -> String {
         let s = format!("{:.2}", f64::from(self.percent) / 100.0);
@@ -99,6 +115,18 @@ mod tests {
         assert_eq!(Speed::new(110, true).faster().percent(), 125);
         assert_eq!(Speed::new(110, true).slower().percent(), 100);
         assert!(!Speed::new(110, false).faster().keep_pitch);
+    }
+
+    #[test]
+    fn step_indices_round_trip_and_round_to_the_nearest_step() {
+        for (i, &p) in STEPS.iter().enumerate() {
+            assert_eq!(Speed::new(p, true).step_index(), i);
+            assert_eq!(Speed::at_step(i, false), Speed::new(p, false));
+        }
+        assert_eq!(Speed::new(110, true).step_index(), 2); // 100
+        assert_eq!(Speed::new(120, true).step_index(), 3); // 125
+        assert_eq!(Speed::new(225, true).step_index(), 6); // tie: 200
+        assert_eq!(Speed::at_step(99, true).percent(), 300);
     }
 
     #[test]
