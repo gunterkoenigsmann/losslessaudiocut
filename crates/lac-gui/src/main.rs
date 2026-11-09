@@ -58,6 +58,7 @@ use lac_app::detail::{Detail, DetailLoader};
 use lac_app::editor::{Editor, Edits};
 use lac_app::export_job::{ExportJob, default_output, describe_outcomes, track_tasks};
 use lac_app::format_samples;
+use lac_app::hover::{self, Zone};
 use lac_app::launch::GuiArgs;
 use lac_app::layout::Pane;
 use lac_app::minimap::Minimap;
@@ -321,6 +322,11 @@ struct State {
     minimap_width: u32,
     /// The minimap pane, redrawn whenever the waveform is.
     minimap_panel: Option<Panel>,
+    /// Height of the time ruler as last painted (0 when hidden), so the
+    /// tooltip knows where the ruler is.
+    ruler_height: std::cell::Cell<i32>,
+    /// The waveform's tooltip as last set, so it is set only on changes.
+    tooltip: String,
 }
 
 /// A scrub: dragging with the right button plays short pieces of audio
@@ -1864,6 +1870,57 @@ fn mouse_event(e: &WindowEventData) -> Option<(&Event, f64)> {
     Some((ev, x))
 }
 
+/// The pointer's y position in a mouse event.
+fn e_y(e: &WindowEventData) -> i32 {
+    mouse_event(e)
+        .and_then(|(ev, _)| ev.get_position())
+        .map_or(0, |pt| pt.y)
+}
+
+/// How close (in pixels) a mark must be to the pointer for its tooltip.
+const TOOLTIP_REACH: f64 = 3.0;
+
+/// Sets the waveform's tooltip to what is at pixel (`x`, `y`) (issue #93;
+/// the texts come from [`lac_app::hover`]). Only changes are passed on,
+/// so the tooltip does not flicker while the pointer moves over one mark.
+fn update_tooltip(st: &mut State, panel: &Panel, x: f64, y: i32) {
+    let tip = (|| {
+        let (view, ed, rate) = (st.view.as_ref()?, st.editor.as_ref()?, st.rate?);
+        let height = panel.get_client_size().height;
+        let ruler = st.ruler_height.get();
+        let zone = if y >= height - ruler {
+            Zone::Ruler
+        } else if y >= height - ruler - SUGGESTION_MARK {
+            Zone::Bottom
+        } else if y < 2 * SUGGESTION_MARK {
+            Zone::Top
+        } else {
+            Zone::Lanes
+        };
+        let starts: Vec<SamplePos> = st
+            .suggested_starts()
+            .iter()
+            .map(|s| s.pos)
+            .filter(|p| !ed.splits().contains(p))
+            .collect();
+        let scene = hover::Scene {
+            editor: ed,
+            pauses: st.detection.as_ref().map_or(&[][..], |d| &d.regions),
+            suggested_starts: &starts,
+            playhead: st.playhead(),
+            rate,
+        };
+        let pos = view.x_to_sample(x.max(0.0));
+        let near = (TOOLTIP_REACH * view.samples_per_pixel()).ceil() as SamplePos;
+        hover::tooltip(&scene, pos, zone, near)
+    })()
+    .unwrap_or_default();
+    if tip != st.tooltip {
+        panel.set_tooltip(&tip);
+        st.tooltip = tip;
+    }
+}
+
 /// Left button: drag to select, Shift+click to move the nearer edge, a
 /// click puts the cursor (and moves playback there). The view scrolls when
 /// the pointer leaves the window while dragging.
@@ -1919,12 +1976,15 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
                     }
                     return;
                 }
+                if !st.editor.as_ref().is_some_and(Editor::dragging) {
+                    // Just moving: explain what is under the pointer.
+                    let y = e_y(&e);
+                    update_tooltip(st, &p, x, y);
+                    return;
+                }
                 let (Some(v), Some(ed)) = (&mut st.view, &mut st.editor) else {
                     return;
                 };
-                if !ed.dragging() {
-                    return;
-                }
                 let width = f64::from(v.width());
                 if x < 0.0 {
                     v.scroll_by(x);
@@ -2092,6 +2152,7 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
         } else {
             0
         };
+        st.ruler_height.set(ruler_height);
         let lanes = lanes::lanes(peaks.channels(), size.height - ruler_height);
         let editor = st.editor.as_ref();
         // Backgrounds first, the waveform goes on top.
