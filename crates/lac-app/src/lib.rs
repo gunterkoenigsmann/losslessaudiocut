@@ -36,6 +36,7 @@
 //! - [`file_types`]: the audio file types the program opens, for the open
 //!   dialog and the packages' file associations.
 //! - [`launch`]: the GUI program's command line.
+//! - [`recent_files`]: the list behind File > Open recent.
 //!
 //! See `docs/architecture.md` in the repository for how this crate fits in.
 
@@ -54,6 +55,7 @@ pub mod peak_job;
 pub mod playback;
 pub mod positions;
 pub mod ranges;
+pub mod recent_files;
 pub mod ruler;
 pub mod session;
 pub mod tag_edits;
