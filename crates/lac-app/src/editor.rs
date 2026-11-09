@@ -358,6 +358,79 @@ impl Editor {
         Some(prev + 1..next)
     }
 
+    /// Makes track `index` (0-based) span exactly `span`, moving its start
+    /// and its end (the next track's start) in one undoable step; each
+    /// track keeps its own tags. The first track's start is fixed at 0 and
+    /// the last track's end at the end of the recording, so for those
+    /// `span` must keep that bound. Returns false if `span` is empty,
+    /// would change the order of the tracks or make one empty, or changes
+    /// nothing.
+    pub fn set_track_span(&mut self, index: usize, span: Range<SamplePos>) -> bool {
+        match self.with_track_span(index, span) {
+            Some(next) => self.commit(next),
+            None => false,
+        }
+    }
+
+    /// Whether [`Editor::set_track_span`] would change something.
+    pub fn can_set_track_span(&self, index: usize, span: Range<SamplePos>) -> bool {
+        self.with_track_span(index, span)
+            .is_some_and(|next| next != self.edits)
+    }
+
+    /// The edits with track `index` spanning `span`, or `None` if that is
+    /// not possible (see [`Editor::set_track_span`]).
+    fn with_track_span(&self, index: usize, span: Range<SamplePos>) -> Option<Edits> {
+        let n = self.edits.splits.len();
+        if index > n || span.start >= span.end {
+            return None;
+        }
+        let mut next = self.edits.clone();
+        // Split point `index - 1` is the track's start, split point
+        // `index` its end; (old, new) for each one that moves.
+        let mut moved = Vec::new();
+        if index == 0 {
+            if span.start != 0 {
+                return None;
+            }
+        } else {
+            moved.push((
+                std::mem::replace(&mut next.splits[index - 1], span.start),
+                span.start,
+            ));
+        }
+        if index == n {
+            if span.end != self.total {
+                return None;
+            }
+        } else {
+            moved.push((
+                std::mem::replace(&mut next.splits[index], span.end),
+                span.end,
+            ));
+        }
+        // Strictly increasing inside the recording: no track reordered or
+        // empty.
+        let inside = next.splits.first().is_none_or(|&s| s > 0)
+            && next.splits.last().is_none_or(|&s| s < self.total)
+            && next.splits.windows(2).all(|w| w[0] < w[1]);
+        if !inside {
+            return None;
+        }
+        // Take all moved tags out first: a new key may be another one's
+        // old key.
+        let tags: Vec<_> = moved
+            .iter()
+            .map(|&(from, to)| (to, next.track_tags.remove(&from)))
+            .collect();
+        for (to, t) in tags {
+            if let Some(t) = t {
+                next.track_tags.insert(to, t);
+            }
+        }
+        Some(next)
+    }
+
     /// Joins track `index` (0-based) with the one before it: removes the
     /// split point it starts at, and its name. Returns false for the first
     /// track or an index out of range.
@@ -711,6 +784,40 @@ mod tests {
         assert!(e.undo());
         assert_eq!(e.splits(), [3000, 6000]);
         assert_eq!(e.tracks()[1].name.as_deref(), Some("Middle"));
+    }
+
+    #[test]
+    fn setting_a_track_span_moves_both_ends_in_one_step() {
+        let mut e = Editor::new(10_000);
+        e.split_at_all([3000, 6000]);
+        assert!(e.rename_track(1, "Middle"));
+        assert!(e.rename_track(2, "Last"));
+        assert!(e.can_set_track_span(1, 2000..7000));
+        assert!(e.set_track_span(1, 2000..7000));
+        assert_eq!(e.splits(), [2000, 7000]);
+        let names: Vec<_> = e.tracks().into_iter().map(|t| t.name).collect();
+        assert_eq!(
+            names,
+            [None, Some("Middle".to_string()), Some("Last".to_string())]
+        );
+        assert!(e.undo());
+        assert_eq!(e.splits(), [3000, 6000], "one undo step");
+
+        // The first track starts at 0 and the last ends at the end.
+        assert!(e.set_track_span(0, 0..4000));
+        assert_eq!(e.splits(), [4000, 6000]);
+        assert!(!e.can_set_track_span(0, 100..4000));
+        assert!(!e.can_set_track_span(2, 6000..9000));
+        assert!(e.set_track_span(2, 5000..10_000));
+        assert_eq!(e.splits(), [4000, 5000]);
+        // Moving a boundary onto or past a neighbour, an empty span, an
+        // index out of range and no change are refused.
+        assert!(!e.can_set_track_span(1, 4000..10_000), "last track empty");
+        assert!(!e.can_set_track_span(1, 4500..4500));
+        assert!(!e.can_set_track_span(3, 0..1));
+        assert!(!e.can_set_track_span(1, 4000..5000), "no change");
+        assert!(!e.set_track_span(1, 0..5000), "first track would be empty");
+        assert_eq!(e.splits(), [4000, 5000]);
     }
 
     #[test]

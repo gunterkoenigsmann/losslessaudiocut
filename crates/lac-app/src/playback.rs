@@ -49,6 +49,51 @@ pub fn timeline(editor: &Editor) -> Timeline {
     Timeline::new(editor.kept())
 }
 
+/// Which end of a range [`excerpt`] plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// The beginning.
+    Start,
+    /// The ending.
+    End,
+}
+
+/// How long an excerpt (e.g. the start of a selection) plays: long
+/// enough to judge a cut, short enough to try several.
+pub const EXCERPT_SECONDS: u32 = 3;
+
+/// What playback plays for the start or end (`end`) of source `range`:
+/// its kept parts, trimmed to the first (or last) `len` kept frames.
+/// Empty if all of `range` is deleted.
+pub fn excerpt(editor: &Editor, range: Range<SamplePos>, end: End, len: SamplePos) -> Timeline {
+    let mut parts: Vec<_> = editor
+        .kept()
+        .into_iter()
+        .map(|k| k.start.max(range.start)..k.end.min(range.end))
+        .filter(|k| k.start < k.end)
+        .collect();
+    if end == End::End {
+        parts.reverse();
+    }
+    let mut left = len;
+    let mut out = Vec::new();
+    for p in parts {
+        if left == 0 {
+            break;
+        }
+        let take = left.min(p.end - p.start);
+        left -= take;
+        out.push(match end {
+            End::Start => p.start..p.start + take,
+            End::End => p.end - take..p.end,
+        });
+    }
+    if end == End::End {
+        out.reverse();
+    }
+    Timeline::new(out)
+}
+
 /// Opens `path` for playback of `timeline` on the default audio device,
 /// paused at the start. The message is for the user.
 pub fn open_player(path: &Path, timeline: Timeline) -> Result<Player, String> {
@@ -58,6 +103,22 @@ pub fn open_player(path: &Path, timeline: Timeline) -> Result<Player, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn excerpts_take_kept_frames_from_their_end_of_the_range() {
+        use super::{End, excerpt};
+        let mut e = crate::editor::Editor::new(10_000);
+        e.select(2000, 3000);
+        e.delete_selection();
+        // Kept: 0..2000 and 3000..10_000.
+        let start = excerpt(&e, 1000..8000, End::Start, 1500);
+        assert_eq!(start.segments(), [1000..2000, 3000..3500]);
+        let end = excerpt(&e, 1000..8000, End::End, 1500);
+        assert_eq!(end.segments(), std::slice::from_ref(&(6500..8000)));
+        let short = excerpt(&e, 1500..3500, End::End, 5000);
+        assert_eq!(short.segments(), [1500..2000, 3000..3500], "all of it");
+        assert!(excerpt(&e, 2100..2900, End::Start, 100).is_empty());
+    }
+
     use std::time::{Duration, Instant};
 
     use lac_playback::{Engine, OutputFormat};

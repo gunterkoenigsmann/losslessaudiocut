@@ -1,0 +1,574 @@
+//! The waveform's right-click menu (issue #82): what can be done with the
+//! selection, the playback position or the place under the pointer.
+//!
+//! [`waveform`] lists the entries for a right-click; each carries an
+//! [`Action`] with the concrete positions it was offered for, so the menu
+//! can say what an entry does and grey out what would change nothing.
+//! [`apply`] runs an action on the [`Editor`]; playing is left to the GUI,
+//! which owns the player.
+//!
+//! The right button also scrubs (hold it, or drag); [`RightPress`] tells a
+//! click, which opens the menu, from the start of a scrub.
+
+use std::ops::Range;
+use std::time::{Duration, Instant};
+
+use lac_core::SamplePos;
+use lac_playback::Timeline;
+
+use crate::editor::Editor;
+use crate::hover::Scene;
+use crate::playback::{self, EXCERPT_SECONDS, End};
+use crate::time::format_samples;
+use crate::track_list::Bound;
+
+/// How far (in pixels) the pointer may move while the right button is
+/// down for it to still be a click rather than a scrub.
+pub const CLICK_SLOP: f64 = 4.0;
+
+/// How long the right button may be held for a click: holding it longer
+/// listens at the pointer (a scrub without moving).
+pub const CLICK_TIME: Duration = Duration::from_millis(250);
+
+/// How far (in seconds) "Fine-tune selection" looks for a detected cutting
+/// point to move each edge of the selection to.
+pub const FINE_TUNE_SECONDS: u32 = 2;
+
+/// The right button went down and it is not yet known whether this is a
+/// click (menu) or a scrub.
+#[derive(Debug, Clone, Copy)]
+pub struct RightPress {
+    x: f64,
+    y: f64,
+    at: Instant,
+}
+
+impl RightPress {
+    /// The button went down at window position (`x`, `y`) at time `at`.
+    pub fn new(x: f64, y: f64, at: Instant) -> Self {
+        RightPress { x, y, at }
+    }
+
+    /// Where the button went down.
+    pub fn x(&self) -> f64 {
+        self.x
+    }
+
+    /// Whether the pointer at (`x`, `y`) has left the click's reach, which
+    /// makes the press a scrub.
+    pub fn moved(&self, x: f64, y: f64) -> bool {
+        (x - self.x).abs() > CLICK_SLOP || (y - self.y).abs() > CLICK_SLOP
+    }
+
+    /// Whether the button has been held too long for a click at `now`,
+    /// which makes the press a scrub.
+    pub fn held(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.at) >= CLICK_TIME
+    }
+}
+
+/// What a menu entry does, with the positions it was offered for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// New tracks start at these positions (one undo step).
+    Split(Vec<SamplePos>),
+    /// Track `track` (0-based) spans exactly `span`.
+    SetTrackSpan {
+        /// Index of the track.
+        track: usize,
+        /// Its new start and end.
+        span: Range<SamplePos>,
+    },
+    /// The start or end of track `track` (0-based) moves to `to`.
+    MoveBound {
+        /// Index of the track.
+        track: usize,
+        /// Which end moves.
+        bound: Bound,
+        /// Where it moves to.
+        to: SamplePos,
+    },
+    /// The selection becomes this range.
+    Select(Range<SamplePos>),
+    /// Deletes the selection.
+    Delete,
+    /// Restores the deleted parts in the selection.
+    Restore,
+    /// Plays the first or last [`EXCERPT_SECONDS`] of kept audio in the
+    /// range.
+    PlayExcerpt {
+        /// The source range.
+        range: Range<SamplePos>,
+        /// Which end of it.
+        end: End,
+    },
+    /// Plays from this source position on.
+    PlayFrom(SamplePos),
+}
+
+/// One entry of the menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Item {
+    /// The text shown.
+    pub label: String,
+    /// What choosing it does.
+    pub action: Action,
+    /// Whether it would do anything; disabled entries are shown greyed
+    /// out, so the menu does not change shape under the user's hand.
+    pub enabled: bool,
+}
+
+/// A line of the menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Entry {
+    /// A command.
+    Item(Item),
+    /// A separator between groups of commands.
+    Separator,
+}
+
+/// What [`apply`] leaves for the GUI to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effect {
+    /// The editor was changed (`true`) or nothing changed (`false`).
+    Edited(bool),
+    /// Play this, then stop.
+    Play(Timeline),
+    /// Play from this source position on.
+    PlayFrom(SamplePos),
+}
+
+/// The menu for a right-click at source position `pos`, with marks within
+/// `near` samples counting as under the pointer (as for tooltips, see
+/// [`crate::hover::tooltip`]).
+///
+/// Groups, separated: the selection's commands if the click is in (or at
+/// an edge of) the selection, the playback position's if it is near the
+/// playhead, and always the pointer's.
+pub fn waveform(scene: &Scene, pos: SamplePos, near: SamplePos) -> Vec<Entry> {
+    let ed = scene.editor;
+    let mut groups = Vec::new();
+    if let Some(sel) = ed
+        .selection()
+        .filter(|s| s.start.saturating_sub(near) <= pos && pos <= s.end + near)
+    {
+        groups.push(selection_items(scene, &sel, pos));
+    }
+    if let Some(ph) = scene.playhead.filter(|p| p.abs_diff(pos) <= near) {
+        groups.push(playhead_items(scene, ph));
+    }
+    groups.push(pointer_items(scene, pos));
+    let mut entries = Vec::new();
+    for g in groups {
+        if !entries.is_empty() {
+            entries.push(Entry::Separator);
+        }
+        entries.extend(g.into_iter().map(Entry::Item));
+    }
+    entries
+}
+
+/// Commands for the selection `sel`, clicked at `pos`. Track commands are
+/// about the track under the pointer.
+fn selection_items(scene: &Scene, sel: &Range<SamplePos>, pos: SamplePos) -> Vec<Item> {
+    let ed = scene.editor;
+    let t = |p| format_samples(p, scene.rate);
+    let track = ed.track_at(pos.min(ed.total().saturating_sub(1)));
+    let n = track + 1;
+    let bound = |bound, to, label: String| {
+        // The end of track i is the start of track i + 1.
+        let start_of = match bound {
+            Bound::Start => track,
+            Bound::End => track + 1,
+        };
+        let enabled = ed
+            .track_start_range(start_of)
+            .is_some_and(|r| r.contains(&to));
+        Item {
+            label,
+            action: Action::MoveBound { track, bound, to },
+            enabled,
+        }
+    };
+    let excerpt = |end, label: &str| Item {
+        label: format!("{label} ({EXCERPT_SECONDS} s)"),
+        enabled: !playback::excerpt(ed, sel.clone(), end, 1).is_empty(),
+        action: Action::PlayExcerpt {
+            range: sel.clone(),
+            end,
+        },
+    };
+    let kept = ed.kept();
+    let any_kept = kept.iter().any(|k| k.start < sel.end && sel.start < k.end);
+    let any_deleted = ed
+        .deleted()
+        .iter()
+        .any(|d| d.start < sel.end && sel.start < d.end);
+    let tuned = fine_tuned(scene, sel);
+    let mut items = vec![
+        split_item(
+            ed,
+            vec![sel.start, sel.end],
+            "New track from selection".into(),
+        ),
+        Item {
+            label: format!("Fit track {n} to selection"),
+            enabled: ed.can_set_track_span(track, sel.clone()),
+            action: Action::SetTrackSpan {
+                track,
+                span: sel.clone(),
+            },
+        },
+        bound(
+            Bound::Start,
+            sel.start,
+            format!("Track {n} starts at selection start"),
+        ),
+        bound(
+            Bound::Start,
+            sel.end,
+            format!("Track {n} starts at selection end"),
+        ),
+        bound(
+            Bound::End,
+            sel.start,
+            format!("Track {n} ends at selection start"),
+        ),
+        bound(
+            Bound::End,
+            sel.end,
+            format!("Track {n} ends at selection end"),
+        ),
+        excerpt(End::Start, "Play selection start"),
+        excerpt(End::End, "Play selection end"),
+        Item {
+            label: match &tuned {
+                Some(r) => format!(
+                    "Fine-tune selection to detected cuts ({}–{})",
+                    t(r.start),
+                    t(r.end)
+                ),
+                None => "Fine-tune selection to detected cuts (none nearby)".into(),
+            },
+            enabled: tuned.is_some(),
+            action: Action::Select(tuned.unwrap_or_else(|| sel.clone())),
+        },
+        Item {
+            label: "Delete selection".into(),
+            action: Action::Delete,
+            enabled: any_kept,
+        },
+        Item {
+            label: "Restore selection".into(),
+            action: Action::Restore,
+            enabled: any_deleted,
+        },
+    ];
+    // Keep entries in a stable order, but drop the pointless "restore"
+    // where nothing was ever deleted.
+    if ed.deleted().is_empty() {
+        items.pop();
+    }
+    items
+}
+
+/// Commands for the playback position `ph`.
+fn playhead_items(scene: &Scene, ph: SamplePos) -> Vec<Item> {
+    let ed = scene.editor;
+    let at = format_samples(ph, scene.rate);
+    let mut items = vec![split_item(
+        ed,
+        vec![ph],
+        format!("Split at playback position {at}"),
+    )];
+    if let Some(sel) = ed.selection() {
+        items.push(Item {
+            label: format!("Selection starts at playback position {at}"),
+            enabled: ph < sel.end && ph != sel.start,
+            action: Action::Select(ph..sel.end),
+        });
+        items.push(Item {
+            label: format!("Selection ends at playback position {at}"),
+            enabled: ph > sel.start && ph != sel.end,
+            action: Action::Select(sel.start..ph),
+        });
+    }
+    items
+}
+
+/// Commands for the place under the pointer.
+fn pointer_items(scene: &Scene, pos: SamplePos) -> Vec<Item> {
+    let ed = scene.editor;
+    let at = format_samples(pos, scene.rate);
+    vec![
+        split_item(ed, vec![pos], format!("Split here ({at})")),
+        Item {
+            label: "Play from here".into(),
+            action: Action::PlayFrom(pos),
+            enabled: ed.kept().iter().any(|k| k.end > pos),
+        },
+    ]
+}
+
+/// An entry starting tracks at `at`, enabled if any of them is new.
+fn split_item(ed: &Editor, at: Vec<SamplePos>, label: String) -> Item {
+    let enabled = at
+        .iter()
+        .any(|&p| p > 0 && p < ed.total() && !ed.splits().contains(&p));
+    Item {
+        label,
+        action: Action::Split(at),
+        enabled,
+    }
+}
+
+/// The selection with each edge moved to the nearest detected cutting
+/// point (an edge of a suggested pause, or a suggested track start)
+/// within [`FINE_TUNE_SECONDS`]; `None` if that changes nothing or would
+/// leave nothing selected.
+fn fine_tuned(scene: &Scene, sel: &Range<SamplePos>) -> Option<Range<SamplePos>> {
+    let reach = SamplePos::from(FINE_TUNE_SECONDS) * SamplePos::from(scene.rate);
+    let points: Vec<SamplePos> = scene
+        .pauses
+        .iter()
+        .flat_map(|r| [r.range.start, r.range.end])
+        .chain(scene.suggested_starts.iter().copied())
+        .collect();
+    let snap = |p: SamplePos| {
+        points
+            .iter()
+            .copied()
+            .filter(|q| q.abs_diff(p) <= reach)
+            .min_by_key(|q| q.abs_diff(p))
+            .unwrap_or(p)
+    };
+    let tuned = snap(sel.start)..snap(sel.end);
+    (tuned.start < tuned.end && tuned != *sel).then_some(tuned)
+}
+
+/// Runs `action` on `editor` of a recording with `rate` frames per
+/// second. Playing is left to the caller (see [`Effect`]).
+pub fn apply(editor: &mut Editor, action: &Action, rate: u32) -> Effect {
+    match action {
+        Action::Split(at) => Effect::Edited(editor.split_at_all(at.iter().copied()) > 0),
+        Action::SetTrackSpan { track, span } => {
+            Effect::Edited(editor.set_track_span(*track, span.clone()))
+        }
+        Action::MoveBound { track, bound, to } => {
+            let start_of = match bound {
+                Bound::Start => *track,
+                Bound::End => track + 1,
+            };
+            Effect::Edited(editor.move_track_start(start_of, *to))
+        }
+        Action::Select(r) => {
+            editor.select(r.start, r.end);
+            Effect::Edited(true)
+        }
+        Action::Delete => Effect::Edited(editor.delete_selection()),
+        Action::Restore => Effect::Edited(editor.restore_selection()),
+        Action::PlayExcerpt { range, end } => {
+            let len = SamplePos::from(EXCERPT_SECONDS) * SamplePos::from(rate);
+            Effect::Play(playback::excerpt(editor, range.clone(), *end, len))
+        }
+        Action::PlayFrom(p) => Effect::PlayFrom(*p),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lac_analysis::{Region, RegionKind};
+
+    /// 1000 frames per second keeps the times readable.
+    const RATE: u32 = 1000;
+
+    fn scene<'a>(editor: &'a Editor, pauses: &'a [Region], starts: &'a [SamplePos]) -> Scene<'a> {
+        Scene {
+            editor,
+            pauses,
+            suggested_starts: starts,
+            playhead: None,
+            rate: RATE,
+        }
+    }
+
+    /// The menu's items, without separators.
+    fn items(entries: &[Entry]) -> Vec<&Item> {
+        entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Item(i) => Some(i),
+                Entry::Separator => None,
+            })
+            .collect()
+    }
+
+    /// The item labelled `label`.
+    fn item<'a>(entries: &'a [Entry], label: &str) -> &'a Item {
+        items(entries)
+            .into_iter()
+            .find(|i| i.label.starts_with(label))
+            .unwrap_or_else(|| panic!("no {label:?} in {entries:#?}"))
+    }
+
+    #[test]
+    fn a_click_stays_a_click_until_the_pointer_moves_or_is_held() {
+        let t0 = Instant::now();
+        let p = RightPress::new(100.0, 50.0, t0);
+        assert!(!p.moved(103.0, 47.0));
+        assert!(p.moved(105.0, 50.0));
+        assert!(p.moved(100.0, 55.0));
+        assert!(!p.held(t0 + Duration::from_millis(100)));
+        assert!(p.held(t0 + CLICK_TIME));
+        assert_eq!(p.x(), 100.0);
+    }
+
+    #[test]
+    fn outside_the_selection_only_the_pointer_has_commands() {
+        let e = Editor::new(60_000);
+        let s = scene(&e, &[], &[]);
+        let menu = waveform(&s, 5_000, 10);
+        let labels: Vec<_> = items(&menu).iter().map(|i| i.label.clone()).collect();
+        assert_eq!(labels, ["Split here (0:05.000)", "Play from here"]);
+        assert!(items(&menu).iter().all(|i| i.enabled));
+        // Not at the very start: track 1 always starts there.
+        let menu = waveform(&s, 0, 10);
+        assert!(!item(&menu, "Split here").enabled);
+    }
+
+    #[test]
+    fn the_selection_can_become_a_track_or_move_its_bounds() {
+        let mut e = Editor::new(60_000);
+        e.split_at_all([10_000, 30_000]);
+        e.select(15_000, 20_000);
+        let s = scene(&e, &[], &[]);
+        // Right-click in track 2 (10..30 s), inside the selection.
+        let menu = waveform(&s, 17_000, 10);
+        assert_eq!(menu.iter().filter(|e| **e == Entry::Separator).count(), 1);
+        let new = item(&menu, "New track from selection");
+        assert_eq!(new.action, Action::Split(vec![15_000, 20_000]));
+        assert!(new.enabled);
+        let fit = item(&menu, "Fit track 2 to selection");
+        assert!(fit.enabled);
+        assert!(item(&menu, "Track 2 starts at selection start").enabled);
+        assert!(item(&menu, "Track 2 starts at selection end").enabled);
+        assert!(item(&menu, "Track 2 ends at selection start").enabled);
+        assert!(item(&menu, "Track 2 ends at selection end").enabled);
+        assert!(item(&menu, "Delete selection").enabled);
+        assert!(
+            items(&menu).iter().all(|i| !i.label.starts_with("Restore")),
+            "nothing was deleted"
+        );
+
+        let mut e2 = e.clone();
+        assert_eq!(apply(&mut e2, &fit.action, RATE), Effect::Edited(true));
+        assert_eq!(e2.splits(), [15_000, 20_000]);
+        let mut e2 = e.clone();
+        let ends = &item(&menu, "Track 2 ends at selection end").action;
+        assert_eq!(apply(&mut e2, ends, RATE), Effect::Edited(true));
+        assert_eq!(e2.splits(), [10_000, 20_000]);
+        let mut e2 = e.clone();
+        assert_eq!(apply(&mut e2, &new.action, RATE), Effect::Edited(true));
+        assert_eq!(e2.splits(), [10_000, 15_000, 20_000, 30_000]);
+        assert!(e2.undo(), "one undo step");
+        assert_eq!(e2.splits(), [10_000, 30_000]);
+    }
+
+    #[test]
+    fn bounds_that_cannot_move_are_greyed_out() {
+        let mut e = Editor::new(60_000);
+        e.select(15_000, 20_000);
+        let s = scene(&e, &[], &[]);
+        // One track: its start is 0, its end the end of the recording.
+        let menu = waveform(&s, 17_000, 10);
+        assert!(!item(&menu, "Fit track 1").enabled);
+        assert!(!item(&menu, "Track 1 starts at selection start").enabled);
+        assert!(!item(&menu, "Track 1 ends at selection end").enabled);
+        assert!(item(&menu, "New track from selection").enabled);
+    }
+
+    #[test]
+    fn excerpts_of_the_selection_play_its_kept_ends() {
+        let mut e = Editor::new(60_000);
+        e.select(10_000, 20_000);
+        let s = scene(&e, &[], &[]);
+        let menu = waveform(&s, 10_000, 10);
+        let start = item(&menu, "Play selection start (3 s)");
+        let end = item(&menu, "Play selection end (3 s)");
+        let mut e2 = e.clone();
+        let Effect::Play(tl) = apply(&mut e2, &start.action, RATE) else {
+            panic!("plays");
+        };
+        assert_eq!(tl.segments(), std::slice::from_ref(&(10_000..13_000)));
+        let Effect::Play(tl) = apply(&mut e2, &end.action, RATE) else {
+            panic!("plays");
+        };
+        assert_eq!(tl.segments(), std::slice::from_ref(&(17_000..20_000)));
+
+        // All deleted: nothing to play, but restoring is offered.
+        e.delete_selection();
+        let s = scene(&e, &[], &[]);
+        let menu = waveform(&s, 15_000, 10);
+        assert!(!item(&menu, "Play selection start").enabled);
+        assert!(!item(&menu, "Delete selection").enabled);
+        assert!(item(&menu, "Restore selection").enabled);
+    }
+
+    #[test]
+    fn fine_tuning_moves_the_edges_to_nearby_detected_cuts() {
+        let mut e = Editor::new(60_000);
+        e.select(10_400, 20_000);
+        let pauses = [Region {
+            range: 9_000..10_000,
+            kind: RegionKind::Silence,
+            level_db: -70.0,
+        }];
+        // 25 s is too far from the end (20 s) to be "nearby".
+        let starts = [21_500, 25_000];
+        let s = scene(&e, &pauses, &starts);
+        let menu = waveform(&s, 15_000, 10);
+        let tune = item(&menu, "Fine-tune selection");
+        assert_eq!(tune.action, Action::Select(10_000..21_500));
+        assert!(
+            tune.label.ends_with("(0:10.000–0:21.500)"),
+            "{}",
+            tune.label
+        );
+        assert!(tune.enabled);
+
+        let s = scene(&e, &[], &[]);
+        let menu = waveform(&s, 15_000, 10);
+        let tune = item(&menu, "Fine-tune selection");
+        assert!(!tune.enabled);
+        assert!(tune.label.ends_with("(none nearby)"));
+    }
+
+    #[test]
+    fn near_the_playhead_its_commands_come_after_the_selections() {
+        let mut e = Editor::new(60_000);
+        e.select(10_000, 20_000);
+        let s = Scene {
+            playhead: Some(15_000),
+            ..scene(&e, &[], &[])
+        };
+        let menu = waveform(&s, 15_002, 10);
+        assert_eq!(menu.iter().filter(|e| **e == Entry::Separator).count(), 2);
+        let split = item(&menu, "Split at playback position 0:15.000");
+        assert_eq!(split.action, Action::Split(vec![15_000]));
+        let from = item(&menu, "Selection starts at playback position");
+        assert_eq!(from.action, Action::Select(15_000..20_000));
+        let to = item(&menu, "Selection ends at playback position");
+        assert_eq!(to.action, Action::Select(10_000..15_000));
+        let mut e2 = e.clone();
+        apply(&mut e2, &to.action, RATE);
+        assert_eq!(e2.selection(), Some(10_000..15_000));
+        // Far from the playhead: no playhead commands.
+        let menu = waveform(&s, 16_000, 10);
+        assert!(
+            items(&menu)
+                .iter()
+                .all(|i| !i.label.contains("playback position"))
+        );
+    }
+}
