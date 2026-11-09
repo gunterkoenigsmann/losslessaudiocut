@@ -570,16 +570,60 @@ harmonics. A 3 h recording needs about 18 MB of features.
    content shorter than 0.2 s between pauses (a click) is pause. Every
    remaining pause is a deletable region.
 4. **Track starts**: after every pause of at least 2 s inside the
-   recording, 0.25 s before the content resumes; and where the mean band
-   spectrum of the 4 s before a frame differs from the 4 s after by at least
-   6 dB (spread of the per-band difference plus half its mean, so loudness
-   alone counts half), with both windows at least 90 % content (a simple
-   form of Foote's novelty, for gapless recordings). Bands more than 20 dB
-   below the quiet threshold are not compared. Likewise where the mean
+   recording, 0.25 s before the content resumes, if the 30 s before the
+   pause and the 30 s after it are at least 70 % content (rain with a few
+   loud drops, or a fan with someone briefly talking, is no sequence of
+   tracks); and where the mean band spectrum of the 4 s before a frame
+   differs from the 4 s after by at least 6 dB (spread of the per-band
+   difference plus half its mean, so loudness alone counts half), with
+   both windows at least 90 % content (a simple form of Foote's novelty,
+   for gapless recordings). Bands more than 20 dB below the quiet
+   threshold are not compared.
+5. **Recurrence**: verse and chorus of one song differ as much as two
+   songs, but they come back. A change of timbre only counts when the 4 s
+   after it also differ by the threshold from every 4 s window in the
+   60 s before it, and the 4 s before it from every window in the 60 s
+   after it.
+6. **Shortest track**: of two suggestions closer than 30 s, only the more
+   confident one is kept (a pause wins a tie).
+7. **Key changes** (off by default, `lac detect --key`): where the mean
    chroma of the two windows has a cosine distance of at least 0.25 (the
-   same melody on both sides: below 0.08; a fifth apart: 0.3; a third: 0.5).
-   With few partials the band spectrum reacts to a change of pitch as well,
-   so a key change is often found by both.
+   same melody on both sides: below 0.08; a fifth apart: 0.3; a third:
+   0.5), with the same recurrence test.
+
+### Tuning on real recordings
+
+The numbers above were tuned with a harness (not in the repository; it
+decodes with the `ffmpeg` tool, keeps `Features::to_bytes` per recording
+and re-runs `detect` with other parameters in seconds) on
+
+- 30 h of music: 18 albums and 190 single songs (studio and live; rock,
+  metal, punk, pop, electronic, spoken word) glued together into one
+  recording per album or per ten songs, so the 404 track boundaries are
+  known, once as they are and once with every song's leading and trailing
+  silence (below −50 dBFS) cut off, as a gapless mix;
+- 15 h of recordings without known tracks: talks and audio notes, a reception
+  with speeches, two concerts, and 8.4 h of rain.
+
+A suggestion counts as a hit within 15 s of a boundary (plus the quiet
+around it): on a live album the track mark lies somewhere in the applause
+and banter, the song itself starts later. With the earlier rules (no
+recurrence test, no shortest track, no content share, key changes on) and
+with the current ones:
+
+| | boundaries found (as is / gapless) | false track starts per hour of music | track starts per hour of other recordings |
+|---|---|---|---|
+| earlier | 98 % / 99 % | 186 | 145 |
+| current | 79 % / 72 % | 7 | 6.5 |
+
+The audio notes now get no track starts at all, the rain 23 in 8.4 h
+(earlier: 844). What is missed is mostly gapless live albums, where
+crowd noise and banter join songs of the same band and sound. Further
+knobs measured: a shortest pause of 1 s instead of 2 s finds 2 % more
+boundaries but doubles the starts in talks; a timbre threshold of 5 dB
+finds 4 % more at 10 false starts per hour; the key detector found no
+boundary the timbre missed (recall 1 % lower with it, the same false
+starts).
 
 All numbers are `DetectParams` fields in seconds or dB, so a settings
 dialog can expose them; re-running `detect` on kept `Features` takes
