@@ -4,7 +4,7 @@
 //! What it shows and what typing into it does is decided in
 //! [`lac_app::positions`]; this module only makes and fills the widgets.
 
-use lac_app::positions::{Field, Positions};
+use lac_app::positions::{CLOCK_WIDEST, Field, Positions};
 use wxdragon::prelude::*;
 
 /// Width of a time field, wide enough for `h:mm:ss.mmm`, device
@@ -64,7 +64,10 @@ impl PositionBar {
             Field::Length,
         );
         sizer.add_spacer(panel.from_dip_int(16));
-        let clock = StaticText::builder(&panel).with_label("0:00.000").build();
+        // Created with the widest label it can show, so that its size and
+        // the panel's fit (and with that the dock pane's best size) leave
+        // room for it; see `CLOCK_WIDEST`. The real label follows below.
+        let clock = StaticText::builder(&panel).with_label(CLOCK_WIDEST).build();
         let font = Font::builder()
             .with_point_size(CLOCK_POINTS)
             .with_family(FontFamily::Teletype)
@@ -73,6 +76,10 @@ impl PositionBar {
         if let Some(font) = font {
             clock.set_font(&font);
         }
+        // Keep that room: a static text resizes itself to every new
+        // label, and a later layout of the bar must not shrink the clock to
+        // a short label and crop the next, longer one (issue #94).
+        clock.set_min_size(clock.get_best_size());
         clock.set_tooltip("Where playback is, or where it starts (source time)");
         sizer.add(
             &clock,
@@ -81,6 +88,7 @@ impl PositionBar {
             8,
         );
         panel.set_sizer_and_fit(sizer, true);
+        clock.set_label("0:00.000");
         PositionBar {
             panel,
             start,

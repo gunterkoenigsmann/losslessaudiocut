@@ -46,6 +46,12 @@ impl Positions {
     }
 }
 
+/// The widest text the play clock is laid out for: [`format_samples`] of
+/// 99:59:59.999. The clock uses a fixed-width font, so every label of up to
+/// 99 hours fits into the space this text takes; the GUI reserves that
+/// space once instead of resizing the bar while playback runs (issue #94).
+pub const CLOCK_WIDEST: &str = "00:00:00.000";
+
 /// What the bar shows for `editor` at sample rate `rate`, with playback at
 /// source position `playhead` (`None` while stopped). Like the
 /// selection, a missing selection shows the cursor as an empty range.
@@ -110,6 +116,22 @@ mod tests {
         assert_eq!(p.end, "0:01.500");
         assert_eq!(p.length, "0:00.000");
         assert_eq!(p.clock, "0:01.500");
+    }
+
+    #[test]
+    fn clock_widest_is_as_long_as_the_longest_label() {
+        // The last millisecond before 100 hours, at a common and an odd rate.
+        for rate in [44_100, 7] {
+            let last = (100 * 3600 * u64::from(rate)) - 1;
+            let longest = format_samples(last, rate);
+            assert_eq!(
+                longest.chars().count(),
+                CLOCK_WIDEST.chars().count(),
+                "{longest}"
+            );
+        }
+        // Shorter labels, e.g. issue #94's 14:00.375, are no longer.
+        assert!(format_samples(840_375, 1000).len() < CLOCK_WIDEST.len());
     }
 
     #[test]

@@ -88,6 +88,10 @@ pub fn stored_geometry() -> WindowGeometry {
 pub struct Panes {
     aui: AuiManager,
     frame: Frame,
+    /// Current best sizes of the panes whose content the program lays
+    /// out; they override the ones in a stored layout (see
+    /// [`lac_app::layout::with_best_sizes`]).
+    fitted: [(Pane, (i32, i32)); 2],
 }
 
 impl Panes {
@@ -168,7 +172,14 @@ impl Panes {
                 .maximize_button(true),
         );
         let frame = *frame;
-        let panes = Panes { aui, frame };
+        let panes = Panes {
+            aui,
+            frame,
+            fitted: [
+                (Pane::Toolbar, (tb.width, tb.height)),
+                (Pane::Positions, (pb.width, pb.height)),
+            ],
+        };
         // Keep the View menu's check marks right when the user closes a
         // pane with its own close button, or before the menu is shown.
         frame.on_menu_opened(move |e| {
@@ -192,6 +203,7 @@ impl Panes {
             p => p.shown_by_default(),
         });
         if let Some(p) = perspective {
+            let p = lac_app::layout::with_best_sizes(&p, &self.fitted);
             self.aui.load_perspective(&p, false);
         }
         for (pane, shown) in then_show {
