@@ -9,12 +9,13 @@
 //!
 //! Supported so far: [`wav`], [`aiff`], [`flac`], [`ogg`] (Vorbis, Opus, Speex),
 //! [`mp3`], [`mkv`] (Matroska/WebM with Opus), [`mp4`] (MP4/M4A with
-//! AAC or ALAC) and [`ac3`] (raw AC-3). [`open`] detects the format
+//! AAC or ALAC), [`adts`] (raw AAC) and [`ac3`] (raw AC-3). [`open`] detects the format
 //! from the file's content and returns it behind the common [`Container`]
 //! interface. Each format also reads and writes its tags; the shared tag
 //! formats live in [`tags`].
 
 pub mod ac3;
+pub mod adts;
 pub mod aiff;
 mod bits;
 pub mod decode;
@@ -455,6 +456,54 @@ impl Container for ac3::Ac3File {
     }
 }
 
+impl Container for adts::AdtsFile {
+    fn format_name(&self) -> &'static str {
+        "ADTS"
+    }
+    fn details(&self) -> String {
+        self.params().profile_name().into()
+    }
+    fn index(&self) -> &PacketIndex {
+        adts::AdtsFile::index(self)
+    }
+    fn capabilities(&self) -> CutCapabilities {
+        adts::AdtsFile::capabilities(self)
+    }
+    fn warnings(&self) -> &[String] {
+        adts::AdtsFile::warnings(self)
+    }
+    fn tags(&self) -> &Tags {
+        adts::AdtsFile::tags(self)
+    }
+    fn cut_notes(&self, r: &mut dyn ReadSeek) -> Result<Vec<String>> {
+        Ok(if self.uses_noise_substitution(r)? {
+            vec![mp4::aac::NOISE_NOTE.to_owned()]
+        } else {
+            Vec::new()
+        })
+    }
+    fn write_cut(
+        &self,
+        r: &mut dyn ReadSeek,
+        plans: &[CutPlan],
+        tags: Option<&Tags>,
+        w: &mut dyn WriteSeek,
+    ) -> Result<()> {
+        adts::AdtsFile::write_cut(self, r, plans, tags, w)
+    }
+    fn decode_sections(&self, r: &mut dyn ReadSeek) -> Result<Vec<DecodeSection>> {
+        adts::AdtsFile::decode_sections(self, r)
+    }
+    fn read_decode_packet(
+        &self,
+        r: &mut dyn ReadSeek,
+        section: usize,
+        packet: usize,
+    ) -> Result<Vec<u8>> {
+        adts::AdtsFile::read_decode_packet(self, r, section, packet)
+    }
+}
+
 /// Detects the container format from the first bytes of `r` and opens it.
 pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
     let mut head = [0u8; 12];
@@ -484,7 +533,16 @@ pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
         if magic[..n].starts_with(&[0x0B, 0x77]) {
             return Ok(Box::new(ac3::Ac3File::open(r)?));
         }
+        if adts::looks_like_adts(&magic[..n]) {
+            return Ok(Box::new(adts::AdtsFile::open(r)?));
+        }
         return Ok(Box::new(mp3::Mp3File::open(r)?));
+    }
+    // ADTS sync word (12 set bits) and layer 0, which MPEG audio does not
+    // use (ISO/IEC 11172-3 2.4.2.3: "reserved"); before the MPEG test,
+    // whose 11-bit sync matches ADTS too.
+    if adts::looks_like_adts(head) {
+        return Ok(Box::new(adts::AdtsFile::open(r)?));
     }
     // MPEG audio frame sync: 11 set bits.
     if head.len() >= 2 && head[0] == 0xFF && head[1] & 0xE0 == 0xE0 {
@@ -507,7 +565,7 @@ pub fn open(r: &mut dyn ReadSeek) -> Result<Box<dyn Container>> {
         return Ok(Box::new(mkv::MkvFile::open(r)?));
     }
     Err(ContainerError::Unsupported(
-        "unknown file format (supported: WAV, AIFF, FLAC, Ogg, MP3, Matroska/WebM, MP4/M4A, AC-3)"
+        "unknown file format (supported: WAV, AIFF, FLAC, Ogg, MP3, Matroska/WebM, MP4/M4A, AAC, AC-3)"
             .into(),
     ))
 }

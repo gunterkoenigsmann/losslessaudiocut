@@ -131,3 +131,12 @@ $synth "$tmp/cb.wav" 48000 6 16 0.5
 $og -i "$tmp/cb.wav" -fflags +bitexact -c:a ac3_fixed -b:a 384k ac3_51_48k.ac3
 $synth "$tmp/cc.wav" 32000 1 16 0.5 0 speech
 $og -i "$tmp/cc.wav" -fflags +bitexact -c:a ac3_fixed -b:a 64k ac3_mono_32k.ac3
+
+# Raw AAC in ADTS (.aac), encoded by ffmpeg's native AAC encoder: stereo at
+# 44.1 kHz and mono speech at 22.05 kHz without perceptual noise
+# substitution (bit-exact cuts), and one with it (see tests/adts.rs).
+$synth "$tmp/aa.wav" 44100 2 16 1.5
+$og -i "$tmp/aa.wav" $ma -b:a 128k -f adts adts_aac_stereo_44k.aac
+$synth "$tmp/ab.wav" 22050 1 16 1.0 0 speech
+$og -i "$tmp/ab.wav" $ma -b:a 48k -f adts adts_aac_mono_22k.aac
+$og -i "$tmp/aa.wav" -fflags +bitexact -c:a aac -b:a 96k -f adts adts_aac_pns_44k.aac

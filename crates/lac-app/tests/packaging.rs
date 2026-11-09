@@ -64,6 +64,7 @@ const SYSTEM_UTIS: &[&str] = &[
     "public.aiff-audio",
     "public.mpeg-4-audio",
     "public.ac3-audio",
+    "public.aac-audio",
 ];
 
 #[test]
