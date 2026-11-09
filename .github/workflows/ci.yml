@@ -136,9 +136,11 @@ jobs:
       # lac-playback: cpal talks to ALSA on Linux. The tests never open a
       # device (they drive the audio callback themselves), so no sound
       # server is needed.
+      # wxWidgets links the system libjpeg and libtiff; on Ubuntu 26.04
+      # libgtk-3-dev no longer pulls in their development files.
       - name: Install GUI and audio build dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y --no-install-recommends libgtk-3-dev ninja-build libasound2-dev
+        run: sudo apt-get install -y --no-install-recommends libgtk-3-dev libjpeg-dev libtiff-dev ninja-build libasound2-dev
       # The cache holds ffmpeg-sys-next's build output, i.e. bindings and
       # feature flags for the FFmpeg it was built against. Restored onto a
       # runner with another FFmpeg (ubuntu-latest moving from 24.04 with
