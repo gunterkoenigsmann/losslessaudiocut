@@ -2,9 +2,10 @@
 //! store (the registry on Windows, a file in the home or config directory
 //! elsewhere).
 //!
-//! Only on/off choices from the menus live here (which panes are shown,
-//! and where, is the window layout's business: see `panes.rs`);
-//! everything else about a session (the open file, the edits) is
+//! Only on/off choices from the menus live here; until there is a
+//! settings dialog (issue #103) they are all menu check items. Which panes
+//! are shown, and where, is the window layout's business (see
+//! `panes.rs`); everything else about a session (the open file, the edits) is
 //! deliberately not remembered.
 
 use wxdragon::config::{Config, ConfigStyle};
@@ -15,6 +16,8 @@ const KEEP_PITCH: &str = "/Playback/KeepPitch";
 const SCRUB_WHILE_SELECTING: &str = "/Playback/ScrubWhileSelecting";
 /// Key of [`Options::ruler`].
 const RULER: &str = "/View/Ruler";
+/// Key of [`Options::chained_links`].
+const CHAINED_LINKS: &str = "/Tracks/ChainedLinks";
 
 /// The remembered options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +29,10 @@ pub struct Options {
     pub scrub_while_selecting: bool,
     /// View > Time ruler: the time scale under the waveform.
     pub ruler: bool,
+    /// Edit > Suggest chained streams as tracks: the links of a chained
+    /// Ogg file are offered as track starts. Off for recorded web radio,
+    /// whose stream may change its title every few seconds.
+    pub chained_links: bool,
 }
 
 impl Default for Options {
@@ -34,6 +41,7 @@ impl Default for Options {
             keep_pitch: true,
             scrub_while_selecting: true,
             ruler: true,
+            chained_links: true,
         }
     }
 }
@@ -47,6 +55,7 @@ impl Options {
             keep_pitch: c.read_bool(KEEP_PITCH, d.keep_pitch),
             scrub_while_selecting: c.read_bool(SCRUB_WHILE_SELECTING, d.scrub_while_selecting),
             ruler: c.read_bool(RULER, d.ruler),
+            chained_links: c.read_bool(CHAINED_LINKS, d.chained_links),
         }
     }
 
@@ -57,6 +66,7 @@ impl Options {
         c.write_bool(KEEP_PITCH, self.keep_pitch);
         c.write_bool(SCRUB_WHILE_SELECTING, self.scrub_while_selecting);
         c.write_bool(RULER, self.ruler);
+        c.write_bool(CHAINED_LINKS, self.chained_links);
         c.flush(false);
     }
 }
@@ -86,6 +96,7 @@ mod tests {
                 keep_pitch: true,
                 scrub_while_selecting: true,
                 ruler: true,
+                chained_links: true,
             }
         );
     }

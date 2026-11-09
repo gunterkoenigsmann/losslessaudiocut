@@ -102,6 +102,7 @@ const ID_ALL_TRACKS: Id = ID_HIGHEST + 23;
 const ID_RULER: Id = ID_HIGHEST + 24;
 const ID_SUGGESTED_SPLITS: Id = ID_HIGHEST + 25;
 const ID_SUGGESTED_PAUSES: Id = ID_HIGHEST + 26;
+const ID_CHAINED_LINKS: Id = ID_HIGHEST + 27;
 
 /// The toolbar: the most used menu commands. Tooltips name the shortcut,
 /// which is the faster way once known.
@@ -373,16 +374,29 @@ impl State {
             .detection
             .iter()
             .flat_map(|d| d.splits.iter().map(|s| s.pos));
-        suggested_starts(&self.chapters, detected, self.rate.unwrap_or(1))
+        suggested_starts(self.chapters_in_use(), detected, self.rate.unwrap_or(1))
+    }
+
+    /// The chained file's links if they are to be offered as track starts
+    /// (Edit > Suggest chained streams as tracks), else none.
+    fn chapters_in_use(&self) -> &[Chapter] {
+        if self.options.chained_links {
+            &self.chapters
+        } else {
+            &[]
+        }
     }
 
     /// For the status bar after reading a chained file: its links are
-    /// offered as tracks.
+    /// offered as tracks, or are not because the user turned that off.
     fn chapter_note(&self) -> String {
-        match self.chapters.len() {
-            0 | 1 => String::new(),
-            n => format!(
+        match (self.chapters.len(), self.options.chained_links) {
+            (0 | 1, _) => String::new(),
+            (n, true) => format!(
                 "; {n} chained streams, offered as track starts (Edit > Split at suggested track starts)"
+            ),
+            (n, false) => format!(
+                "; {n} chained streams, not offered as track starts (Edit > Suggest chained streams as tracks)"
             ),
         }
     }
@@ -745,7 +759,7 @@ impl State {
         }
         // A chained file's links are known from the start; the analysis'
         // suggestions join them when it is done.
-        let have_chapters = id == ID_SUGGESTED_SPLITS && !self.chapters.is_empty();
+        let have_chapters = id == ID_SUGGESTED_SPLITS && !self.chapters_in_use().is_empty();
         if self.detection.is_none() && !have_chapters {
             return match &self.analysis_error {
                 Some(err) => format!("no suggestions: {err}"),
@@ -1110,6 +1124,12 @@ fn menu_bar(options: Options) -> MenuBar {
             "Delete suggested &pauses\tCtrl+Shift+D",
             "Delete the silent and noise-only stretches the analysis found",
         )
+        .append_check_item(
+            ID_CHAINED_LINKS,
+            "Suggest &chained streams as tracks",
+            "Offer the start of each stream of a chained Ogg file as a track start; \
+             turn off for recorded web radio that changes its title every few seconds",
+        )
         .append_separator()
         .append_item(
             ID_SELECT_ALL,
@@ -1185,6 +1205,7 @@ fn menu_bar(options: Options) -> MenuBar {
     bar.check_item(ID_KEEP_PITCH, options.keep_pitch);
     bar.check_item(ID_SCRUB_SELECTING, options.scrub_while_selecting);
     bar.check_item(ID_RULER, options.ruler);
+    bar.check_item(ID_CHAINED_LINKS, options.chained_links);
     bar
 }
 
@@ -1280,6 +1301,12 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
         let mut st = state.borrow_mut();
         let on = checked.unwrap_or(!st.options.ruler);
         st.options.ruler = on;
+        st.options.save();
+    } else if id == ID_CHAINED_LINKS {
+        // The suggestion marks change; splits already made stay.
+        let mut st = state.borrow_mut();
+        let on = checked.unwrap_or(!st.options.chained_links);
+        st.options.chained_links = on;
         st.options.save();
     } else if id == ID_TO_START {
         let mut st = state.borrow_mut();
@@ -2404,6 +2431,46 @@ mod tests {
         let e = st.editor.as_ref().expect("set above");
         assert_eq!(e.splits(), [4000]);
         assert_eq!(e.tracks()[1].name.as_deref(), Some("Two"));
+    }
+
+    #[test]
+    fn chained_links_are_not_suggested_when_turned_off() {
+        // Recorded web radio: every title change starts a new link.
+        let mut st = State {
+            editor: Some(Editor::new(10_000)),
+            rate: Some(1000),
+            tags: Some(Arc::new(Tags::default())),
+            chapters: Arc::from(vec![
+                Chapter {
+                    start: 0,
+                    tags: Tags::default(),
+                },
+                Chapter {
+                    start: 4000,
+                    tags: Tags::default(),
+                },
+            ]),
+            options: Options {
+                chained_links: false,
+                ..Options::default()
+            },
+            ..State::default()
+        };
+        assert!(st.suggested_starts().is_empty());
+        assert!(
+            st.chapter_note().contains("not offered"),
+            "{}",
+            st.chapter_note()
+        );
+        // Without the links, splitting waits for the analysis as usual.
+        assert_eq!(
+            st.apply_suggestions(ID_SUGGESTED_SPLITS),
+            "still looking for pauses and track starts (0 %)"
+        );
+        assert!(st.editor.as_ref().expect("set above").splits().is_empty());
+        // Turned back on, they are offered again.
+        st.options.chained_links = true;
+        assert_eq!(st.suggested_starts().len(), 1);
     }
 
     #[test]
