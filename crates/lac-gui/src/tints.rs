@@ -4,7 +4,8 @@
 //!
 //! The tints cycle through a few hues that differ from each other and
 //! from the waveform's own marks. Each is blended into the background it
-//! is drawn on, faintly enough that the waveform, the selection and the
+//! is drawn on, strongly enough to be seen in the gaps of a dense
+//! waveform, but faintly enough that the waveform, the selection and the
 //! text stay readable on the dark waveform and on the light grid alike.
 
 use wxdragon::prelude::Colour;
@@ -18,8 +19,11 @@ const HUES: [(u8, u8, u8); 4] = [
     (0xd0, 0x60, 0xd0),
 ];
 
-/// How much of the hue goes into the dark waveform background.
-const WAVEFORM_STRENGTH: f64 = 0.12;
+/// How much of the hue goes into the dark waveform background. 0.12 was
+/// too faint to see on many screens, above all when the peaks fill most
+/// of the lane and the tint shows only in the gaps; a quarter stays well
+/// below the waveform's own marks.
+const WAVEFORM_STRENGTH: f64 = 0.25;
 /// How much of the hue goes into the light track list background.
 const LIST_STRENGTH: f64 = 0.16;
 
@@ -51,20 +55,21 @@ fn blend(background: Colour, hue: (u8, u8, u8), strength: f64) -> Colour {
     )
 }
 
+/// Sum of the channel differences: how far apart two colours look,
+/// roughly. For tests that keep colours apart.
+#[cfg(test)]
+pub fn distance(a: Colour, b: Colour) -> u32 {
+    [(a.r, b.r), (a.g, b.g), (a.b, b.b)]
+        .iter()
+        .map(|&(x, y)| u32::from(x.abs_diff(y)))
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const DARK: Colour = Colour::rgb(0x1e, 0x22, 0x28);
-
-    /// Sum of the channel differences: how far apart two colours look,
-    /// roughly.
-    fn distance(a: Colour, b: Colour) -> u32 {
-        [(a.r, b.r), (a.g, b.g), (a.b, b.b)]
-            .iter()
-            .map(|&(x, y)| u32::from(x.abs_diff(y)))
-            .sum()
-    }
 
     #[test]
     fn neighbouring_tracks_get_different_tints() {
@@ -76,12 +81,13 @@ mod tests {
     }
 
     #[test]
-    fn tints_stay_faint() {
+    fn tints_are_visible_but_faint() {
         for i in 0..HUES.len() {
-            // Visible, but far closer to the background than to the hue,
-            // so the waveform and the text keep their contrast.
+            // Clearly visible (the first, 12 % tints were not, issue
+            // #126), but far closer to the background than to the hue, so
+            // the waveform and the text keep their contrast.
             let w = distance(waveform(i, DARK), DARK);
-            assert!((10..80).contains(&w), "waveform tint {i}: {w}");
+            assert!((60..120).contains(&w), "waveform tint {i}: {w}");
             let l = distance(list(i), LIST_PLAIN);
             assert!((10..80).contains(&l), "list tint {i}: {l}");
         }

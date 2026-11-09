@@ -231,8 +231,9 @@ const DELETED_BACKGROUND: Colour = Colour::rgb(0x3a, 0x1e, 0x22);
 const DELETED_PEAK: Colour = Colour::rgb(0x6a, 0x58, 0x5c);
 /// RMS band in deleted parts.
 const DELETED_RMS: Colour = Colour::rgb(0x8c, 0x78, 0x7c);
-/// Background of the selection.
-const SELECTION: Colour = Colour::rgb(0x34, 0x40, 0x52);
+/// Background of the selection: brighter than any track tint, so a
+/// selected part never looks like just another track (issue #126).
+const SELECTION: Colour = Colour::rgb(0x48, 0x56, 0x70);
 /// Left and right edge of the selection.
 const SELECTION_EDGE: Colour = Colour::rgb(0xe8, 0xc0, 0x50);
 /// The cursor where playback starts.
@@ -2789,6 +2790,23 @@ fn px(x: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn track_tints_stay_apart_from_selection_and_deletion() {
+        // The selection and deleted parts are drawn over the tints; each
+        // must still look different from every track's tint (issue #126).
+        for i in 0..8 {
+            let tint = tints::waveform(i, BACKGROUND);
+            for (what, colour) in [
+                ("selection", SELECTION),
+                ("deleted", DELETED_BACKGROUND),
+                ("peaks", PEAK),
+            ] {
+                let d = tints::distance(tint, colour);
+                assert!(d >= 60, "tint {i} vs {what}: {d}");
+            }
+        }
+    }
 
     #[test]
     fn suggestions_apply_as_one_undo_step_each() {
