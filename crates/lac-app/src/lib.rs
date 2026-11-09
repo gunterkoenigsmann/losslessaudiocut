@@ -46,6 +46,7 @@ pub mod detail;
 pub mod editor;
 pub mod export_job;
 pub mod file_types;
+pub mod hover;
 pub mod launch;
 pub mod layout;
 pub mod log;
