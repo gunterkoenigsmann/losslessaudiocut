@@ -385,7 +385,7 @@ pub fn apply(editor: &mut Editor, action: &Action, rate: u32) -> Effect {
         Action::Delete => Effect::Edited(editor.delete_selection()),
         Action::Restore => Effect::Edited(editor.restore_selection()),
         Action::PlayExcerpt { range, end } => {
-            let len = SamplePos::from(EXCERPT_SECONDS) * SamplePos::from(rate);
+            let len = playback::excerpt_len(rate);
             Effect::Play(playback::excerpt(editor, range.clone(), *end, len))
         }
         Action::PlayFrom(p) => Effect::PlayFrom(*p),

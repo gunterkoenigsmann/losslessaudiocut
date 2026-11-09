@@ -114,6 +114,9 @@ Space plays and stops. Playback plays what the export will contain: the kept
 parts, with the deleted ones skipped, starting at the selection or at the
 cursor (a click without dragging puts it; Home moves it to the start).
 Clicking while playing jumps there; stopping returns to the cursor.
+*Play > Play track beginning* (Ctrl+Shift+B) and *Play track end*
+(Ctrl+Shift+E), also on the toolbar, play the first or last 3 seconds of
+the track at the cursor, to check where a track starts and ends.
 
 Dragging with the right mouse button (or holding it still for a moment)
 scrubs: playback follows the pointer in short pieces of unaltered audio, so

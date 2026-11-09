@@ -41,6 +41,11 @@ pub enum Icon {
     Play,
     /// Play > Cursor to start: a bar and a triangle pointing to it.
     ToStart,
+    /// Play > Play track start: a track boundary and a triangle playing
+    /// away from it.
+    PlayTrackStart,
+    /// Play > Play track end: a triangle playing up to a track boundary.
+    PlayTrackEnd,
     /// View > Zoom in: a magnifier with a plus.
     ZoomIn,
     /// View > Zoom out: a magnifier with a minus.
@@ -82,6 +87,12 @@ impl Icon {
             Icon::ToStart => {
                 format!(r#"<line x1="5" y1="5" x2="5" y2="19"/><polygon points="19,5 9,12 19,19" {SOLID}/>"#)
             }
+            Icon::PlayTrackStart => {
+                format!(r#"<line x1="4" y1="4" x2="4" y2="20"/><polygon points="9,6 19,12 9,18" {SOLID}/>"#)
+            }
+            Icon::PlayTrackEnd => {
+                format!(r#"<polygon points="5,6 15,12 5,18" {SOLID}/><line x1="20" y1="4" x2="20" y2="20"/>"#)
+            }
             Icon::ZoomIn => {
                 format!(r#"{LENS}<line x1="10" y1="7" x2="10" y2="13"/><line x1="7" y1="10" x2="13" y2="10"/>"#)
             }
@@ -98,7 +109,7 @@ impl Icon {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 12] = [
+    const ALL: [Icon; 14] = [
         Icon::Open,
         Icon::Export,
         Icon::Undo,
@@ -108,6 +119,8 @@ mod tests {
         Icon::Split,
         Icon::Play,
         Icon::ToStart,
+        Icon::PlayTrackStart,
+        Icon::PlayTrackEnd,
         Icon::ZoomIn,
         Icon::ZoomOut,
         Icon::ZoomFit,

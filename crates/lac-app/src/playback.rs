@@ -94,6 +94,23 @@ pub fn excerpt(editor: &Editor, range: Range<SamplePos>, end: End, len: SamplePo
     Timeline::new(out)
 }
 
+/// The start or end (`end`) of the track containing source position
+/// `at`, [`EXCERPT_SECONDS`] long at `rate` frames per second: what the
+/// toolbar's "play track start/end" buttons play. Empty if the track is
+/// deleted entirely.
+pub fn track_excerpt(editor: &Editor, at: SamplePos, end: End, rate: u32) -> Timeline {
+    let index = editor.track_at(at.min(editor.total().saturating_sub(1)));
+    let Some(track) = editor.tracks().into_iter().nth(index) else {
+        return Timeline::default();
+    };
+    excerpt(editor, track.span, end, excerpt_len(rate))
+}
+
+/// [`EXCERPT_SECONDS`] in frames at `rate` frames per second.
+pub fn excerpt_len(rate: u32) -> SamplePos {
+    SamplePos::from(EXCERPT_SECONDS) * SamplePos::from(rate)
+}
+
 /// Opens `path` for playback of `timeline` on the default audio device,
 /// paused at the start. The message is for the user.
 pub fn open_player(path: &Path, timeline: Timeline) -> Result<Player, String> {
@@ -103,6 +120,25 @@ pub fn open_player(path: &Path, timeline: Timeline) -> Result<Player, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn track_excerpts_play_the_ends_of_the_track_at_a_position() {
+        use super::{End, track_excerpt};
+        let mut e = crate::editor::Editor::new(60_000);
+        e.split_at_all([10_000, 30_000]);
+        // 1000 frames per second: 3 s are 3000 frames.
+        let start = track_excerpt(&e, 12_000, End::Start, 1000);
+        assert_eq!(start.segments(), std::slice::from_ref(&(10_000..13_000)));
+        let end = track_excerpt(&e, 12_000, End::End, 1000);
+        assert_eq!(end.segments(), std::slice::from_ref(&(27_000..30_000)));
+        // A track's own start belongs to it; the end of the recording to
+        // the last track.
+        let last = track_excerpt(&e, 60_000, End::Start, 1000);
+        assert_eq!(last.segments(), std::slice::from_ref(&(30_000..33_000)));
+        e.select(10_000, 30_000);
+        e.delete_selection();
+        assert!(track_excerpt(&e, 10_000, End::End, 1000).is_empty());
+    }
+
     #[test]
     fn excerpts_take_kept_frames_from_their_end_of_the_range() {
         use super::{End, excerpt};
