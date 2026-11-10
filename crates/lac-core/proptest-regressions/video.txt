@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc bfb802d72f453d0e1d45bce9ca43c01e543d4b4624ea1b4c40ba3f24ab4bfefe # shrinks to s = Stream { index: VideoIndex { info: VideoStreamInfo { codec: H264, width: 160, height: 120, timescale: 90000, rotation: 0 }, frames: [VideoFrame { byte_offset: 0, byte_len: 100, duration: 2, composition_offset: 0, sync: true }, VideoFrame { byte_offset: 100, byte_len: 100, duration: 2, composition_offset: 2, sync: true }, VideoFrame { byte_offset: 200, byte_len: 100, duration: 2, composition_offset: -2, sync: false }, VideoFrame { byte_offset: 300, byte_len: 100, duration: 2, composition_offset: 2, sync: false }, VideoFrame { byte_offset: 400, byte_len: 100, duration: 2, composition_offset: -2, sync: false }, VideoFrame { byte_offset: 500, byte_len: 100, duration: 2, composition_offset: 2, sync: false }, VideoFrame { byte_offset: 600, byte_len: 100, duration: 2, composition_offset: -2, sync: false }], decode_times: [0, 2, 4, 6, 8, 10, 12], display: [0, 2, 1, 4, 3, 6, 5], rank: [0, 2, 1, 4, 3, 6, 5], clean: [true, false, false, false, false, false, false] }, refs: [[], [], [0, 1], [1], [1, 3], [3], [3, 5]] }, a = 0.49231990266412456, b = 0.5351705269147967, trim_start = false, trim_end = false
