@@ -9,6 +9,7 @@
 
 use lac_app::appearance::Appearance;
 use lac_app::i18n::tr;
+use lac_app::theme::ListPalette;
 use lac_app::track_list::{Bound, COLUMNS, Row};
 use lac_core::TagField;
 use wxdragon::prelude::*;
@@ -26,16 +27,12 @@ const END_COLUMN: i32 = 1;
 /// Grid column of the track's length.
 const LENGTH_COLUMN: i32 = 2;
 
-/// Text of cells the user changed.
-const EDITED: Colour = Colour::rgb(0x10, 0x50, 0xb0);
-/// Text of tracks that are deleted entirely (they get no file).
-const DELETED: Colour = Colour::rgb(0x90, 0x90, 0x90);
-/// Text of everything else.
-const NORMAL: Colour = Colour::rgb(0x10, 0x10, 0x10);
-
-/// Creates the (empty) grid with its column labels.
-pub fn create(parent: &dyn WxWidget) -> Grid {
+/// Creates the (empty) grid with its column labels, its cells coloured
+/// by `palette`.
+pub fn create(parent: &dyn WxWidget, palette: &ListPalette) -> Grid {
     let grid = Grid::builder(parent).build();
+    grid.set_default_cell_background_colour(&tints::colour(palette.background));
+    grid.set_default_cell_text_colour(&tints::colour(palette.text));
     grid.create_grid(
         0,
         FIXED_COLUMNS + COLUMNS.len() as i32,
@@ -72,16 +69,16 @@ pub fn bound(col: i32) -> Option<Bound> {
     }
 }
 
-/// Shows `rows`, tinted as `appearance` says. Does nothing while a cell
-/// is being edited, so that a refresh from the timer never throws away
-/// what the user is typing.
-pub fn refresh(grid: &Grid, rows: &[Row], appearance: &Appearance) {
+/// Shows `rows` in the colours of `palette`, tinted as `appearance`
+/// says. Does nothing while a cell is being edited, so that a refresh
+/// from the timer never throws away what the user is typing.
+pub fn refresh(grid: &Grid, rows: &[Row], appearance: &Appearance, palette: &ListPalette) {
     if grid.is_cell_edit_control_enabled() {
         return;
     }
     let want = i32::try_from(rows.len()).unwrap_or(i32::MAX);
     let have = grid.get_number_rows();
-    if have == want && rows_match(grid, rows, appearance) {
+    if have == want && rows_match(grid, rows, appearance, palette) {
         return;
     }
     grid.begin_batch();
@@ -107,21 +104,15 @@ pub fn refresh(grid: &Grid, rows: &[Row], appearance: &Appearance) {
         for (c, cell) in row.cells.iter().enumerate() {
             let c = FIXED_COLUMNS + c as i32;
             set(grid, r, c, &cell.text, false);
-            let colour = match (row.deleted, cell.edited) {
-                (true, _) => DELETED,
-                (false, true) => EDITED,
-                (false, false) => NORMAL,
-            };
-            grid.set_cell_text_colour(r, c, &colour);
+            grid.set_cell_text_colour(r, c, &text_colour(palette, row.deleted, cell.edited));
             if let (Some(b), Some(n)) = (&bold, &normal) {
                 grid.set_cell_font(r, c, if cell.edited { b } else { n });
             }
         }
         for c in 0..FIXED_COLUMNS {
-            let colour = if row.deleted { DELETED } else { NORMAL };
-            grid.set_cell_text_colour(r, c, &colour);
+            grid.set_cell_text_colour(r, c, &text_colour(palette, row.deleted, false));
         }
-        let tint = row_tint(appearance, r as usize, rows.len());
+        let tint = tints::colour(palette.row(appearance, r as usize, rows.len()));
         for c in 0..grid.get_number_cols() {
             grid.set_cell_background_colour(r, c, &tint);
         }
@@ -130,15 +121,14 @@ pub fn refresh(grid: &Grid, rows: &[Row], appearance: &Appearance) {
     grid.force_refresh();
 }
 
-/// Background of row `row` of `rows`: the track's tint, the same hue as
-/// behind its part of the waveform (issue #98); plain with one track,
-/// which the waveform does not tint either.
-fn row_tint(appearance: &Appearance, row: usize, rows: usize) -> Colour {
-    if rows > 1 {
-        tints::list(appearance, row)
-    } else {
-        tints::LIST_PLAIN
-    }
+/// The text colour of a cell of a track deleted entirely or not, and
+/// changed by the user or not.
+fn text_colour(palette: &ListPalette, deleted: bool, edited: bool) -> Colour {
+    tints::colour(match (deleted, edited) {
+        (true, _) => palette.deleted,
+        (false, true) => palette.edited,
+        (false, false) => palette.text,
+    })
 }
 
 /// Sets one cell's text, read-only or editable.
@@ -148,7 +138,7 @@ fn set(grid: &Grid, row: i32, col: i32, text: &str, read_only: bool) {
 }
 
 /// Whether the grid shows `rows` already (texts and edit marks).
-fn rows_match(grid: &Grid, rows: &[Row], appearance: &Appearance) -> bool {
+fn rows_match(grid: &Grid, rows: &[Row], appearance: &Appearance, palette: &ListPalette) -> bool {
     rows.iter().enumerate().all(|(r, row)| {
         let r = r as i32;
         grid.get_cell_value(r, START_COLUMN) == row.start
@@ -156,14 +146,12 @@ fn rows_match(grid: &Grid, rows: &[Row], appearance: &Appearance) -> bool {
             && grid.get_cell_value(r, LENGTH_COLUMN) == row.length
             && row.cells.iter().enumerate().all(|(c, cell)| {
                 let c = FIXED_COLUMNS + c as i32;
-                let colour = match (row.deleted, cell.edited) {
-                    (true, _) => DELETED,
-                    (false, true) => EDITED,
-                    (false, false) => NORMAL,
-                };
-                grid.get_cell_value(r, c) == cell.text && grid.get_cell_text_colour(r, c) == colour
+                grid.get_cell_value(r, c) == cell.text
+                    && grid.get_cell_text_colour(r, c)
+                        == text_colour(palette, row.deleted, cell.edited)
             })
             // Going from one track to two tints the first row too.
-            && grid.get_cell_background_colour(r, 0) == row_tint(appearance, r as usize, rows.len())
+            && grid.get_cell_background_colour(r, 0)
+                == tints::colour(palette.row(appearance, r as usize, rows.len()))
     })
 }

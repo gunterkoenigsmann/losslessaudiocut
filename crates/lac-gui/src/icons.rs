@@ -2,23 +2,40 @@
 //!
 //! wxWidgets renders them with its built-in SVG reader (NanoSVG), which
 //! knows plain shapes and paths but not `currentColor` or CSS, so the
-//! colours are spelled out. A mid grey reads on light and dark themes.
+//! colours are spelled out: a dark grey on light windows, a light grey
+//! on dark ones ([`use_dark_ink`]).
 //!
 //! All icons share a 24×24 view box and 2-unit round strokes, like most
 //! icon sets, so they look like one family.
 
-/// The SVG of one icon: shapes drawn in [`INK`] on a transparent 24×24
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// The SVG of one icon: shapes drawn in [`ink`] on a transparent 24×24
 /// view box.
 fn svg(shapes: &str) -> String {
+    let ink = ink();
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="{INK}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{shapes}</svg>"#
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="{ink}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{shapes}</svg>"#
     )
 }
 
-/// Line colour of every icon.
-const INK: &str = "#5c6670";
-/// Fill of solid shapes (the play triangle).
-const SOLID: &str = r##"fill="#5c6670""##;
+/// Whether the icons are drawn for dark windows; set once at start.
+static DARK: AtomicBool = AtomicBool::new(false);
+
+/// Draws the icons for dark (`true`) or light windows from now on.
+pub fn use_dark_ink(dark: bool) {
+    DARK.store(dark, Ordering::Relaxed);
+}
+
+/// Line colour of every icon: a grey with about the same contrast on
+/// the light and on the dark theme's background.
+fn ink() -> &'static str {
+    if DARK.load(Ordering::Relaxed) {
+        "#aab4be"
+    } else {
+        "#5c6670"
+    }
+}
 
 /// The icons of the toolbar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +84,8 @@ impl Icon {
         // A magnifier: lens and handle, for the zoom icons.
         const LENS: &str =
             r#"<circle cx="10" cy="10" r="6.5"/><line x1="15" y1="15" x2="21" y2="21"/>"#;
+        // Fill of solid shapes (the play triangles).
+        let solid = format!(r#"fill="{}""#, ink());
         let shapes = match self {
             Icon::Open => {
                 r#"<path d="M3 6.5V18a1.5 1.5 0 0 0 1.5 1.5h15A1.5 1.5 0 0 0 21 18V9a1.5 1.5 0 0 0-1.5-1.5H12l-2-2.5H4.5A1.5 1.5 0 0 0 3 6.5z"/>"#.to_string()
@@ -88,17 +107,17 @@ impl Icon {
             }
             Icon::Split => {
                 // A track marker: a boundary line with a flag on top.
-                format!(r#"<line x1="8" y1="3" x2="8" y2="21"/><polygon points="8,3.5 19,7.5 8,11.5" {SOLID}/><line x1="3" y1="21" x2="21" y2="21"/>"#)
+                format!(r#"<line x1="8" y1="3" x2="8" y2="21"/><polygon points="8,3.5 19,7.5 8,11.5" {solid}/><line x1="3" y1="21" x2="21" y2="21"/>"#)
             }
-            Icon::Play => format!(r#"<polygon points="7,4 20,12 7,20" {SOLID}/>"#),
+            Icon::Play => format!(r#"<polygon points="7,4 20,12 7,20" {solid}/>"#),
             Icon::ToStart => {
-                format!(r#"<line x1="5" y1="5" x2="5" y2="19"/><polygon points="19,5 9,12 19,19" {SOLID}/>"#)
+                format!(r#"<line x1="5" y1="5" x2="5" y2="19"/><polygon points="19,5 9,12 19,19" {solid}/>"#)
             }
             Icon::PlayTrackStart => {
-                format!(r#"<line x1="4" y1="4" x2="4" y2="20"/><polygon points="9,6 19,12 9,18" {SOLID}/>"#)
+                format!(r#"<line x1="4" y1="4" x2="4" y2="20"/><polygon points="9,6 19,12 9,18" {solid}/>"#)
             }
             Icon::PlayTrackEnd => {
-                format!(r#"<polygon points="5,6 15,12 5,18" {SOLID}/><line x1="20" y1="4" x2="20" y2="20"/>"#)
+                format!(r#"<polygon points="5,6 15,12 5,18" {solid}/><line x1="20" y1="4" x2="20" y2="20"/>"#)
             }
             Icon::ZoomIn => {
                 format!(r#"{LENS}<line x1="10" y1="7" x2="10" y2="13"/><line x1="7" y1="10" x2="13" y2="10"/>"#)

@@ -71,6 +71,7 @@ use lac_app::peak_job::{JobStatus, PeakJob};
 use lac_app::perspective::Perspective;
 use lac_app::playback::End;
 use lac_app::recent_files::RecentFiles;
+use lac_app::theme::{ListPalette, Theme};
 use lac_app::track_list::Bound;
 use lac_app::waveform::{DrawMode, WaveformView};
 use lac_core::{SamplePos, Tags};
@@ -332,6 +333,9 @@ struct State {
     toolbar: Option<Toolbar>,
     /// Menu options, remembered between runs.
     options: Options,
+    /// The track list's colours, for light or dark windows (fixed at
+    /// start, like the theme).
+    list_palette: ListPalette,
     /// File > Open recent, remembered between runs.
     recent: RecentFiles,
     /// Whether the current left-button drag has tried to start a scrub
@@ -1008,6 +1012,10 @@ fn main() {
         // The language first: every text from here on is translated.
         let options = Options::load();
         use_language(options.language);
+        // Before the first window, which wxWidgets cannot switch later.
+        let dark = use_theme(options.theme);
+        icons::use_dark_ink(dark);
+        let list_palette = ListPalette::new(dark);
         // macOS hands files opened from the Finder (double-click, "Open
         // With", drop on the Dock icon) to the running program as an event,
         // also at startup; other systems pass them on the command line. The
@@ -1039,7 +1047,7 @@ fn main() {
         // We paint every pixel ourselves; letting the system erase first
         // would flicker.
         panel.set_background_style(BackgroundStyle::Paint);
-        let grid = track_list::create(&frame);
+        let grid = track_list::create(&frame, &list_palette);
 
         let map = minimap::create(&frame);
         let cache = PeakCache::default_dir().map(PeakCache::new);
@@ -1057,6 +1065,7 @@ fn main() {
             cache,
             speed: Speed::new(100, options.keep_pitch),
             options,
+            list_palette,
             recent: recent_files,
             grid: Some(grid),
             ..State::default()
@@ -1672,6 +1681,26 @@ fn report(frame: &Frame, msg: &str) {
     log_pane::append(msg);
 }
 
+/// Light, dark or the system's windows (issue #104). Returns whether
+/// they are dark. Must run before the first window is created.
+fn use_theme(theme: Theme) -> bool {
+    let appearance = match theme {
+        Theme::System => wxdragon::appearance::Appearance::System,
+        Theme::Light => wxdragon::appearance::Appearance::Light,
+        Theme::Dark => wxdragon::appearance::Appearance::Dark,
+    };
+    // Where wxWidgets cannot switch (or forcing a theme is not supported
+    // on the platform) the windows follow the system.
+    let switched =
+        wxdragon::app::set_appearance(appearance) == wxdragon::appearance::AppearanceResult::Ok;
+    let system_dark = wxdragon::appearance::get_system_appearance().is_some_and(|a| a.is_dark());
+    if switched {
+        theme.is_dark(system_dark)
+    } else {
+        system_dark
+    }
+}
+
 /// Translates the user interface into `choice` (a code of
 /// `lac_app::i18n::LANGUAGES`), or the system's language for `None`:
 /// our texts from the built-in catalogs, wxWidgets' own (standard
@@ -1724,7 +1753,12 @@ fn update_chrome(frame: &Frame, st: &State) {
     frame.set_status_text(&st.edit_status(), FIELD_EDIT);
     frame.set_status_text(&st.time_status(), FIELD_TIME);
     if let Some(g) = &st.grid {
-        track_list::refresh(g, &st.track_rows(), &st.options.appearance);
+        track_list::refresh(
+            g,
+            &st.track_rows(),
+            &st.options.appearance,
+            &st.list_palette,
+        );
     }
     st.show_positions();
 }

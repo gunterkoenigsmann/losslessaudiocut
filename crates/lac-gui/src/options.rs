@@ -10,6 +10,7 @@
 
 use lac_app::appearance::Appearance;
 use lac_app::detector_settings::DetectorSettings;
+use lac_app::theme::Theme;
 use wxdragon::config::{Config, ConfigStyle};
 
 /// Key of [`Options::keep_pitch`].
@@ -36,6 +37,8 @@ const TIMBRE: &str = "/Detection/Timbre";
 const KEY: &str = "/Detection/Key";
 /// Key of [`Options::language`]; empty for the system's language.
 const LANGUAGE: &str = "/Interface/Language";
+/// Key of [`Options::theme`] ([`Theme::key`]).
+const THEME: &str = "/Interface/Theme";
 
 /// The remembered options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +63,9 @@ pub struct Options {
     /// Settings > Language: a code of `lac_app::i18n::LANGUAGES`, `None`
     /// for the system's language. Takes effect at the next start.
     pub language: Option<&'static str>,
+    /// Settings > Interface: light or dark windows, or like the system
+    /// (issue #104). Takes effect at the next start.
+    pub theme: Theme,
 }
 
 impl Default for Options {
@@ -72,6 +78,7 @@ impl Default for Options {
             appearance: Appearance::default(),
             detector: DetectorSettings::default(),
             language: None,
+            theme: Theme::System,
         }
     }
 }
@@ -100,6 +107,7 @@ impl Options {
             }
             .normalized(),
             language: lac_app::i18n::language_code(&c.read_string(LANGUAGE, "")),
+            theme: Theme::from_key(&c.read_string(THEME, d.theme.key())),
         }
     }
 
@@ -119,6 +127,7 @@ impl Options {
         c.write_bool(TIMBRE, self.detector.timbre);
         c.write_bool(KEY, self.detector.key);
         c.write_string(LANGUAGE, self.language.unwrap_or(""));
+        c.write_string(THEME, self.theme.key());
         c.flush(false);
     }
 }
@@ -165,6 +174,7 @@ mod tests {
                 appearance: Appearance::default(),
                 detector: DetectorSettings::default(),
                 language: None,
+                theme: Theme::System,
             }
         );
     }
