@@ -330,7 +330,7 @@ mod tests {
             cuts.sort_unstable();
             cuts.dedup();
             let ranges: Vec<Range<SamplePos>> =
-                cuts.chunks_exact(2).map(|c| c[0]..c[1]).collect();
+                cuts.as_chunks::<2>().0.iter().map(|&[a, b]| a..b).collect();
             let plans = plan_av_cuts(&a, AAC_CAPS, &v, offset, &ranges).expect("plan");
             let to_samples = |t: MediaTime| t as f64 * 48_000.0 / 90_000.0;
             let mut audio_out = 0.0;
