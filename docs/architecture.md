@@ -805,6 +805,19 @@ each export with the source's (`framemd5`), for every codec fixture.
 ffmpeg 6.1 with libdav1d ignores part of an AV1 edit list; the tests
 decode AV1 with libaom.
 
+Decoding *(implemented)*: `lac_decode::VideoDecoder` decodes single
+pictures by presentation time for the preview. It feeds libavcodec the
+frames of our `VideoIndex` (with the sample entry's `avcC`/`hvcC`/`av1C`/
+`apvC` body or `esds` DecoderSpecificInfo as extradata), starting at the
+last clean keyframe before the picture in decode order, and continues a
+running decoder when the next request lies further on in the same group
+of pictures (frame stepping). Pictures are converted to RGB by our own
+code (`lac_decode::picture`) from FFmpeg's pixel format descriptor and the
+stream's YCbCr matrix (BT.601/709/2020, limited or full range), so the
+crate still needs libavcodec only, not libswscale. HDR pictures are not
+tone-mapped. Tests compare every picture of each codec fixture, also by
+random access, with what the ffmpeg tool decodes.
+
 The waveform, playback and analysis stay audio-only; the GUI adds a video
 preview pane driven by the audio clock and a keyframe thumbnail lane. Video
 is decoded with libavcodec from our own packet index, like audio.

@@ -1,4 +1,5 @@
-//! The FFmpeg (libavcodec) decoder behind [`Decoder`].
+//! The FFmpeg (libavcodec) decoders behind [`Decoder`] (audio) and
+//! [`VideoDecoder`].
 //!
 //! Everything that touches FFmpeg lives here. `ffmpeg-next` covers most of
 //! the API safely; the codec context fields it does not expose (extradata,
@@ -13,6 +14,9 @@ use ff::format::sample::Type;
 use ffmpeg_next as ff;
 use lac_container::wav::SampleEncoding;
 use lac_container::{Codec, DecodeSection};
+use lac_core::{MediaTime, VideoCodec, VideoStreamInfo};
+
+use crate::picture::{Component, Frame, Matrix, PixelLayout, Plane};
 
 /// An error reported by FFmpeg.
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +33,10 @@ pub enum FfmpegError {
     /// The PCM layout of a WAV file has no FFmpeg decoder.
     #[error("unsupported PCM layout ({0:?}, {1} bytes per sample)")]
     PcmLayout(SampleEncoding, usize),
+    /// The video decoder produces pictures in a pixel format this crate
+    /// cannot read (palettes, bit-packed or hardware formats).
+    #[error("unsupported pixel format {0}")]
+    PixelFormat(String),
 }
 
 /// One opened libavcodec audio decoder.
@@ -142,6 +150,250 @@ impl Decoder {
         self.inner.receive_frame(&mut self.frame).ok()?;
         Some(to_interleaved_f32(&self.frame, channels))
     }
+}
+
+/// One opened libavcodec video decoder. Packets carry their decode and
+/// presentation times, so each picture comes out with its presentation
+/// time.
+pub(crate) struct VideoDecoder {
+    inner: ff::decoder::Video,
+    frame: ff::frame::Video,
+}
+
+impl VideoDecoder {
+    /// Opens a decoder for the stream `info` with the container's codec
+    /// configuration `extradata`; times are ticks of `info.timescale`.
+    pub(crate) fn new(info: &VideoStreamInfo, extradata: &[u8]) -> Result<Self, FfmpegError> {
+        let (codec, timescale) = (info.codec, info.timescale);
+        ff::init()?;
+        // libdav1d announces its version at the "info" level each time a
+        // decoder opens; only warnings and errors are worth a log line.
+        use ff::util::log::{self, Level};
+        let warning = i32::from(Level::Warning);
+        if log::get_level().is_ok_and(|l| i32::from(l) > warning) {
+            log::set_level(Level::Warning);
+        }
+        let found = match video_codec(codec) {
+            VideoId::Id(id) => ff::decoder::find(id),
+            VideoId::Name(name) => ff::decoder::find_by_name(name),
+            VideoId::None => None,
+        };
+        let found = found.ok_or(FfmpegError::NoDecoder)?;
+        let mut ctx = ff::codec::Context::new_with_codec(found);
+        // SAFETY: `ptr` is the valid, exclusively owned context `ctx` just
+        // allocated and not opened yet, so setting these fields is
+        // allowed. The extradata buffer comes from `av_mallocz` with the
+        // padding libavcodec requires and is freed by the context.
+        unsafe {
+            let ptr = ctx.as_mut_ptr();
+            (*ptr).pkt_timebase = ff::ffi::AVRational {
+                num: 1,
+                den: i32::try_from(timescale).unwrap_or(i32::MAX).max(1),
+            };
+            // The sample entry's size, as FFmpeg's demuxer passes it (the
+            // ProRes decoder warns about a "resolution change" without).
+            (*ptr).width = i32::try_from(info.width).unwrap_or(0);
+            (*ptr).height = i32::try_from(info.height).unwrap_or(0);
+            // The sample entry's fourcc, as FFmpeg's demuxer passes it:
+            // the ProRes decoder takes its profile (Proxy, LT, ...) from it.
+            if let VideoCodec::Other(fourcc) = codec {
+                (*ptr).codec_tag = u32::from_le_bytes(fourcc);
+            }
+            if !extradata.is_empty() {
+                let len = extradata.len();
+                let pad = ff::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
+                let buf = ff::ffi::av_mallocz(len + pad) as *mut u8;
+                if buf.is_null() {
+                    return Err(ff::Error::Other {
+                        errno: ff::error::ENOMEM,
+                    }
+                    .into());
+                }
+                std::ptr::copy_nonoverlapping(extradata.as_ptr(), buf, len);
+                (*ptr).extradata = buf;
+                (*ptr).extradata_size = len as i32;
+            }
+        }
+        let inner = ctx.decoder().video()?;
+        Ok(VideoDecoder {
+            inner,
+            frame: ff::frame::Video::empty(),
+        })
+    }
+
+    /// Feeds one frame's data with its decode and presentation time. An
+    /// error concerns this frame only.
+    pub(crate) fn decode(
+        &mut self,
+        data: &[u8],
+        dts: MediaTime,
+        pts: MediaTime,
+    ) -> Result<(), FfmpegError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let mut packet = ff::Packet::copy(data);
+        packet.set_dts(Some(dts));
+        packet.set_pts(Some(pts));
+        self.inner.send_packet(&packet)?;
+        Ok(())
+    }
+
+    /// Signals the end of the stream so that the pictures the decoder
+    /// still holds (reordering delay) come out.
+    pub(crate) fn flush(&mut self) {
+        // Fails only if already flushed, which callers avoid.
+        let _ = self.inner.send_eof();
+    }
+
+    /// The next decoded picture, or `None` when the decoder needs more
+    /// input. A picture in a format that cannot be read is an error.
+    pub(crate) fn next_frame(&mut self) -> Option<Result<Frame, FfmpegError>> {
+        self.inner.receive_frame(&mut self.frame).ok()?;
+        Some(copy_frame(&self.frame))
+    }
+}
+
+/// How to find the decoder of a video codec.
+enum VideoId {
+    /// By codec ID.
+    Id(Id),
+    /// By decoder name, for codecs whose ID is newer than the oldest
+    /// supported FFmpeg (the binding then lacks it).
+    Name(&'static str),
+    /// No FFmpeg decoder.
+    None,
+}
+
+/// The FFmpeg decoder of a video codec.
+fn video_codec(codec: VideoCodec) -> VideoId {
+    match codec {
+        VideoCodec::H264 => VideoId::Id(Id::H264),
+        VideoCodec::Hevc => VideoId::Id(Id::HEVC),
+        VideoCodec::Av1 => VideoId::Id(Id::AV1),
+        VideoCodec::Vp9 => VideoId::Id(Id::VP9),
+        VideoCodec::Mpeg4Visual => VideoId::Id(Id::MPEG4),
+        VideoCodec::Other(fourcc) => match &fourcc {
+            b"apco" | b"apcs" | b"apcn" | b"apch" | b"ap4h" | b"ap4x" => VideoId::Id(Id::PRORES),
+            // FFmpeg 8.0 and newer.
+            b"apv1" => VideoId::Name("apv"),
+            b"jpeg" => VideoId::Id(Id::MJPEG),
+            b"mp2v" => VideoId::Id(Id::MPEG2VIDEO),
+            b"mp1v" => VideoId::Id(Id::MPEG1VIDEO),
+            b"s263" | b"h263" => VideoId::Id(Id::H263),
+            _ => VideoId::None,
+        },
+    }
+}
+
+/// Copies a decoded picture out of FFmpeg's frame.
+fn copy_frame(f: &ff::frame::Video) -> Result<Frame, FfmpegError> {
+    let format = f.format();
+    let layout = pixel_layout(format)?;
+    let mut planes = Vec::new();
+    for i in 0..f.planes() {
+        // SAFETY: `av_image_get_linesize` only reads the static format
+        // descriptor; it returns a negative error for an invalid plane.
+        let row_bytes =
+            unsafe { ff::ffi::av_image_get_linesize(format.into(), f.width() as i32, i as i32) };
+        let row_bytes = usize::try_from(row_bytes)
+            .map_err(|_| FfmpegError::PixelFormat(layout.name.clone()))?;
+        // Rows without the decoder's padding, which holds whatever the
+        // buffer held before (equal pictures then compare equal).
+        let (stride, rows) = (f.stride(i), f.plane_height(i) as usize);
+        if row_bytes > stride {
+            return Err(FfmpegError::PixelFormat(layout.name));
+        }
+        let data = f.data(i);
+        let mut packed = Vec::with_capacity(row_bytes * rows);
+        for row in 0..rows {
+            packed.extend_from_slice(&data[row * stride..row * stride + row_bytes]);
+        }
+        planes.push(Plane {
+            data: packed,
+            stride: row_bytes,
+            row_bytes,
+            rows,
+        });
+    }
+    if layout.components.iter().any(|c| c.plane >= planes.len()) {
+        return Err(FfmpegError::PixelFormat(layout.name));
+    }
+    use ff::color::Space;
+    let matrix = match f.color_space() {
+        Space::BT709 => Matrix::Bt709,
+        Space::BT2020NCL | Space::BT2020CL => Matrix::Bt2020,
+        Space::BT470BG | Space::SMPTE170M | Space::FCC => Matrix::Bt601,
+        // Unspecified: what players assume, BT.709 for HD pictures.
+        _ if f.height() > 576 => Matrix::Bt709,
+        _ => Matrix::Bt601,
+    };
+    Ok(Frame {
+        time: f.timestamp().unwrap_or(0),
+        width: f.width(),
+        height: f.height(),
+        layout,
+        planes,
+        matrix,
+        full_range: f.color_range() == ff::color::Range::JPEG,
+    })
+}
+
+/// The layout of a pixel format, from FFmpeg's `AVPixFmtDescriptor`.
+fn pixel_layout(format: ff::format::Pixel) -> Result<PixelLayout, FfmpegError> {
+    let desc = format
+        .descriptor()
+        .ok_or_else(|| FfmpegError::PixelFormat(format!("{format:?}")))?;
+    let name = desc.name().to_owned();
+    // SAFETY: `as_ptr` points to FFmpeg's static, immutable descriptor
+    // table entry for `format`, valid for the whole program.
+    let d = unsafe { &*desc.as_ptr() };
+    // The flags' integer type depends on the bindgen target (u64, or a
+    // 32-bit c_ulong on Windows).
+    #[allow(clippy::unnecessary_cast)]
+    let flags = d.flags as u64;
+    let unsupported = (ff::ffi::AV_PIX_FMT_FLAG_PAL
+        | ff::ffi::AV_PIX_FMT_FLAG_BITSTREAM
+        | ff::ffi::AV_PIX_FMT_FLAG_HWACCEL
+        | ff::ffi::AV_PIX_FMT_FLAG_BAYER
+        | ff::ffi::AV_PIX_FMT_FLAG_FLOAT) as u64;
+    let n = usize::from(d.nb_components);
+    if flags & unsupported != 0 || n == 0 {
+        return Err(FfmpegError::PixelFormat(name));
+    }
+    let rgb = flags & ff::ffi::AV_PIX_FMT_FLAG_RGB as u64 != 0;
+    if rgb && n < 3 {
+        return Err(FfmpegError::PixelFormat(name));
+    }
+    let components: Vec<Component> = d.comp[..n]
+        .iter()
+        .map(|c| Component {
+            plane: c.plane as usize,
+            step: c.step as usize,
+            offset: c.offset as usize,
+            shift: c.shift as u32,
+            depth: c.depth as u32,
+        })
+        .collect();
+    if components
+        .iter()
+        .any(|c| c.depth == 0 || c.depth > 16 || c.shift + c.depth > 16)
+    {
+        return Err(FfmpegError::PixelFormat(name));
+    }
+    Ok(PixelLayout {
+        // yuvj420p and friends: the deprecated full-range formats of
+        // MJPEG decoders.
+        full_range: name.starts_with("yuvj"),
+        name,
+        // A two-component gray format (ya8) has no chroma; [`Frame`]
+        // treats fewer than three components as gray.
+        components,
+        log2_chroma_w: u32::from(d.log2_chroma_w),
+        log2_chroma_h: u32::from(d.log2_chroma_h),
+        rgb,
+        big_endian: flags & ff::ffi::AV_PIX_FMT_FLAG_BE as u64 != 0,
+    })
 }
 
 /// The FFmpeg codec of a section, plus the coded bits per sample for PCM.
