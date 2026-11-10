@@ -1,5 +1,6 @@
 //! The position bar: selection start, end and length as editable fields,
-//! and a large play clock, as a dockable pane (see [`crate::panes`]).
+//! and a large play clock, editable too (issue #89), as a dockable pane
+//! (see [`crate::panes`]).
 //!
 //! What it shows and what typing into it does is decided in
 //! [`lac_app::positions`]; this module only makes and fills the widgets.
@@ -21,7 +22,7 @@ pub struct PositionBar {
     start: TextCtrl,
     end: TextCtrl,
     length: TextCtrl,
-    clock: StaticText,
+    clock: TextCtrl,
 }
 
 impl PositionBar {
@@ -65,10 +66,10 @@ impl PositionBar {
             Field::Length,
         );
         sizer.add_spacer(panel.from_dip_int(16));
-        // Created with the widest label it can show, so that its size and
-        // the panel's fit (and with that the dock pane's best size) leave
-        // room for it; see `CLOCK_WIDEST`. The real label follows below.
-        let clock = StaticText::builder(&panel).with_label(CLOCK_WIDEST).build();
+        // A text field in a large font, so a time can be typed into it.
+        let clock = TextCtrl::builder(&panel)
+            .with_style(TextCtrlStyle::ProcessEnter)
+            .build();
         let font = Font::builder()
             .with_point_size(CLOCK_POINTS)
             .with_family(FontFamily::Teletype)
@@ -77,11 +78,24 @@ impl PositionBar {
         if let Some(font) = font {
             clock.set_font(&font);
         }
-        // Keep that room: a static text resizes itself to every new
-        // label, and a later layout of the bar must not shrink the clock to
-        // a short label and crop the next, longer one (issue #94).
-        clock.set_min_size(clock.get_best_size());
-        clock.set_tooltip(&tr("Where playback is, or where it starts (source time)"));
+        // Room for the widest time it can show (see `CLOCK_WIDEST`) plus
+        // the field's border, fixed: the bar is not laid out anew while
+        // playback runs, and no time is cropped (issue #94).
+        let text = clock.get_text_extent(CLOCK_WIDEST);
+        let best = clock.get_best_size();
+        let size = Size::new(
+            text.width + panel.from_dip_int(16),
+            best.height.max(text.height),
+        );
+        clock.set_min_size(size);
+        clock.set_size(size);
+        clock.set_tooltip(&tr(
+            "Where playback is, or where it starts (source time); type a time and press Enter to go there",
+        ));
+        {
+            let on_enter = on_enter.clone();
+            clock.on_enter_pressed(move |_| on_enter(Field::Clock, clock.get_value()));
+        }
         sizer.add(
             &clock,
             0,
@@ -89,7 +103,7 @@ impl PositionBar {
             8,
         );
         panel.set_sizer_and_fit(sizer, true);
-        clock.set_label("0:00.000");
+        clock.change_value("0:00.000");
         PositionBar {
             panel,
             start,
@@ -112,15 +126,13 @@ impl PositionBar {
             (self.start, Field::Start),
             (self.end, Field::End),
             (self.length, Field::Length),
+            (self.clock, Field::Clock),
         ] {
             let want = p.get(field);
             if !ctrl.has_focus() && ctrl.get_value() != want {
                 // Unlike `set_value`, sends no text event.
                 ctrl.change_value(want);
             }
-        }
-        if self.clock.get_label() != p.clock {
-            self.clock.set_label(&p.clock);
         }
     }
 }

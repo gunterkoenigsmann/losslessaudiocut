@@ -1,6 +1,6 @@
 //! The position bar's view model: selection start, end and length, and
-//! the play clock, as text; and what typing a time into one of the
-//! selection fields does.
+//! the play clock, as text; and what typing a time into one of them does
+//! (issue #89).
 //!
 //! All times are on the source timeline (the one the waveform shows), so
 //! the numbers match what the user sees under the pointer. The status bar
@@ -20,6 +20,8 @@ pub enum Field {
     End,
     /// Length of the selection.
     Length,
+    /// The play clock: where playback is or would start.
+    Clock,
 }
 
 /// What the position bar shows.
@@ -42,6 +44,7 @@ impl Positions {
             Field::Start => &self.start,
             Field::End => &self.end,
             Field::Length => &self.length,
+            Field::Clock => &self.clock,
         }
     }
 }
@@ -76,7 +79,10 @@ pub fn positions(editor: &Editor, rate: u32, playhead: Option<SamplePos>) -> Pos
 /// - end: the selection ends there and keeps its start (the cursor
 ///   without one);
 /// - length: the selection keeps its start (or begins at the cursor) and
-///   gets that length.
+///   gets that length;
+/// - clock: the cursor moves there and the selection goes, as with a
+///   click into the waveform, so playback starts (or, while it runs,
+///   continues) there.
 ///
 /// A start after the end swaps the two, as dragging does. Returns an
 /// error to show for text that is no time.
@@ -91,6 +97,10 @@ pub fn apply(editor: &mut Editor, field: Field, text: &str, rate: u32) -> Result
         (Field::Length, s) => {
             let from = s.map_or(editor.cursor(), |s| s.start);
             editor.select(from, from.saturating_add(t));
+        }
+        (Field::Clock, _) => {
+            editor.clear_selection();
+            editor.set_cursor(t);
         }
     }
     Ok(())
@@ -132,6 +142,25 @@ mod tests {
         }
         // Shorter labels, e.g. issue #94's 14:00.375, are no longer.
         assert!(format_samples(840_375, 1000).len() < CLOCK_WIDEST.len());
+    }
+
+    /// Typing into the clock moves the cursor there, drops the selection
+    /// and with that is where playback starts; times past the end stop at
+    /// the end.
+    #[test]
+    fn typing_into_the_clock_moves_the_cursor() {
+        let mut e = editor();
+        e.select(2_000, 5_000);
+        apply(&mut e, Field::Clock, "0:42.5", RATE).expect("a time");
+        assert_eq!(e.selection(), None);
+        assert_eq!(e.cursor(), 42_500);
+        assert_eq!(e.play_from(), 42_500);
+        assert_eq!(positions(&e, RATE, None).get(Field::Clock), "0:42.500");
+        apply(&mut e, Field::Clock, "2:00", RATE).expect("a time");
+        assert_eq!(e.cursor(), 60_000);
+        // Text that is no time changes nothing.
+        assert!(apply(&mut e, Field::Clock, "soon", RATE).is_err());
+        assert_eq!(e.cursor(), 60_000);
     }
 
     #[test]
