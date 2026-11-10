@@ -7,6 +7,10 @@
 //! set them (see [`crate::export_job::track_numbers`]). Cells the user changed are
 //! marked, so the list can show them differently.
 //!
+//! Rows come in the list's order, which the user may change by moving
+//! tracks (issue #85); each row names its track's index in the recording
+//! ([`Row::index`]), which the editing functions here take.
+//!
 //! Typing a value equal to what the cell would show without a change
 //! (the source's value, or the counted number) removes the change, so the
 //! track follows the source and the counting again.
@@ -35,6 +39,9 @@ pub struct Cell {
 /// One row: a track.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
+    /// The track's index in the recording's order (as in
+    /// [`Editor::tracks`]); it also picks the track's tint.
+    pub index: usize,
     /// Where the track starts in the source, e.g. `1:02.500`.
     pub start: String,
     /// Where it ends in the source (where the next one starts).
@@ -47,8 +54,8 @@ pub struct Row {
     pub cells: Vec<Cell>,
 }
 
-/// The rows for `editor`'s tracks, with `source` as the source's tags and
-/// `rate` its sample rate.
+/// The rows for `editor`'s tracks in the list's order, with `source` as
+/// the source's tags and `rate` its sample rate.
 pub fn rows(editor: &Editor, source: &Tags, rate: u32) -> Vec<Row> {
     // One track is exported as one file that keeps the source's numbers
     // (see `export_job::single_task`), so nothing is counted then.
@@ -57,11 +64,13 @@ pub fn rows(editor: &Editor, source: &Tags, rate: u32) -> Vec<Row> {
     } else {
         track_numbers(editor)
     };
-    editor
+    let mut rows: Vec<Row> = editor
         .tracks()
         .into_iter()
         .zip(numbers)
-        .map(|(t, n)| Row {
+        .enumerate()
+        .map(|(index, (t, n))| Row {
+            index,
             start: format_samples(t.span.start, rate),
             end: format_samples(t.span.end, rate),
             length: format_samples(t.kept_len(), rate),
@@ -87,7 +96,21 @@ pub fn rows(editor: &Editor, source: &Tags, rate: u32) -> Vec<Row> {
                 })
                 .collect(),
         })
-        .collect()
+        .collect();
+    let order = editor.order();
+    rows.sort_by_key(|r| order.iter().position(|&i| i == r.index));
+    rows
+}
+
+/// The track shown in row `row` (0-based) of the list, as an index for
+/// the functions here and [`Editor`]'s.
+pub fn track_of_row(editor: &Editor, row: usize) -> Option<usize> {
+    editor.order().get(row).copied()
+}
+
+/// The row that shows track `index`.
+pub fn row_of_track(editor: &Editor, index: usize) -> Option<usize> {
+    editor.order().iter().position(|&i| i == index)
 }
 
 /// What the cell of track `index` and column `field` shows without the
@@ -100,7 +123,7 @@ fn unchanged_value(editor: &Editor, source: &Tags, index: usize, field: TagField
     // The rate only affects the times, which are not needed here.
     rows(&e, source, 1)
         .into_iter()
-        .nth(index)
+        .find(|r| r.index == index)
         .zip(col)
         .map(|(r, c)| r.cells[c].text.clone())
         .unwrap_or_default()
@@ -288,6 +311,30 @@ mod tests {
         );
         assert_eq!(texts(&e, TagField::TrackNumber), ["7", "2"]);
         assert!(edit(&mut e, &s, 0, TagField::TrackNumber, "seven", false).is_err());
+    }
+
+    /// Rows follow the list's order (issue #85) and name their tracks;
+    /// editing a row's cell changes that track.
+    #[test]
+    fn rows_come_in_the_lists_order() {
+        let s = source();
+        let mut e = Editor::new(3000);
+        e.split_at_all([1000, 2000]);
+        assert!(e.move_track(0, 2));
+        let r = rows(&e, &s, 1000);
+        let starts: Vec<_> = r.iter().map(|r| (r.index, r.start.as_str())).collect();
+        assert_eq!(starts, [(1, "0:01.000"), (2, "0:02.000"), (0, "0:00.000")]);
+        assert_eq!(texts(&e, TagField::TrackNumber), ["1", "2", "3"]);
+        assert_eq!(track_of_row(&e, 2), Some(0));
+        assert_eq!(row_of_track(&e, 0), Some(2));
+        assert_eq!(track_of_row(&e, 3), None);
+        let index = track_of_row(&e, 0).expect("row 0");
+        assert_eq!(
+            edit(&mut e, &s, index, TagField::Title, "Moved", false),
+            Ok(true)
+        );
+        assert_eq!(texts(&e, TagField::Title), ["Moved", "Concert", "Concert"]);
+        assert_eq!(track_start(&e, index), Some(1000));
     }
 
     #[test]

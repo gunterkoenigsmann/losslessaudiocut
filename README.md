@@ -110,6 +110,13 @@ previous track, delete or restore it. With several rows selected (drag over
 them, or Shift-click), it offers to merge their tracks into one; so does
 the waveform's menu for a selection that reaches into several tracks.
 
+Edit > Move track up and Move track down (Ctrl+Shift+Up/Down), or the
+same entries in a row's menu, change the order of the tracks: the track
+under the cursor swaps places with its neighbour in the list. It gets that
+number (and file name prefix), and a whole-file export plays the tracks in
+the list's order; in the waveform it stays where it is in the recording.
+Joining tracks out of order is as lossless as joining after a deletion.
+
 *View > Perspective* (Ctrl+1 to Ctrl+6) zooms to the whole file, from the
 start to just after the selection start, around the selection start, the
 selection with some context, around the selection end, or from just before

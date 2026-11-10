@@ -123,6 +123,14 @@ pub enum Action {
     DeleteRange(Range<SamplePos>),
     /// Selects this range (a track) and restores what is deleted in it.
     RestoreRange(Range<SamplePos>),
+    /// Moves the track at this place of the list's order to another
+    /// (issue #85; see [`Editor::move_track`]).
+    MoveTrack {
+        /// Its place now (0-based).
+        from: usize,
+        /// Its new place.
+        to: usize,
+    },
 }
 
 /// One entry of the menu.
@@ -451,6 +459,7 @@ pub fn apply(editor: &mut Editor, action: &Action, rate: u32) -> Effect {
             editor.select(r.start, r.end);
             Effect::Edited(editor.restore_selection())
         }
+        Action::MoveTrack { from, to } => Effect::Edited(editor.move_track(*from, *to)),
     }
 }
 
@@ -541,6 +550,27 @@ pub fn track_list(editor: &Editor, index: usize, selected: &[usize]) -> Vec<Entr
         _ => None,
     };
     groups.push(merge.into_iter().collect());
+    // Its place in the list (and the export), which is its number - 1.
+    let place = n - 1;
+    let count = editor.splits().len() + 1;
+    groups.push(vec![
+        Item {
+            label: trf("Move track {n} up", &[("n", &n)]),
+            action: Action::MoveTrack {
+                from: place,
+                to: place.saturating_sub(1),
+            },
+            enabled: place > 0,
+        },
+        Item {
+            label: trf("Move track {n} down", &[("n", &n)]),
+            action: Action::MoveTrack {
+                from: place,
+                to: (place + 1).min(count - 1),
+            },
+            enabled: place + 1 < count,
+        },
+    ]);
     groups.push(vec![
         Item {
             label: trf("Join track {n} with the previous one", &[("n", &n)]),
@@ -786,6 +816,26 @@ mod tests {
         e.delete_selection();
         let menu = waveform(&scene(&e, &[], &[]), 15_000, 10);
         assert!(!item(&menu, "Export selection as…").enabled);
+    }
+
+    /// Moving a track up or down in the list (issue #85) swaps its place
+    /// with its neighbour's; the first can't go up, the last not down.
+    #[test]
+    fn the_track_list_menu_moves_tracks_in_the_order() {
+        let mut e = Editor::new(60_000);
+        e.split_at_all([10_000, 30_000]);
+        assert!(!item(&track_list(&e, 0, &[]), "Move track 1 up").enabled);
+        assert!(!item(&track_list(&e, 2, &[]), "Move track 3 down").enabled);
+        let up = item(&track_list(&e, 2, &[]), "Move track 3 up").clone();
+        assert!(up.enabled);
+        assert_eq!(apply(&mut e, &up.action, RATE), Effect::Edited(true));
+        assert_eq!(e.order(), [0, 2, 1]);
+        // Track index 1 is number 3 now, the last.
+        let menu = track_list(&e, 1, &[]);
+        assert!(!item(&menu, "Move track 3 down").enabled);
+        let up = item(&menu, "Move track 3 up").clone();
+        apply(&mut e, &up.action, RATE);
+        assert_eq!(e.order(), [0, 1, 2]);
     }
 
     #[test]

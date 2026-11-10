@@ -358,3 +358,18 @@ fn noise_substitution_is_detected() {
         assert_eq!(notes, want, "{name}");
     }
 }
+
+/// Tracks in another order than the source's (issue #85): ranges written
+/// out of order join like deletes, with the same window at each join.
+#[test]
+fn ranges_out_of_order_join_like_deletes() {
+    for (name, ..) in FIXTURES {
+        let src = fixture(name);
+        let f = open(&src);
+        let len = f.index().total_samples();
+        let p = plans(&f, &[len * 2 / 3..len, len / 3..len / 2, 2000..len / 6]);
+        let out = write(&src, &f, &p, None);
+        assert_frames_copied(&src, &out, &p);
+        assert_decodes_like_source(name, &src, &out, &p);
+    }
+}

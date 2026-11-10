@@ -24,6 +24,9 @@
 //! - `tag TRACK FIELD VALUE`: a tag change for all tracks (`*`) or for the
 //!   track starting at `TRACK`; `FIELD` is [`TagField::key`]. An empty
 //!   value clears the tag.
+//! - `order START…`: the tracks' order in the list and the export, as
+//!   their starts, when the user changed it (issue #85). An older program
+//!   skips the line and keeps the recording's order.
 //! - `view START END`: the part of the waveform that was shown.
 //!
 //! Values escape `\` as `\\`, line breaks as `\n` and tabs as `\t`. Unknown
@@ -107,6 +110,10 @@ impl Project {
                 out += &format!("tag {start} {} {}\n", field.key(), escape(value));
             }
         }
+        if !self.edits.order.is_empty() {
+            let starts: Vec<String> = self.edits.order.iter().map(u64::to_string).collect();
+            out += &format!("order {}\n", starts.join(" "));
+        }
         if let Some(v) = &self.view {
             out += &format!("view {} {}\n", v.start, v.end);
         }
@@ -155,6 +162,12 @@ impl Project {
                 "delete" => edits.deleted.push(pair(rest)?),
                 "split" => edits.splits.push(number(rest)?),
                 "view" => view = Some(pair(rest)?),
+                "order" => {
+                    edits.order = rest
+                        .split_whitespace()
+                        .map(number)
+                        .collect::<Result<_, _>>()?;
+                }
                 "tag" => {
                     let mut parts = rest.splitn(3, ' ');
                     let (Some(track), Some(field)) = (parts.next(), parts.next()) else {
@@ -247,6 +260,7 @@ mod tests {
                 splits: vec![1_323_000],
                 all_tags: all,
                 track_tags: [(1_323_000, second)].into_iter().collect(),
+                order: vec![1_323_000, 0],
             },
             view: Some(0..2_646_000),
         }
@@ -283,6 +297,7 @@ mod tests {
              tag * album Live \\\\ at\\tthe\\nBar\n\
              tag 1323000 title Second set\n\
              tag 1323000 artist \n\
+             order 1323000 0\n\
              view 0 2646000\n"
         );
     }

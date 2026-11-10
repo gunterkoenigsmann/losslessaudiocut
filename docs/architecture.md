@@ -723,6 +723,7 @@ packets in the same state. This gives:
 | Waveform cache | per-user cache directory with automatic eviction |
 | Channels | 1 to 4 (no fixed limit in code), one lane per channel |
 | Editing model | delete parts and join the rest into one file; split into tracks with own tags. Joining separate recordings is not planned. |
+| Track order | tracks stay contiguous split points of the recording; their order in the list and the export is a separate permutation (`Edits::order`, issue #85). A whole-file export of reordered tracks is a `CutRequest::Keep` of their kept parts in list order; every join of it is an internal join like after a deletion (table in section 5), tested per container (`ranges_out_of_order` tests) |
 | Projects | edits, splits, tags and view saved in a line-based text file (`.lacproj`, `lac_app::project`) that names the recording, relative to the project when inside its folder; unknown lines are skipped for forward compatibility |
 | Crash recovery | while edits are unsaved, the same format is written (at most every 2 s, by rename) to `<data dir>/recovery/<hash of the recording's path>.lacproj` (`lac_app::autosave`); removed once the edits are saved, exported or discarded, so a copy found later means the program ended abnormally and is offered for restoring |
 | Exactness | packet granularity first; sample-exact trimming metadata is a later, optional feature (the `CutPlan` fields exist from the start, set to 0) |
