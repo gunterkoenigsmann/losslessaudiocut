@@ -30,6 +30,7 @@ use std::ops::{Range, RangeInclusive};
 use lac_core::{SamplePos, TagField, TagValueError, Tags};
 
 use crate::chapters::SuggestedStart;
+use crate::i18n::{n_, tr, trf};
 use crate::{CutRequest, KeptRange, TagEdits, format_samples, ranges};
 
 /// Everything the user changed, as one undoable value.
@@ -774,17 +775,21 @@ impl Editor {
             parts.push(describe_selection(sel, rate));
         }
         if !self.edits.splits.is_empty() {
-            parts.push(format!(
-                "track {} of {}",
-                self.track_at(self.play_from()) + 1,
-                self.edits.splits.len() + 1
+            parts.push(trf(
+                "track {n} of {count}",
+                &[
+                    ("n", &(self.track_at(self.play_from()) + 1)),
+                    ("count", &(self.edits.splits.len() + 1)),
+                ],
             ));
         }
         if !self.edits.deleted.is_empty() {
-            parts.push(format!(
-                "keeping {} of {}",
-                format_samples(self.kept_len(), rate),
-                format_samples(self.total, rate)
+            parts.push(trf(
+                "keeping {kept} of {total}",
+                &[
+                    ("kept", &format_samples(self.kept_len(), rate)),
+                    ("total", &format_samples(self.total, rate)),
+                ],
             ));
         }
         parts.join(" · ")
@@ -794,11 +799,13 @@ impl Editor {
 /// One line for the status bar about the selection, e.g.
 /// `selected 0:01.500 .. 0:02.000 (0:00.500)`.
 pub fn describe_selection(sel: &Range<SamplePos>, rate: u32) -> String {
-    format!(
-        "selected {} .. {} ({})",
-        format_samples(sel.start, rate),
-        format_samples(sel.end, rate),
-        format_samples(sel.end - sel.start, rate)
+    trf(
+        "selected {start} .. {end} ({length})",
+        &[
+            ("start", &format_samples(sel.start, rate)),
+            ("end", &format_samples(sel.end, rate)),
+            ("length", &format_samples(sel.end - sel.start, rate)),
+        ],
     )
 }
 
@@ -818,26 +825,36 @@ pub fn describe_export(kept: &[KeptRange], rate: u32) -> String {
         })
         .sum();
     let padding: SamplePos = kept.iter().map(|k| k.padding).sum();
-    let parts = if kept.len() == 1 { "part" } else { "parts" };
-    let mut out = format!(
-        "exported {} {parts}, {}",
-        kept.len(),
-        format_samples(len, rate)
+    let template = if kept.len() == 1 {
+        n_("exported {n} part, {length}")
+    } else {
+        n_("exported {n} parts, {length}")
+    };
+    let mut out = trf(
+        template,
+        &[("n", &kept.len()), ("length", &format_samples(len, rate))],
     );
     match (widened, padding) {
-        (0, 0) => out += ", all cuts exact",
+        (0, 0) => out += &tr(", all cuts exact"),
         (w, 0) => {
-            out += &format!(
-                "; cuts at packet boundaries add {}",
-                format_samples(w, rate)
+            out += &trf(
+                "; cuts at packet boundaries add {added}",
+                &[("added", &format_samples(w, rate))],
             )
         }
-        (0, p) => out += &format!("; codec padding at joins adds {}", format_samples(p, rate)),
+        (0, p) => {
+            out += &trf(
+                "; codec padding at joins adds {padding}",
+                &[("padding", &format_samples(p, rate))],
+            )
+        }
         (w, p) => {
-            out += &format!(
-                "; cuts at packet boundaries add {}, codec padding {}",
-                format_samples(w, rate),
-                format_samples(p, rate)
+            out += &trf(
+                "; cuts at packet boundaries add {added}, codec padding {padding}",
+                &[
+                    ("added", &format_samples(w, rate)),
+                    ("padding", &format_samples(p, rate)),
+                ],
             )
         }
     }

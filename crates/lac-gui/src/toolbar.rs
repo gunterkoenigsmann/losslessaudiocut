@@ -10,6 +10,7 @@
 //! selector ([`Tool::Speed`]), a drop-down list of the playback speeds:
 //! the menu can only step through them one at a time.
 
+use lac_app::i18n::tr;
 use lac_playback::{STEPS, Speed};
 use wxdragon::prelude::*;
 
@@ -91,7 +92,7 @@ pub fn create(
                     .with_bitmap(Some(bitmap))
                     .with_style(BitmapButtonStyle::BorderNone)
                     .build();
-                button.set_tooltip(tip);
+                button.set_tooltip(&tr(tip));
                 let on_click = on_click.clone();
                 button.on_click(move |_| on_click(id));
                 sizer.add(
@@ -112,7 +113,7 @@ pub fn create(
                     .with_choices(labels)
                     .with_selection(u32::try_from(Speed::NORMAL.step_index()).ok())
                     .build();
-                choice.set_tooltip(tip);
+                choice.set_tooltip(&tr(tip));
                 choice.on_selection_changed(move |e| {
                     if let Some(i) = e.get_selection().and_then(|i| usize::try_from(i).ok()) {
                         on_speed(i);

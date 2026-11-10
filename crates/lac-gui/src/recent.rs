@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 
+use lac_app::i18n::{tr, tr_menu};
 use lac_app::recent_files::{MAX_FILES, RecentFiles};
 use wxdragon::prelude::*;
 
@@ -58,7 +59,11 @@ pub fn save(list: &RecentFiles) {
 pub fn submenu() -> Menu {
     Menu::builder()
         .append_separator()
-        .append_item(ID_CLEAR, "&Clear list", "Forget the recently opened files")
+        .append_item(
+            ID_CLEAR,
+            &tr_menu("&Clear list"),
+            &tr("Forget the recently opened files"),
+        )
         .build()
 }
 

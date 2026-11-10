@@ -8,6 +8,7 @@
 //! refresh while nothing changed costs no redraw.
 
 use lac_app::appearance::Appearance;
+use lac_app::i18n::tr;
 use lac_app::track_list::{Bound, COLUMNS, Row};
 use lac_core::TagField;
 use wxdragon::prelude::*;
@@ -40,11 +41,11 @@ pub fn create(parent: &dyn WxWidget) -> Grid {
         FIXED_COLUMNS + COLUMNS.len() as i32,
         GridSelectionMode::Cells,
     );
-    grid.set_col_label_value(START_COLUMN, "Start");
-    grid.set_col_label_value(END_COLUMN, "End");
-    grid.set_col_label_value(LENGTH_COLUMN, "Length");
+    grid.set_col_label_value(START_COLUMN, &tr("Start"));
+    grid.set_col_label_value(END_COLUMN, &tr("End"));
+    grid.set_col_label_value(LENGTH_COLUMN, &tr("Length"));
     for (i, f) in COLUMNS.iter().enumerate() {
-        grid.set_col_label_value(FIXED_COLUMNS + i as i32, f.label());
+        grid.set_col_label_value(FIXED_COLUMNS + i as i32, &tr(f.label()));
     }
     grid.set_row_label_size(36);
     // Wide text columns, narrow number columns.

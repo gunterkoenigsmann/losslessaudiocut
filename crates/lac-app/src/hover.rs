@@ -14,6 +14,7 @@ use lac_analysis::{Region, RegionKind};
 use lac_core::SamplePos;
 
 use crate::editor::Editor;
+use crate::i18n::{tr, trf};
 use crate::time::format_samples;
 
 /// The horizontal strip of the waveform window the pointer is in. The
@@ -58,9 +59,9 @@ pub fn tooltip(scene: &Scene, pos: SamplePos, zone: Zone, near: SamplePos) -> Op
     let close = |p: SamplePos| p.abs_diff(pos) <= near;
     let ed = scene.editor;
     if zone == Zone::Ruler {
-        return Some(format!(
-            "Time ruler: {} under the pointer (View > Time ruler hides it)",
-            t(pos)
+        return Some(trf(
+            "Time ruler: {time} under the pointer (View > Time ruler hides it)",
+            &[("time", &t(pos))],
         ));
     }
     // First, as a press there drags the boundary (see the GUI).
@@ -68,66 +69,71 @@ pub fn tooltip(scene: &Scene, pos: SamplePos, zone: Zone, near: SamplePos) -> Op
         .tracks()
         .into_iter()
         .skip(1)
-        .find(|tr| close(tr.span.start))
+        .find(|k| close(k.span.start))
     {
         let name = track.name.map(|n| format!(" \"{n}\"")).unwrap_or_default();
-        return Some(format!(
-            "Track {}{name} starts at {}; drag to move it",
-            track.number,
-            t(track.span.start)
+        return Some(trf(
+            "Track {n}{name} starts at {time}; drag to move it",
+            &[
+                ("n", &track.number),
+                ("name", &name),
+                ("time", &t(track.span.start)),
+            ],
         ));
     }
     if let Some(sel) = ed.selection() {
         if close(sel.start) {
-            return Some(format!(
-                "Selection start {}; Shift+click moves the nearer edge",
-                t(sel.start)
+            return Some(trf(
+                "Selection start {time}; Shift+click moves the nearer edge",
+                &[("time", &t(sel.start))],
             ));
         }
         if close(sel.end) {
-            return Some(format!(
-                "Selection end {}; Shift+click moves the nearer edge",
-                t(sel.end)
+            return Some(trf(
+                "Selection end {time}; Shift+click moves the nearer edge",
+                &[("time", &t(sel.end))],
             ));
         }
     }
     if let Some(p) = scene.playhead.filter(|&p| close(p)) {
-        return Some(format!("Playback position {}", t(p)));
+        return Some(trf("Playback position {time}", &[("time", &t(p))]));
     }
     if ed.selection().is_none() && close(ed.cursor()) {
-        return Some(format!(
-            "Cursor {}: playback starts here (Space)",
-            t(ed.cursor())
+        return Some(trf(
+            "Cursor {time}: playback starts here (Space)",
+            &[("time", &t(ed.cursor()))],
         ));
     }
     if zone == Zone::Top
         && let Some(&s) = scene.suggested_starts.iter().find(|&&s| close(s))
     {
-        return Some(format!(
-            "Suggested track start {} (Edit > Split at suggested track starts)",
-            t(s)
+        return Some(trf(
+            "Suggested track start {time} (Edit > Split at suggested track starts)",
+            &[("time", &t(s))],
         ));
     }
     if zone == Zone::Bottom
         && let Some(r) = scene.pauses.iter().find(|r| r.range.contains(&pos))
     {
         let kind = match r.kind {
-            RegionKind::Silence => "silence",
-            RegionKind::Noise => "noise only",
+            RegionKind::Silence => tr("silence"),
+            RegionKind::Noise => tr("noise only"),
         };
-        return Some(format!(
-            "Suggested pause ({kind}, {:.0} dBFS) {}–{}, {} long (Edit > Delete suggested pauses)",
-            r.level_db,
-            t(r.range.start),
-            t(r.range.end),
-            t(r.range.end - r.range.start)
+        return Some(trf(
+            "Suggested pause ({kind}, {level} dBFS) {start}–{end}, {length} long (Edit > Delete suggested pauses)",
+            &[
+                ("kind", &kind),
+                ("level", &format!("{:.0}", r.level_db)),
+                ("start", &t(r.range.start)),
+                ("end", &t(r.range.end)),
+                ("length", &t(r.range.end - r.range.start)),
+            ],
         ));
     }
     if let Some(d) = ed.deleted().iter().find(|d| d.contains(&pos)) {
-        return Some(format!(
-            "Deleted {}–{}; not exported (select it and Edit > Restore selection to keep it)",
-            t(d.start),
-            t(d.end)
+        return Some(trf(
+            "Deleted {start}–{end}; not exported (select it and Edit > Restore selection to keep it)",
+            &[("start", &t(d.start)), ("end", &t(d.end))],
         ));
     }
     if let Some(sel) = ed.selection().filter(|s| s.contains(&pos)) {
@@ -138,11 +144,13 @@ pub fn tooltip(scene: &Scene, pos: SamplePos, zone: Zone, near: SamplePos) -> Op
 
 /// The tooltip inside the selection.
 fn selected(sel: &Range<SamplePos>, rate: u32) -> String {
-    format!(
-        "Selection {}–{}, {} long",
-        format_samples(sel.start, rate),
-        format_samples(sel.end, rate),
-        format_samples(sel.end - sel.start, rate)
+    trf(
+        "Selection {start}–{end}, {length} long",
+        &[
+            ("start", &format_samples(sel.start, rate)),
+            ("end", &format_samples(sel.end, rate)),
+            ("length", &format_samples(sel.end - sel.start, rate)),
+        ],
     )
 }
 

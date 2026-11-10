@@ -62,6 +62,7 @@ use lac_app::editor::{Editor, Edits};
 use lac_app::export_job::{ExportJob, default_output, describe_outcomes, track_tasks};
 use lac_app::format_samples;
 use lac_app::hover::{self, Zone};
+use lac_app::i18n::{n_, tr, tr_menu, trf};
 use lac_app::launch::GuiArgs;
 use lac_app::layout::Pane;
 use lac_app::minimap::Minimap;
@@ -131,79 +132,79 @@ const TOOLS: &[Tool] = &[
     Tool::Button {
         id: ID_OPEN,
         icon: Icon::Open,
-        tip: "Open an audio file (Ctrl+O)",
+        tip: n_("Open an audio file (Ctrl+O)"),
     },
     Tool::Button {
         id: ID_EXPORT,
         icon: Icon::Export,
-        tip: "Export the kept parts (Ctrl+E)",
+        tip: n_("Export the kept parts (Ctrl+E)"),
     },
     Tool::Gap,
     Tool::Button {
         id: ID_UNDO,
         icon: Icon::Undo,
-        tip: "Undo (Ctrl+Z)",
+        tip: n_("Undo (Ctrl+Z)"),
     },
     Tool::Button {
         id: ID_REDO,
         icon: Icon::Redo,
-        tip: "Redo (Ctrl+Y)",
+        tip: n_("Redo (Ctrl+Y)"),
     },
     Tool::Gap,
     Tool::Button {
         id: ID_DELETE,
         icon: Icon::Delete,
-        tip: "Delete the selection (Del)",
+        tip: n_("Delete the selection (Del)"),
     },
     Tool::Button {
         id: ID_RESTORE,
         icon: Icon::Restore,
-        tip: "Restore deleted parts in the selection (Ctrl+R)",
+        tip: n_("Restore deleted parts in the selection (Ctrl+R)"),
     },
     Tool::Button {
         id: ID_SPLIT,
         icon: Icon::Split,
-        tip: "Start a new track here (Ctrl+K)",
+        tip: n_("Start a new track here (Ctrl+K)"),
     },
     Tool::Gap,
     Tool::Button {
         id: ID_TO_START,
         icon: Icon::ToStart,
-        tip: "Cursor to the start (Home)",
+        tip: n_("Cursor to the start (Home)"),
     },
     Tool::Button {
         id: ID_PLAY,
         icon: Icon::Play,
-        tip: "Play or stop (Space)",
+        tip: n_("Play or stop (Space)"),
     },
     Tool::Button {
         id: ID_PLAY_TRACK_START,
         icon: Icon::PlayTrackStart,
-        tip: "Play the first 3 seconds of the track (Ctrl+Shift+B)",
+        tip: n_("Play the first 3 seconds of the track (Ctrl+Shift+B)"),
     },
     Tool::Button {
         id: ID_PLAY_TRACK_END,
         icon: Icon::PlayTrackEnd,
-        tip: "Play the last 3 seconds of the track (Ctrl+Shift+E)",
+        tip: n_("Play the last 3 seconds of the track (Ctrl+Shift+E)"),
     },
     Tool::Speed {
-        tip: "Playback speed (Ctrl+Up, Ctrl+Down; Ctrl+Shift+N for normal)",
+        tip: n_("Playback speed (Ctrl+Up, Ctrl+Down; Ctrl+Shift+N for normal)"),
     },
     Tool::Gap,
     Tool::Button {
         id: ID_ZOOM_IN,
         icon: Icon::ZoomIn,
-        tip: "Zoom in (Ctrl++)",
+        tip: n_("Zoom in (Ctrl++)"),
     },
     Tool::Button {
         id: ID_ZOOM_OUT,
         icon: Icon::ZoomOut,
-        tip: "Zoom out (Ctrl+-)",
+        tip: n_("Zoom out (Ctrl+-)"),
     },
     Tool::Button {
         id: ID_ZOOM_FIT,
         icon: Icon::ZoomFit,
-        tip: "Show the whole file (Ctrl+0)",
+        tip: n_("Show the whole file (Ctrl+0)"),
     },
 ];
 
@@ -440,11 +441,13 @@ impl State {
     fn chapter_note(&self) -> String {
         match (self.chapters.len(), self.options.chained_links) {
             (0 | 1, _) => String::new(),
-            (n, true) => format!(
-                "; {n} chained streams, offered as track starts (Edit > Split at suggested track starts)"
+            (n, true) => trf(
+                "; {n} chained streams, offered as track starts (Edit > Split at suggested track starts)",
+                &[("n", &n)],
             ),
-            (n, false) => format!(
-                "; {n} chained streams, not offered as track starts (Edit > Suggest chained streams as tracks)"
+            (n, false) => trf(
+                "; {n} chained streams, not offered as track starts (Edit > Settings > Detection)",
+                &[("n", &n)],
             ),
         }
     }
@@ -481,11 +484,11 @@ impl State {
     /// beginning if `wrap`, else from the last frame.
     fn play_at(&mut self, src: SamplePos, wrap: bool) -> Result<(), String> {
         let Some(editor) = &self.editor else {
-            return Err("open a file first".to_string());
+            return Err(tr("open a file first").into_owned());
         };
         let tl = lac_app::playback::timeline(editor);
         if tl.is_empty() {
-            return Err("everything is deleted; nothing to play".to_string());
+            return Err(tr("everything is deleted; nothing to play").into_owned());
         }
         let start = match tl.from_source(src) {
             t if t >= tl.len() && wrap => 0,
@@ -499,7 +502,7 @@ impl State {
     /// error message.
     fn play_track_end(&mut self, end: End) -> Option<String> {
         let (Some(ed), Some(rate)) = (&self.editor, self.rate) else {
-            return Some("open a file first".to_string());
+            return Some(tr("open a file first").into_owned());
         };
         let tl = lac_app::playback::track_excerpt(ed, ed.play_from(), end, rate);
         self.play_excerpt(tl).err()
@@ -509,7 +512,7 @@ impl State {
     /// the right-click menu. Space plays the edits again afterwards.
     fn play_excerpt(&mut self, tl: Timeline) -> Result<(), String> {
         if tl.is_empty() {
-            return Err("all of it is deleted; nothing to play".to_string());
+            return Err(tr("all of it is deleted; nothing to play").into_owned());
         }
         self.play_timeline(tl, 0)
     }
@@ -518,7 +521,7 @@ impl State {
     /// player on first use.
     fn play_timeline(&mut self, tl: Timeline, start: SamplePos) -> Result<(), String> {
         let Some(path) = &self.path else {
-            return Err("open a file first".to_string());
+            return Err(tr("open a file first").into_owned());
         };
         match &mut self.player {
             Some(p) => p.engine_mut().set_timeline(tl.clone(), start),
@@ -528,7 +531,7 @@ impl State {
                     p.engine_mut().seek(start);
                     self.player = Some(p);
                 }
-                Err(e) => return Err(format!("cannot play: {e}")),
+                Err(e) => return Err(trf("cannot play: {e}", &[("e", &e)])),
             },
         }
         self.timeline = tl;
@@ -549,11 +552,14 @@ impl State {
             p.engine_mut().set_speed(speed);
         }
         let how = match (speed.is_normal(), speed.keep_pitch) {
-            (true, _) => "",
-            (false, true) => " (pitch kept)",
-            (false, false) => " (pitch follows the speed)",
+            (true, _) => String::new(),
+            (false, true) => tr(" (pitch kept)").into_owned(),
+            (false, false) => tr(" (pitch follows the speed)").into_owned(),
         };
-        format!("speed {}{how}", speed.label())
+        trf(
+            "speed {speed}{how}",
+            &[("speed", &speed.label()), ("how", &how)],
+        )
     }
 
     /// The playback position for a pointer at source position `src`:
@@ -720,7 +726,13 @@ impl State {
                 format_samples(p.engine().position(), rate),
                 format_samples(self.timeline.len(), rate)
             ),
-            (_, Some(e)) => format!("{speed}cursor {}", format_samples(e.cursor(), rate)),
+            (_, Some(e)) => trf(
+                "{speed}cursor {pos}",
+                &[
+                    ("speed", &speed),
+                    ("pos", &format_samples(e.cursor(), rate)),
+                ],
+            ),
             _ => String::new(),
         }
     }
@@ -819,9 +831,12 @@ impl State {
     fn suggestion_summary(&self) -> String {
         let pauses = self.detection.as_ref().map_or(0, |d| d.regions.len());
         // Counts a chained file's link starts too.
-        format!(
-            "found {pauses} pause(s), {} track start(s) (Edit menu)",
-            self.suggested_starts().len()
+        trf(
+            "found {pauses} pause(s), {starts} track start(s) (Edit menu)",
+            &[
+                ("pauses", &pauses),
+                ("starts", &self.suggested_starts().len()),
+            ],
         )
     }
 
@@ -861,7 +876,10 @@ impl State {
             }
             AnalysisStatus::Failed(e) => {
                 self.analysis = None;
-                let msg = format!("could not look for pauses and track starts: {e}");
+                let msg = trf(
+                    "could not look for pauses and track starts: {e}",
+                    &[("e", &e)],
+                );
                 self.analysis_error = Some(e);
                 Some(msg)
             }
@@ -872,42 +890,50 @@ impl State {
     /// each one undoable step. Returns the message for the status bar.
     fn apply_suggestions(&mut self, id: Id) -> String {
         if self.editor.is_none() {
-            return "open a file first".to_string();
+            return tr("open a file first").into_owned();
         }
         // A chained file's links are known from the start; the analysis'
         // suggestions join them when it is done.
         let have_chapters = id == ID_SUGGESTED_SPLITS && !self.chapters_in_use().is_empty();
         if self.detection.is_none() && !have_chapters {
             return match &self.analysis_error {
-                Some(err) => format!("no suggestions: {err}"),
-                None => format!(
-                    "still looking for pauses and track starts ({} %)",
-                    self.analysis_percent
+                Some(err) => trf("no suggestions: {err}", &[("err", err)]),
+                None => trf(
+                    "still looking for pauses and track starts ({percent} %)",
+                    &[("percent", &self.analysis_percent)],
                 ),
             };
         }
         let starts = self.suggested_starts();
         let tags = self.tags.clone().unwrap_or_default();
         let Some(e) = &mut self.editor else {
-            return "open a file first".to_string();
+            return tr("open a file first").into_owned();
         };
         if id == ID_SUGGESTED_SPLITS {
             match e.split_at_suggestions(&starts, &tags) {
-                0 => "no new track starts suggested".to_string(),
-                n => format!("added {n} track start(s); Ctrl+Z takes them back"),
+                0 => tr("no new track starts suggested").into_owned(),
+                n => trf(
+                    "added {n} track start(s); Ctrl+Z takes them back",
+                    &[("n", &n)],
+                ),
             }
         } else if let Some(d) = &self.detection {
             match e.delete_ranges(d.regions.iter().map(|r| r.range.clone())) {
-                0 => "no suggested pauses left to delete".to_string(),
-                n => format!(
-                    "deleted {} of pauses; Ctrl+Z takes them back",
-                    self.rate
-                        .map_or_else(|| format!("{n} samples"), |r| format_samples(n, r))
+                0 => tr("no suggested pauses left to delete").into_owned(),
+                n => trf(
+                    "deleted {length} of pauses; Ctrl+Z takes them back",
+                    &[(
+                        "length",
+                        &self.rate.map_or_else(
+                            || trf("{n} samples", &[("n", &n)]),
+                            |r| format_samples(n, r),
+                        ),
+                    )],
                 ),
             }
         } else {
             // Ruled out above: pauses come from the analysis only.
-            "no suggested pauses left to delete".to_string()
+            tr("no suggested pauses left to delete").into_owned()
         }
     }
 
@@ -941,13 +967,19 @@ impl State {
                         .checked_div(p.packets())
                         .unwrap_or(100)
                 });
-                format!("{name}: reading… {pct} %")
+                trf(
+                    "{name}: reading… {percent} %",
+                    &[("name", &name), ("percent", &pct)],
+                )
             }
             JobStatus::Done(report) if report.warnings.is_empty() => {
                 self.job = None;
                 let note = self.chapter_note();
                 if u.cached {
-                    format!("{name} (waveform from cache){note}")
+                    trf(
+                        "{name} (waveform from cache){note}",
+                        &[("name", &name), ("note", &note)],
+                    )
                 } else {
                     format!("{name}{note}")
                 }
@@ -973,6 +1005,9 @@ fn main() {
     // command line exits with clap's message.
     let args = GuiArgs::try_parse_os(std::env::args_os()).unwrap_or_else(|e| e.exit());
     let _ = wxdragon::main(move |app| {
+        // The language first: every text from here on is translated.
+        let options = Options::load();
+        use_language(options.language);
         // macOS hands files opened from the Finder (double-click, "Open
         // With", drop on the Dock icon) to the running program as an event,
         // also at startup; other systems pass them on the command line. The
@@ -994,7 +1029,6 @@ fn main() {
         logo::set_window_icon(&frame);
         let status = frame.create_status_bar(3, 0, -1, "status");
         status.set_status_widths(&[-4, -4, -2]);
-        let options = Options::load();
         frame.set_menu_bar(menu_bar(options));
         let recent_files = recent::load();
         if let Some(bar) = frame.get_menu_bar() {
@@ -1110,7 +1144,7 @@ fn main() {
                 let opened: Vec<PathBuf> = open_rx.try_iter().collect();
                 if let Some((first, rest)) = opened.split_first() {
                     if !rest.is_empty() {
-                        report(&frame, "only one file at a time; opening the first");
+                        report(&frame, &tr("only one file at a time; opening the first"));
                     }
                     if confirm_discard(&frame, &state) {
                         open_file(&frame, &state, first.clone());
@@ -1180,155 +1214,187 @@ fn main() {
 /// File and View menus.
 fn menu_bar(options: Options) -> MenuBar {
     let file = Menu::builder()
-        .append_item(ID_OPEN, "&Open…\tCtrl+O", "Open an audio file")
+        .append_item(
+            ID_OPEN,
+            &tr_menu("&Open…\tCtrl+O"),
+            &tr("Open an audio file"),
+        )
         .append_item(
             ID_EXPORT,
-            "&Export…\tCtrl+E",
-            "Write the kept parts to a new file, without re-encoding",
+            &tr_menu("&Export…\tCtrl+E"),
+            &tr("Write the kept parts to a new file, without re-encoding"),
         )
         .append_item(
             ID_EXPORT_SELECTION,
-            "Export &selection…\tCtrl+Alt+E",
-            "Write what is kept of the selection to a new file, without re-encoding",
+            &tr_menu("Export &selection…\tCtrl+Alt+E"),
+            &tr("Write what is kept of the selection to a new file, without re-encoding"),
         )
         .append_separator()
         .append_item(
             ID_CLEAR_CACHE,
-            "&Clear waveform cache",
-            "Delete the stored waveforms; files are decoded again when opened",
+            &tr_menu("&Clear waveform cache"),
+            &tr("Delete the stored waveforms; files are decoded again when opened"),
         )
         .append_separator()
-        .append_item(ID_EXIT, "&Quit\tCtrl+Q", "Quit losslessaudiocut")
+        .append_item(
+            ID_EXIT,
+            &tr_menu("&Quit\tCtrl+Q"),
+            &tr("Quit losslessaudiocut"),
+        )
         .build();
     // The builder cannot add submenus; right below Open, like elsewhere.
     file.insert_submenu(
         1,
         recent::submenu(),
-        "Open &recent",
-        "Open one of the recently opened files",
+        &tr_menu("Open &recent"),
+        &tr("Open one of the recently opened files"),
     );
     let edit = Menu::builder()
-        .append_item(ID_UNDO, "&Undo\tCtrl+Z", "Undo the last delete or restore")
-        .append_item(ID_REDO, "&Redo\tCtrl+Y", "Redo what was undone")
+        .append_item(
+            ID_UNDO,
+            &tr_menu("&Undo\tCtrl+Z"),
+            &tr("Undo the last delete or restore"),
+        )
+        .append_item(
+            ID_REDO,
+            &tr_menu("&Redo\tCtrl+Y"),
+            &tr("Redo what was undone"),
+        )
         .append_separator()
         .append_item(
             ID_DELETE,
-            "&Delete selection\tDel",
-            "Leave the selection out of the export",
+            &tr_menu("&Delete selection\tDel"),
+            &tr("Leave the selection out of the export"),
         )
         .append_item(
             ID_RESTORE,
-            "Re&store selection\tCtrl+R",
-            "Take deleted parts inside the selection back in",
+            &tr_menu("Re&store selection\tCtrl+R"),
+            &tr("Take deleted parts inside the selection back in"),
         )
         .append_separator()
         .append_item(
             ID_SPLIT,
-            "S&plit track here\tCtrl+K",
-            "Start a new track at the cursor or the selection start",
+            &tr_menu("S&plit track here\tCtrl+K"),
+            &tr("Start a new track at the cursor or the selection start"),
         )
         .append_item(
             ID_JOIN,
-            "&Join with previous track\tCtrl+J",
-            "Remove the split at the start of the track under the cursor",
+            &tr_menu("&Join with previous track\tCtrl+J"),
+            &tr("Remove the split at the start of the track under the cursor"),
         )
         .append_item(
             ID_RENAME,
-            "Re&name track…\tF2",
-            "Name the track under the cursor",
+            &tr_menu("Re&name track…\tF2"),
+            &tr("Name the track under the cursor"),
         )
         .append_item(
             ID_ALL_TRACKS,
-            "Use for all trac&ks\tCtrl+Shift+A",
-            "Give every track the value of the selected cell of the track list",
+            &tr_menu("Use for all trac&ks\tCtrl+Shift+A"),
+            &tr("Give every track the value of the selected cell of the track list"),
         )
         .append_separator()
         .append_item(
             ID_SUGGESTED_SPLITS,
-            "Split at suggested &track starts\tCtrl+Shift+K",
-            "Start new tracks where the analysis found pauses or changes of sound",
+            &tr_menu("Split at suggested &track starts\tCtrl+Shift+K"),
+            &tr("Start new tracks where the analysis found pauses or changes of sound"),
         )
         .append_item(
             ID_SUGGESTED_PAUSES,
-            "Delete suggested &pauses\tCtrl+Shift+D",
-            "Delete the silent and noise-only stretches the analysis found",
+            &tr_menu("Delete suggested &pauses\tCtrl+Shift+D"),
+            &tr("Delete the silent and noise-only stretches the analysis found"),
         )
         .append_item(
             ID_SETTINGS,
-            "Se&ttings…\tCtrl+,",
-            "What the analysis suggests and how the waveform is coloured",
+            &tr_menu("Se&ttings…\tCtrl+,"),
+            &tr("What the analysis suggests and how the waveform is coloured"),
         )
         .append_separator()
         .append_item(
             ID_SELECT_ALL,
-            "Select &all\tCtrl+A",
-            "Select the whole file",
+            &tr_menu("Select &all\tCtrl+A"),
+            &tr("Select the whole file"),
         )
-        .append_item(ID_SELECT_NONE, "Select &none\tEsc", "Clear the selection")
+        .append_item(
+            ID_SELECT_NONE,
+            &tr_menu("Select &none\tEsc"),
+            &tr("Clear the selection"),
+        )
         .build();
     let play = Menu::builder()
         .append_item(
             ID_PLAY,
-            "&Play/Stop\tSpace",
-            "Play the kept parts from the selection or the cursor, or stop",
+            &tr_menu("&Play/Stop\tSpace"),
+            &tr("Play the kept parts from the selection or the cursor, or stop"),
         )
         .append_item(
             ID_TO_START,
-            "Cursor to &start\tHome",
-            "Put the cursor at the beginning",
+            &tr_menu("Cursor to &start\tHome"),
+            &tr("Put the cursor at the beginning"),
         )
         .append_item(
             ID_PLAY_TRACK_START,
-            "Play track &beginning\tCtrl+Shift+B",
-            "Play the first 3 seconds of the track at the cursor or selection",
+            &tr_menu("Play track &beginning\tCtrl+Shift+B"),
+            &tr("Play the first 3 seconds of the track at the cursor or selection"),
         )
         .append_item(
             ID_PLAY_TRACK_END,
-            "Play track &end\tCtrl+Shift+E",
-            "Play the last 3 seconds of the track at the cursor or selection",
+            &tr_menu("Play track &end\tCtrl+Shift+E"),
+            &tr("Play the last 3 seconds of the track at the cursor or selection"),
         )
         .append_separator()
-        .append_item(ID_FASTER, "&Faster\tCtrl+Up", "Play faster (up to 3×)")
+        .append_item(
+            ID_FASTER,
+            &tr_menu("&Faster\tCtrl+Up"),
+            &tr("Play faster (up to 3×)"),
+        )
         .append_item(
             ID_SLOWER,
-            "S&lower\tCtrl+Down",
-            "Play slower (down to 0.5×)",
+            &tr_menu("S&lower\tCtrl+Down"),
+            &tr("Play slower (down to 0.5×)"),
         )
         .append_item(
             ID_NORMAL_SPEED,
-            "&Normal speed\tCtrl+Shift+N",
-            "Play at normal speed",
+            &tr_menu("&Normal speed\tCtrl+Shift+N"),
+            &tr("Play at normal speed"),
         )
         .append_check_item(
             ID_KEEP_PITCH,
-            "&Keep pitch",
-            "At other speeds keep the pitch; else it changes like a tape played faster",
+            &tr_menu("&Keep pitch"),
+            &tr("At other speeds keep the pitch; else it changes like a tape played faster"),
         )
         .append_check_item(
             ID_SCRUB_SELECTING,
-            "S&crub while selecting",
-            "Play the edge of the selection while dragging it",
+            &tr_menu("S&crub while selecting"),
+            &tr("Play the edge of the selection while dragging it"),
         )
         .build();
     let view = Menu::builder()
         .append_item(
             ID_ZOOM_IN,
-            "Zoom &in\tCtrl++",
-            "Show less time, more detail",
+            &tr_menu("Zoom &in\tCtrl++"),
+            &tr("Show less time, more detail"),
         )
-        .append_item(ID_ZOOM_OUT, "Zoom &out\tCtrl+-", "Show more time")
-        .append_item(ID_ZOOM_FIT, "Zoom to &fit\tCtrl+0", "Show the whole file")
+        .append_item(
+            ID_ZOOM_OUT,
+            &tr_menu("Zoom &out\tCtrl+-"),
+            &tr("Show more time"),
+        )
+        .append_item(
+            ID_ZOOM_FIT,
+            &tr_menu("Zoom to &fit\tCtrl+0"),
+            &tr("Show the whole file"),
+        )
         .build();
     // The builder takes no submenus; the rest is appended to the menu.
     view.append_submenu(
         perspective_menu(),
-        "&Perspective",
-        "Views of the selection's edges in context",
+        &tr_menu("&Perspective"),
+        &tr("Views of the selection's edges in context"),
     );
     view.append(
         ID_RULER,
-        "Time &ruler",
-        "Show the time scale along the bottom of the waveform",
+        &tr_menu("Time &ruler"),
+        &tr("Show the time scale along the bottom of the waveform"),
         ItemKind::Check,
     );
     view.append_separator();
@@ -1336,15 +1402,15 @@ fn menu_bar(options: Options) -> MenuBar {
         view.append(
             panes::menu_id(p),
             &panes::menu_label(p),
-            panes::menu_help(p),
+            &panes::menu_help(p),
             ItemKind::Check,
         );
     }
     let bar = MenuBar::builder()
-        .append(file, "&File")
-        .append(edit, "&Edit")
-        .append(play, "&Play")
-        .append(view, "&View")
+        .append(file, &tr_menu("&File"))
+        .append(edit, &tr_menu("&Edit"))
+        .append(play, &tr_menu("&Play"))
+        .append(view, &tr_menu("&View"))
         .build();
     bar.check_item(ID_KEEP_PITCH, options.keep_pitch);
     bar.check_item(ID_SCRUB_SELECTING, options.scrub_while_selecting);
@@ -1368,10 +1434,10 @@ fn perspective_menu() -> Menu {
         .fold(Menu::builder(), |m, (i, p)| {
             m.append_item(
                 ID_PERSPECTIVE_FIRST + i as Id,
-                &format!("{}\tCtrl+{}", p.label(), i + 1),
-                &format!(
-                    "Zoom to this part, with {} s around the selection's edges",
-                    lac_app::perspective::CONTEXT_SECONDS
+                &format!("{}\tCtrl+{}", tr(p.label()), i + 1),
+                &trf(
+                    "Zoom to this part, with {seconds} s around the selection's edges",
+                    &[("seconds", &lac_app::perspective::CONTEXT_SECONDS)],
                 ),
             )
         })
@@ -1401,7 +1467,7 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
             return;
         }
         let dialog = FileDialog::builder(&f)
-            .with_message("Open an audio file")
+            .with_message(&tr("Open an audio file"))
             .with_wildcard(&lac_app::file_types::dialog_wildcard())
             .with_style(FileDialogStyle::Open | FileDialogStyle::FileMustExist)
             .build();
@@ -1448,9 +1514,9 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
     } else if id == ID_CLEAR_CACHE {
         let cache = state.borrow().cache.clone();
         let msg = match cache.map(|c| c.clear()) {
-            Some(Ok(n)) => format!("waveform cache cleared ({n} entries)"),
-            Some(Err(e)) => format!("could not clear the waveform cache: {e}"),
-            None => "there is no waveform cache on this system".to_string(),
+            Some(Ok(n)) => trf("waveform cache cleared ({n} entries)", &[("n", &n)]),
+            Some(Err(e)) => trf("could not clear the waveform cache: {e}", &[("e", &e)]),
+            None => tr("there is no waveform cache on this system").into_owned(),
         };
         report(&f, &msg);
         return;
@@ -1532,7 +1598,7 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
             msg
         };
         if let Some(msg) = msg.filter(|m| !m.is_empty()) {
-            report(&f, msg);
+            report(&f, &tr(msg));
         }
     } else {
         let mut st = state.borrow_mut();
@@ -1567,19 +1633,20 @@ fn is_edit(id: Id) -> bool {
 /// Runs Edit menu command `id`. Returns `None` if `id` is not one, else a
 /// message for the status bar (empty if there is nothing to say).
 fn edit(st: &mut State, id: Id) -> Option<&'static str> {
+    // Marked here, translated where shown.
     if !is_edit(id) {
         return None;
     }
     let Some(e) = &mut st.editor else {
-        return Some("open a file first");
+        return Some(n_("open a file first"));
     };
     Some(match id {
-        ID_UNDO if !e.undo() => "nothing to undo",
-        ID_REDO if !e.redo() => "nothing to redo",
-        ID_DELETE if e.selection().is_none() => "select a part with the mouse first",
-        ID_DELETE if !e.delete_selection() => "the selection is deleted already",
-        ID_RESTORE if e.selection().is_none() => "select a deleted part first",
-        ID_RESTORE if !e.restore_selection() => "nothing in the selection is deleted",
+        ID_UNDO if !e.undo() => n_("nothing to undo"),
+        ID_REDO if !e.redo() => n_("nothing to redo"),
+        ID_DELETE if e.selection().is_none() => n_("select a part with the mouse first"),
+        ID_DELETE if !e.delete_selection() => n_("the selection is deleted already"),
+        ID_RESTORE if e.selection().is_none() => n_("select a deleted part first"),
+        ID_RESTORE if !e.restore_selection() => n_("nothing in the selection is deleted"),
         ID_SELECT_ALL => {
             e.select_all();
             ""
@@ -1590,9 +1657,9 @@ fn edit(st: &mut State, id: Id) -> Option<&'static str> {
         }
         // Tracks are split at, or joined around, where playback would
         // start: the selection start or the cursor.
-        ID_SPLIT if !e.split_at(e.play_from()) => "click where the new track should start",
+        ID_SPLIT if !e.split_at(e.play_from()) => n_("click where the new track should start"),
         ID_JOIN if !e.join_with_previous(e.track_at(e.play_from())) => {
-            "the first track has no track before it"
+            n_("the first track has no track before it")
         }
         _ => "",
     })
@@ -1603,6 +1670,24 @@ fn edit(st: &mut State, id: Id) -> Option<&'static str> {
 fn report(frame: &Frame, msg: &str) {
     frame.set_status_text(msg, FIELD_FILE);
     log_pane::append(msg);
+}
+
+/// Translates the user interface into `choice` (a code of
+/// `lac_app::i18n::LANGUAGES`), or the system's language for `None`:
+/// our texts from the built-in catalogs, wxWidgets' own (standard
+/// buttons, file dialogs) from its catalog where installed.
+fn use_language(choice: Option<&str>) {
+    let system = Locale::get_language_canonical_name(Locale::get_system_language());
+    lac_app::i18n::set_language(choice.or(system.as_deref()));
+    let wx = Translations::new();
+    match choice {
+        Some(code) => wx.set_language_str(code),
+        None => wx.set_language(Language::Default),
+    }
+    // Missing on systems without wxWidgets' translations; then its own
+    // texts stay English, which is no reason to complain.
+    let _ = wx.add_std_catalog();
+    wx.set_global();
 }
 
 /// Edit > Settings: shows the dialog; its changes show at once and are
@@ -1660,7 +1745,7 @@ fn type_position(
             (Some(e), Some(rate)) => lac_app::positions::apply(e, field, text, rate)
                 .err()
                 .map(|e| e.to_string()),
-            _ => Some("open a file first".to_string()),
+            _ => Some(tr("open a file first").into_owned()),
         };
         if result.is_none() {
             st.seek_to_cursor();
@@ -1698,8 +1783,11 @@ fn confirm_discard(frame: &Frame, state: &Rc<RefCell<State>>) -> bool {
     }
     let dialog = MessageDialog::builder(
         frame,
-        &format!("{name} has edits that are not exported yet. Discard them?"),
-        "Discard edits?",
+        &trf(
+            "{name} has edits that are not exported yet. Discard them?",
+            &[("name", &name)],
+        ),
+        &tr("Discard edits?"),
     )
     .with_style(
         MessageDialogStyle::YesNo | MessageDialogStyle::NoDefault | MessageDialogStyle::IconWarning,
@@ -1721,7 +1809,7 @@ fn open_file(frame: &Frame, state: &Rc<RefCell<State>>, path: PathBuf) {
         remember_recent(frame, &st.recent);
         st.open(path);
     }
-    report(frame, "reading…");
+    report(frame, &tr("reading…"));
     update_chrome(frame, &state.borrow());
 }
 
@@ -1738,9 +1826,9 @@ fn open_recent(frame: &Frame, state: &Rc<RefCell<State>>, index: usize) {
         drop(st);
         report(
             frame,
-            &format!(
-                "{} no longer exists; removed it from the list",
-                path.display()
+            &trf(
+                "{file} no longer exists; removed it from the list",
+                &[("file", &path.display())],
             ),
         );
         return;
@@ -1763,13 +1851,13 @@ fn export(frame: &Frame, state: &Rc<RefCell<State>>) {
     let (source, editor) = {
         let st = state.borrow();
         if st.export.is_some() {
-            report(frame, "an export is still running");
+            report(frame, &tr("an export is still running"));
             return;
         }
         match (&st.path, &st.editor) {
             (Some(p), Some(e)) => (p.clone(), e.clone()),
             _ => {
-                report(frame, "open a file first");
+                report(frame, &tr("open a file first"));
                 return;
             }
         }
@@ -1778,7 +1866,7 @@ fn export(frame: &Frame, state: &Rc<RefCell<State>>) {
     let (tasks, skipped) = if editor.splits().is_empty() {
         // One file: ask for its name.
         let dialog = FileDialog::builder(frame)
-            .with_message("Export the kept parts")
+            .with_message(&tr("Export the kept parts"))
             .with_default_dir(&source_dir)
             .with_default_file(&file_name_of(&default_output(&source)))
             .with_style(FileDialogStyle::Save | FileDialogStyle::OverwritePrompt)
@@ -1796,8 +1884,12 @@ fn export(frame: &Frame, state: &Rc<RefCell<State>>) {
     } else {
         // One file per track: ask for the folder, the names follow from
         // the track numbers and names.
-        let dialog =
-            DirDialog::builder(frame, "Export the tracks into this folder", &source_dir).build();
+        let dialog = DirDialog::builder(
+            frame,
+            &tr("Export the tracks into this folder"),
+            &source_dir,
+        )
+        .build();
         if dialog.show_modal() != ID_OK {
             return;
         }
@@ -1809,12 +1901,15 @@ fn export(frame: &Frame, state: &Rc<RefCell<State>>) {
         if existing > 0 {
             let ask = MessageDialog::builder(
                 frame,
-                &format!(
-                    "{existing} of the {} track files exist already in {}. Replace them?",
-                    tasks.len(),
-                    dir.display()
+                &trf(
+                    "{existing} of the {count} track files exist already in {folder}. Replace them?",
+                    &[
+                        ("existing", &existing),
+                        ("count", &tasks.len()),
+                        ("folder", &dir.display()),
+                    ],
                 ),
-                "Replace files?",
+                &tr("Replace files?"),
             )
             .with_style(
                 MessageDialogStyle::YesNo
@@ -1829,7 +1924,7 @@ fn export(frame: &Frame, state: &Rc<RefCell<State>>) {
         (tasks, skipped)
     };
     if tasks.is_empty() {
-        report(frame, "everything is deleted; nothing to export");
+        report(frame, &tr("everything is deleted; nothing to export"));
         return;
     }
     let edits = editor.edits().clone();
@@ -1843,32 +1938,32 @@ fn export_selection(frame: &Frame, state: &Rc<RefCell<State>>) {
     let (source, editor) = {
         let st = state.borrow();
         if st.export.is_some() {
-            report(frame, "an export is still running");
+            report(frame, &tr("an export is still running"));
             return;
         }
         match (&st.path, &st.editor) {
             (Some(p), Some(e)) => (p.clone(), e.clone()),
             _ => {
-                report(frame, "open a file first");
+                report(frame, &tr("open a file first"));
                 return;
             }
         }
     };
     let Some(sel) = editor.selection() else {
-        report(frame, "select something to export first");
+        report(frame, &tr("select something to export first"));
         return;
     };
     // Checked before asking for a name, which would be in vain.
     if lac_app::export_job::selection_task(&editor, sel.clone(), "").is_none() {
         report(
             frame,
-            "the selection is deleted entirely; nothing to export",
+            &tr("the selection is deleted entirely; nothing to export"),
         );
         return;
     }
     let default = lac_app::export_job::selection_output(&source);
     let dialog = FileDialog::builder(frame)
-        .with_message("Export the selection")
+        .with_message(&tr("Export the selection"))
         .with_default_dir(&dir_of(&source))
         .with_default_file(&file_name_of(&default))
         .with_style(FileDialogStyle::Save | FileDialogStyle::OverwritePrompt)
@@ -1911,12 +2006,18 @@ fn start_export(
     edits: Option<Edits>,
 ) {
     let mut msg = match tasks.as_slice() {
-        [one] => format!("exporting to {}…", file_name_of(&one.output)),
-        many => format!("exporting {} tracks…", many.len()),
+        [one] => trf(
+            "exporting to {file}…",
+            &[("file", &file_name_of(&one.output))],
+        ),
+        many => trf("exporting {n} tracks…", &[("n", &many.len())]),
     };
     if !skipped.is_empty() {
         let list: Vec<String> = skipped.iter().map(ToString::to_string).collect();
-        msg += &format!(" (track {} deleted entirely, no file)", list.join(", "));
+        msg += &trf(
+            " (track {tracks} deleted entirely, no file)",
+            &[("tracks", &list.join(", "))],
+        );
     }
     report(frame, &msg);
     let job = ExportJob::start_all(&source, tasks);
@@ -1930,14 +2031,17 @@ fn rename_track(frame: &Frame, state: &Rc<RefCell<State>>) {
         let name = e.tracks().get(i).and_then(|t| t.name.clone());
         (i, name.unwrap_or_default())
     }) else {
-        report(frame, "open a file first");
+        report(frame, &tr("open a file first"));
         return;
     };
     // No borrow while the dialog runs the event loop.
     let dialog = TextEntryDialog::builder(
         frame,
-        &format!("Name of track {} (also used in its file name):", index + 1),
-        "Rename track",
+        &trf(
+            "Name of track {n} (also used in its file name):",
+            &[("n", &(index + 1))],
+        ),
+        &tr("Rename track"),
     )
     .with_default_value(&current)
     .build();
@@ -2102,15 +2206,18 @@ fn use_for_all_tracks(frame: &Frame, state: &Rc<RefCell<State>>) {
         let (row, col) = (g.get_grid_cursor_row(), g.get_grid_cursor_col());
         let tags = st.tags.clone().unwrap_or_default();
         match (&mut st.editor, track_list::field(col), usize::try_from(row)) {
-            (None, _, _) => Some("open a file first".to_string()),
+            (None, _, _) => Some(tr("open a file first").into_owned()),
             (Some(ed), Some(field), Ok(index)) => {
                 let text = g.get_cell_value(row, col);
                 match lac_app::track_list::edit(ed, &tags, index, field, &text, true) {
-                    Ok(_) => Some(format!("{field} of every track: {text}")),
+                    Ok(_) => Some(trf(
+                        "{field} of every track: {text}",
+                        &[("field", &tr(field.label())), ("text", &text)],
+                    )),
                     Err(e) => Some(e.to_string()),
                 }
             }
-            _ => Some("select a tag in the track list first".to_string()),
+            _ => Some(tr("select a tag in the track list first").into_owned()),
         }
     };
     if let Some(m) = msg {
@@ -2136,7 +2243,7 @@ fn bind_close(frame: &Frame, state: &Rc<RefCell<State>>) {
         }
         let running = state.borrow_mut().export.take();
         if let Some(r) = running {
-            report(&f, "finishing the export…");
+            report(&f, &tr("finishing the export…"));
             // Usually seconds; the file would be broken otherwise.
             let _ = r.job.wait();
         }
@@ -2509,7 +2616,7 @@ fn show_context_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, x
     });
     match entries {
         Some(entries) => popup(panel, state, entries),
-        None => report(frame, "open a file first"),
+        None => report(frame, &tr("open a file first")),
     }
 }
 

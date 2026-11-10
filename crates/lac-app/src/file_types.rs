@@ -11,6 +11,8 @@
 //! offered under "Open with", and only becomes the default for a type that
 //! nothing else on the system opens.
 
+use crate::i18n::{n_, tr};
+
 /// One kind of file the program opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileType {
@@ -38,14 +40,14 @@ pub struct FileType {
 /// Everything the program opens, in the order of the open dialog.
 pub const FILE_TYPES: &[FileType] = &[
     FileType {
-        name: "MP3 audio",
+        name: n_("MP3 audio"),
         extensions: &["mp3"],
         mime_types: &["audio/mpeg"],
         by_extension: true,
         uti: "public.mp3",
     },
     FileType {
-        name: "MPEG-4 audio (AAC, ALAC)",
+        name: n_("MPEG-4 audio (AAC, ALAC)"),
         extensions: &["m4a", "m4b"],
         // audio/x-m4a is the older name, still used by some systems.
         mime_types: &["audio/mp4", "audio/x-m4a"],
@@ -54,7 +56,7 @@ pub const FILE_TYPES: &[FileType] = &[
         uti: "public.mpeg-4-audio",
     },
     FileType {
-        name: "AC-3 audio",
+        name: n_("AC-3 audio"),
         extensions: &["ac3"],
         mime_types: &["audio/ac3"],
         by_extension: true,
@@ -62,7 +64,7 @@ pub const FILE_TYPES: &[FileType] = &[
         uti: "public.ac3-audio",
     },
     FileType {
-        name: "AAC audio (ADTS)",
+        name: n_("AAC audio (ADTS)"),
         extensions: &["aac"],
         // audio/x-aac is the older name, still used by some systems.
         mime_types: &["audio/aac", "audio/x-aac"],
@@ -71,28 +73,28 @@ pub const FILE_TYPES: &[FileType] = &[
         uti: "public.aac-audio",
     },
     FileType {
-        name: "Ogg Vorbis audio",
+        name: n_("Ogg Vorbis audio"),
         extensions: &["ogg", "oga"],
         mime_types: &["audio/ogg", "audio/x-vorbis+ogg"],
         by_extension: true,
         uti: "org.xiph.ogg-audio",
     },
     FileType {
-        name: "Opus audio",
+        name: n_("Opus audio"),
         extensions: &["opus"],
         mime_types: &["audio/x-opus+ogg"],
         by_extension: true,
         uti: "org.xiph.opus",
     },
     FileType {
-        name: "Speex audio",
+        name: n_("Speex audio"),
         extensions: &["spx"],
         mime_types: &["audio/x-speex", "audio/x-speex+ogg"],
         by_extension: true,
         uti: "org.xiph.speex",
     },
     FileType {
-        name: "FLAC audio",
+        name: n_("FLAC audio"),
         extensions: &["flac"],
         // audio/x-flac is the older name, still used by some systems.
         mime_types: &["audio/flac", "audio/x-flac"],
@@ -100,14 +102,14 @@ pub const FILE_TYPES: &[FileType] = &[
         uti: "org.xiph.flac",
     },
     FileType {
-        name: "WAV audio",
+        name: n_("WAV audio"),
         extensions: &["wav"],
         mime_types: &["audio/x-wav", "audio/wav", "audio/vnd.wave"],
         by_extension: true,
         uti: "com.microsoft.waveform-audio",
     },
     FileType {
-        name: "AIFF audio",
+        name: n_("AIFF audio"),
         extensions: &["aiff", "aif", "aifc"],
         // shared-mime-info's names; audio/aiff is an alias of the first.
         mime_types: &["audio/x-aiff", "audio/x-aifc"],
@@ -116,21 +118,21 @@ pub const FILE_TYPES: &[FileType] = &[
         uti: "public.aiff-audio",
     },
     FileType {
-        name: "Matroska audio",
+        name: n_("Matroska audio"),
         extensions: &["mka"],
         mime_types: &["audio/x-matroska"],
         by_extension: true,
         uti: "org.matroska.mka",
     },
     FileType {
-        name: "WebM audio",
+        name: n_("WebM audio"),
         extensions: &["webm"],
         mime_types: &["audio/webm"],
         by_extension: false,
         uti: "org.webmproject.webm",
     },
     FileType {
-        name: "Matroska video (audio track only)",
+        name: n_("Matroska video (audio track only)"),
         extensions: &["mkv"],
         // video/x-matroska would offer the program for every film.
         mime_types: &[],
@@ -138,7 +140,7 @@ pub const FILE_TYPES: &[FileType] = &[
         uti: "org.matroska.mkv",
     },
     FileType {
-        name: "MP4 video (audio track only)",
+        name: n_("MP4 video (audio track only)"),
         extensions: &["mp4"],
         // video/mp4 would offer the program for every film.
         mime_types: &[],
@@ -178,11 +180,11 @@ pub fn dialog_wildcard() -> String {
             .join(";")
     };
     let all: Vec<String> = FILE_TYPES.iter().map(patterns).collect();
-    let mut w = format!("Audio files|{}", all.join(";"));
+    let mut w = format!("{}|{}", tr("Audio files"), all.join(";"));
     for t in FILE_TYPES {
-        w.push_str(&format!("|{}|{}", t.name, patterns(t)));
+        w.push_str(&format!("|{}|{}", tr(t.name), patterns(t)));
     }
-    w.push_str("|All files|*");
+    w.push_str(&format!("|{}|*", tr("All files")));
     w
 }
 

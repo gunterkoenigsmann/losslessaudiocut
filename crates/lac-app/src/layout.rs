@@ -20,6 +20,8 @@
 //! Parts are separated by `|`, the fields of a pane by `;`; both are
 //! escaped with a backslash inside values (`EscapeDelimiters`).
 
+use crate::i18n::n_;
+
 /// A dockable pane of the main window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pane {
@@ -59,14 +61,15 @@ impl Pane {
         }
     }
 
-    /// The pane's title (its caption, and its entry in the View menu).
+    /// The pane's title (its caption, and its entry in the View menu),
+    /// in English; [`crate::i18n::tr`] translates it.
     pub fn caption(self) -> &'static str {
         match self {
-            Pane::Toolbar => "Toolbar",
-            Pane::Positions => "Selection and clock",
-            Pane::TrackList => "Track list",
-            Pane::Minimap => "Minimap",
-            Pane::Log => "Log",
+            Pane::Toolbar => n_("Toolbar"),
+            Pane::Positions => n_("Selection and clock"),
+            Pane::TrackList => n_("Track list"),
+            Pane::Minimap => n_("Minimap"),
+            Pane::Log => n_("Log"),
         }
     }
 

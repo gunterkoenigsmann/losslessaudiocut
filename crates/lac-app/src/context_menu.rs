@@ -19,6 +19,7 @@ use lac_playback::Timeline;
 
 use crate::editor::Editor;
 use crate::hover::Scene;
+use crate::i18n::{tr, trf};
 use crate::playback::{self, EXCERPT_SECONDS, End};
 use crate::time::format_samples;
 use crate::track_list::Bound;
@@ -216,7 +217,10 @@ fn selection_items(scene: &Scene, sel: &Range<SamplePos>, pos: SamplePos) -> Vec
         }
     };
     let excerpt = |end, label: &str| Item {
-        label: format!("{label} ({EXCERPT_SECONDS} s)"),
+        label: trf(
+            "{label} ({seconds} s)",
+            &[("label", &label), ("seconds", &EXCERPT_SECONDS)],
+        ),
         enabled: !playback::excerpt(ed, sel.clone(), end, 1).is_empty(),
         action: Action::PlayExcerpt {
             range: sel.clone(),
@@ -234,10 +238,10 @@ fn selection_items(scene: &Scene, sel: &Range<SamplePos>, pos: SamplePos) -> Vec
         split_item(
             ed,
             vec![sel.start, sel.end],
-            "New track from selection".into(),
+            tr("New track from selection").into_owned(),
         ),
         Item {
-            label: format!("Fit track {n} to selection"),
+            label: trf("Fit track {n} to selection", &[("n", &n)]),
             enabled: ed.can_set_track_span(track, sel.clone()),
             action: Action::SetTrackSpan {
                 track,
@@ -247,49 +251,48 @@ fn selection_items(scene: &Scene, sel: &Range<SamplePos>, pos: SamplePos) -> Vec
         bound(
             Bound::Start,
             sel.start,
-            format!("Track {n} starts at selection start"),
+            trf("Track {n} starts at selection start", &[("n", &n)]),
         ),
         bound(
             Bound::Start,
             sel.end,
-            format!("Track {n} starts at selection end"),
+            trf("Track {n} starts at selection end", &[("n", &n)]),
         ),
         bound(
             Bound::End,
             sel.start,
-            format!("Track {n} ends at selection start"),
+            trf("Track {n} ends at selection start", &[("n", &n)]),
         ),
         bound(
             Bound::End,
             sel.end,
-            format!("Track {n} ends at selection end"),
+            trf("Track {n} ends at selection end", &[("n", &n)]),
         ),
-        excerpt(End::Start, "Play selection start"),
-        excerpt(End::End, "Play selection end"),
+        excerpt(End::Start, &tr("Play selection start")),
+        excerpt(End::End, &tr("Play selection end")),
         Item {
             label: match &tuned {
-                Some(r) => format!(
-                    "Fine-tune selection to detected cuts ({}–{})",
-                    t(r.start),
-                    t(r.end)
+                Some(r) => trf(
+                    "Fine-tune selection to detected cuts ({start}–{end})",
+                    &[("start", &t(r.start)), ("end", &t(r.end))],
                 ),
-                None => "Fine-tune selection to detected cuts (none nearby)".into(),
+                None => tr("Fine-tune selection to detected cuts (none nearby)").into_owned(),
             },
             enabled: tuned.is_some(),
             action: Action::Select(tuned.unwrap_or_else(|| sel.clone())),
         },
         Item {
-            label: "Export selection as…".into(),
+            label: tr("Export selection as…").into_owned(),
             action: Action::ExportSelection,
             enabled: any_kept,
         },
         Item {
-            label: "Delete selection".into(),
+            label: tr("Delete selection").into_owned(),
             action: Action::Delete,
             enabled: any_kept,
         },
         Item {
-            label: "Restore selection".into(),
+            label: tr("Restore selection").into_owned(),
             action: Action::Restore,
             enabled: any_deleted,
         },
@@ -315,16 +318,16 @@ fn playhead_items(scene: &Scene, ph: SamplePos) -> Vec<Item> {
     let mut items = vec![split_item(
         ed,
         vec![ph],
-        format!("Split at playback position {at}"),
+        trf("Split at playback position {at}", &[("at", &at)]),
     )];
     if let Some(sel) = ed.selection() {
         items.push(Item {
-            label: format!("Selection starts at playback position {at}"),
+            label: trf("Selection starts at playback position {at}", &[("at", &at)]),
             enabled: ph < sel.end && ph != sel.start,
             action: Action::Select(ph..sel.end),
         });
         items.push(Item {
-            label: format!("Selection ends at playback position {at}"),
+            label: trf("Selection ends at playback position {at}", &[("at", &at)]),
             enabled: ph > sel.start && ph != sel.end,
             action: Action::Select(sel.start..ph),
         });
@@ -337,9 +340,9 @@ fn pointer_items(scene: &Scene, pos: SamplePos) -> Vec<Item> {
     let ed = scene.editor;
     let at = format_samples(pos, scene.rate);
     vec![
-        split_item(ed, vec![pos], format!("Split here ({at})")),
+        split_item(ed, vec![pos], trf("Split here ({at})", &[("at", &at)])),
         Item {
-            label: "Play from here".into(),
+            label: tr("Play from here").into_owned(),
             action: Action::PlayFrom(pos),
             enabled: ed.kept().iter().any(|k| k.end > pos),
         },
@@ -365,8 +368,14 @@ fn merge_item(tracks: RangeInclusive<usize>) -> Option<Item> {
     let (first, last) = (*tracks.start() + 1, *tracks.end() + 1);
     let label = match last.checked_sub(first)? {
         0 => return None,
-        1 => format!("Merge tracks {first} and {last}"),
-        _ => format!("Merge tracks {first} to {last}"),
+        1 => trf(
+            "Merge tracks {first} and {last}",
+            &[("first", &first), ("last", &last)],
+        ),
+        _ => trf(
+            "Merge tracks {first} to {last}",
+            &[("first", &first), ("last", &last)],
+        ),
     };
     Some(Item {
         label,
@@ -463,7 +472,10 @@ pub fn track_list(editor: &Editor, index: usize, selected: &[usize]) -> Vec<Entr
         .sum::<SamplePos>()
         < span.end - span.start;
     let excerpt = |end, label: String| Item {
-        label: format!("{label} ({EXCERPT_SECONDS} s)"),
+        label: trf(
+            "{label} ({seconds} s)",
+            &[("label", &label), ("seconds", &EXCERPT_SECONDS)],
+        ),
         enabled: any_kept,
         action: Action::PlayExcerpt {
             range: span.clone(),
@@ -478,16 +490,19 @@ pub fn track_list(editor: &Editor, index: usize, selected: &[usize]) -> Vec<Entr
     let mut groups = vec![
         vec![
             Item {
-                label: format!("Zoom to track {n}"),
+                label: trf("Zoom to track {n}", &[("n", &n)]),
                 action: Action::ShowTrack(span.clone()),
                 enabled: true,
             },
-            excerpt(End::Start, format!("Play start of track {n}")),
-            excerpt(End::End, format!("Play end of track {n}")),
+            excerpt(End::Start, trf("Play start of track {n}", &[("n", &n)])),
+            excerpt(End::End, trf("Play end of track {n}", &[("n", &n)])),
         ],
         vec![
-            jump(span.start, format!("Cursor to start of track {n}")),
-            jump(span.end, format!("Cursor to end of track {n}")),
+            jump(
+                span.start,
+                trf("Cursor to start of track {n}", &[("n", &n)]),
+            ),
+            jump(span.end, trf("Cursor to end of track {n}", &[("n", &n)])),
         ],
     ];
     if let Some(sel) = editor.selection() {
@@ -501,19 +516,19 @@ pub fn track_list(editor: &Editor, index: usize, selected: &[usize]) -> Vec<Entr
         groups.push(vec![
             select(
                 span.start..sel.end,
-                format!("Selection start to start of track {n}"),
+                trf("Selection start to start of track {n}", &[("n", &n)]),
             ),
             select(
                 span.end..sel.end,
-                format!("Selection start to end of track {n}"),
+                trf("Selection start to end of track {n}", &[("n", &n)]),
             ),
             select(
                 sel.start..span.start,
-                format!("Selection end to start of track {n}"),
+                trf("Selection end to start of track {n}", &[("n", &n)]),
             ),
             select(
                 sel.start..span.end,
-                format!("Selection end to end of track {n}"),
+                trf("Selection end to end of track {n}", &[("n", &n)]),
             ),
         ]);
     }
@@ -528,17 +543,17 @@ pub fn track_list(editor: &Editor, index: usize, selected: &[usize]) -> Vec<Entr
     groups.push(merge.into_iter().collect());
     groups.push(vec![
         Item {
-            label: format!("Join track {n} with the previous one"),
+            label: trf("Join track {n} with the previous one", &[("n", &n)]),
             action: Action::JoinWithPrevious(index),
             enabled: index > 0,
         },
         Item {
-            label: format!("Delete track {n}"),
+            label: trf("Delete track {n}", &[("n", &n)]),
             action: Action::DeleteRange(span.clone()),
             enabled: any_kept,
         },
         Item {
-            label: format!("Restore track {n}"),
+            label: trf("Restore track {n}", &[("n", &n)]),
             action: Action::RestoreRange(span.clone()),
             enabled: any_deleted,
         },

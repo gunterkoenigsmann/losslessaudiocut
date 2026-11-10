@@ -57,6 +57,8 @@ pub enum Icon {
     Detection,
     /// Settings page "Waveform": a waveform over two tinted tracks.
     Waveform,
+    /// Settings page "Language": two speech bubbles.
+    Language,
 }
 
 impl Icon {
@@ -115,6 +117,10 @@ impl Icon {
                 // a wave across both.
                 r##"<rect x="2" y="4" width="10" height="16" fill="#5090f0" fill-opacity="0.35" stroke="none"/><rect x="12" y="4" width="10" height="16" fill="#f0b040" fill-opacity="0.35" stroke="none"/><path d="M2 12c2-6 4-6 5 0s3 6 5 0 3-6 5 0 3 6 5 0"/>"##.to_string()
             }
+            Icon::Language => {
+                // Two overlapping speech bubbles: one language and another.
+                r#"<path d="M3 4h11a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H8l-3 3v-3H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/><path d="M17 9h4a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-1v3l-3-3h-5a1 1 0 0 1-1-1v-2"/>"#.to_string()
+            }
         };
         svg(&shapes)
     }
@@ -124,7 +130,7 @@ impl Icon {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 16] = [
+    const ALL: [Icon; 17] = [
         Icon::Open,
         Icon::Export,
         Icon::Undo,
@@ -141,6 +147,7 @@ mod tests {
         Icon::ZoomFit,
         Icon::Detection,
         Icon::Waveform,
+        Icon::Language,
     ];
 
     /// A crude well-formedness check: NanoSVG skips what it cannot parse

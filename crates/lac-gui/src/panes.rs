@@ -9,6 +9,7 @@
 //! Which panes exist, their stable names and how a stored arrangement is
 //! read are decided in [`lac_app::layout`], where they are tested.
 
+use lac_app::i18n::{n_, tr, tr_menu};
 use lac_app::layout::{Pane, Restore, WindowGeometry};
 use wxdragon::prelude::*;
 use wxdragon::widgets::aui_manager::{AuiManager, PaneInfo};
@@ -48,24 +49,25 @@ pub fn pane_for(id: Id) -> Option<Pane> {
 /// The View menu label of `pane`, with its keyboard shortcut.
 pub fn menu_label(pane: Pane) -> String {
     match pane {
-        Pane::Toolbar => "Tool&bar".to_string(),
-        Pane::Positions => "&Selection and clock".to_string(),
-        Pane::Minimap => "&Minimap".to_string(),
-        Pane::Log => "&Log".to_string(),
+        Pane::Toolbar => tr_menu("Tool&bar"),
+        Pane::Positions => tr_menu("&Selection and clock"),
+        Pane::Minimap => tr_menu("&Minimap"),
+        Pane::Log => tr_menu("&Log"),
         // The shortcut the track list had before it was a pane.
-        Pane::TrackList => "&Track list\tCtrl+L".to_string(),
+        Pane::TrackList => tr_menu("&Track list\tCtrl+L"),
     }
 }
 
 /// The status bar help of the View menu entry of `pane`.
-pub fn menu_help(pane: Pane) -> &'static str {
-    match pane {
-        Pane::Toolbar => "Show the buttons for the most used commands",
-        Pane::Positions => "Show the selection's start, end and length, and the play clock",
-        Pane::Minimap => "Show the whole recording, with the part in the window framed",
-        Pane::Log => "Show every message of the status bar, with the time",
-        Pane::TrackList => "Show the tracks and their tags",
-    }
+pub fn menu_help(pane: Pane) -> String {
+    tr(match pane {
+        Pane::Toolbar => n_("Show the buttons for the most used commands"),
+        Pane::Positions => n_("Show the selection's start, end and length, and the play clock"),
+        Pane::Minimap => n_("Show the whole recording, with the part in the window framed"),
+        Pane::Log => n_("Show every message of the status bar, with the time"),
+        Pane::TrackList => n_("Show the tracks and their tags"),
+    })
+    .into_owned()
 }
 
 /// The stored window geometry, for building the frame.
@@ -121,7 +123,7 @@ impl Panes {
             toolbar,
             PaneInfo::new()
                 .with_name(Pane::Toolbar.name())
-                .with_caption(Pane::Toolbar.caption())
+                .with_caption(&tr(Pane::Toolbar.caption()))
                 .toolbar_pane()
                 .top()
                 .best_size(tb.width, tb.height),
@@ -130,7 +132,7 @@ impl Panes {
             minimap,
             PaneInfo::new()
                 .with_name(Pane::Minimap.name())
-                .with_caption(Pane::Minimap.caption())
+                .with_caption(&tr(Pane::Minimap.caption()))
                 .top()
                 .best_size(600, 56)
                 .min_size(100, 24)
@@ -141,7 +143,7 @@ impl Panes {
             positions,
             PaneInfo::new()
                 .with_name(Pane::Positions.name())
-                .with_caption(Pane::Positions.caption())
+                .with_caption(&tr(Pane::Positions.caption()))
                 .toolbar_pane()
                 .bottom()
                 // Outside the track list, next to the status bar.
@@ -152,7 +154,7 @@ impl Panes {
             track_list,
             PaneInfo::new()
                 .with_name(Pane::TrackList.name())
-                .with_caption(Pane::TrackList.caption())
+                .with_caption(&tr(Pane::TrackList.caption()))
                 .bottom()
                 .best_size(600, 160)
                 .min_size(200, 60)
@@ -163,7 +165,7 @@ impl Panes {
             log,
             PaneInfo::new()
                 .with_name(Pane::Log.name())
-                .with_caption(Pane::Log.caption())
+                .with_caption(&tr(Pane::Log.caption()))
                 .bottom()
                 .position(1)
                 .best_size(400, 160)

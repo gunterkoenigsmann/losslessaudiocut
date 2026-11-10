@@ -10,6 +10,8 @@ use std::ops::Range;
 
 use lac_core::SamplePos;
 
+use crate::i18n::n_;
+
 /// How much (in seconds) a perspective shows around a selection edge.
 pub const CONTEXT_SECONDS: u32 = 5;
 
@@ -41,15 +43,16 @@ impl Perspective {
         Perspective::FromEnd,
     ];
 
-    /// The menu text, without the key.
+    /// The menu text, without the key, in English; [`crate::i18n::tr`]
+    /// translates it.
     pub fn label(self) -> &'static str {
         match self {
-            Perspective::Whole => "&Whole file",
-            Perspective::UpToStart => "&Up to the selection start",
-            Perspective::AroundStart => "Around the selection &start",
-            Perspective::Selection => "The selection with conte&xt",
-            Perspective::AroundEnd => "Around the selection &end",
-            Perspective::FromEnd => "&From the selection end",
+            Perspective::Whole => n_("&Whole file"),
+            Perspective::UpToStart => n_("&Up to the selection start"),
+            Perspective::AroundStart => n_("Around the selection &start"),
+            Perspective::Selection => n_("The selection with conte&xt"),
+            Perspective::AroundEnd => n_("Around the selection &end"),
+            Perspective::FromEnd => n_("&From the selection end"),
         }
     }
 

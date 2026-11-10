@@ -7,6 +7,7 @@
 //!   looks for (issue #92).
 //! - **Waveform**: how strongly tracks and the selection are coloured
 //!   (issue #132).
+//! - **Language**: the language of the user interface (`lac_app::i18n`).
 //!
 //! Changes show at once (the caller's `preview`), so the user sees what a
 //! slider does; Cancel goes back to what was there before. The rules
@@ -22,6 +23,7 @@ use lac_app::appearance::{Appearance, SELECTION_RANGE, TRACK_TINT_RANGE};
 use lac_app::detector_settings::{
     DetectorSettings, MIN_PAUSE_RANGE, MIN_TRACK_RANGE, TRACK_GAP_RANGE,
 };
+use lac_app::i18n::{LANGUAGES, n_, tr};
 use wxdragon::prelude::*;
 
 use crate::icons::Icon;
@@ -42,15 +44,15 @@ pub fn show(
     current: Options,
     preview: Rc<dyn Fn(Options)>,
 ) -> Option<Options> {
-    let dialog = Dialog::builder(parent, "Settings")
+    let dialog = Dialog::builder(parent, &tr("Settings"))
         .with_style(DialogStyle::DefaultDialogStyle | DialogStyle::ResizeBorder)
         .build();
     let chosen = Rc::new(Cell::new(current));
     let book = Notebook::builder(&dialog)
         .with_style(NotebookStyle::Left)
         .build();
-    let images = ImageList::new(ICON, ICON, true, 2);
-    for icon in [Icon::Detection, Icon::Waveform] {
+    let images = ImageList::new(ICON, ICON, true, 3);
+    for icon in [Icon::Detection, Icon::Waveform, Icon::Language] {
         let size = Size::new(ICON, ICON);
         if let Some(bitmap) =
             BitmapBundle::from_svg_text(&icon.svg(), size).and_then(|b| b.get_bitmap(size))
@@ -60,22 +62,24 @@ pub fn show(
     }
     book.set_image_list(images);
     let detection = detection_page(&book, &chosen, &preview);
-    book.add_page(&detection, "Detection", true, Some(0));
+    book.add_page(&detection, &tr("Detection"), true, Some(0));
     let waveform = waveform_page(&book, &chosen, &preview);
-    book.add_page(&waveform, "Waveform", false, Some(1));
+    book.add_page(&waveform, &tr("Waveform"), false, Some(1));
+    let language = language_page(&book, &chosen);
+    book.add_page(&language, &tr("Language"), false, Some(2));
 
     let buttons = StdDialogButtonSizerBuilder::new().build();
     // wxDialog closes itself for these two ids, with them as the result.
     buttons.add_button(
         &Button::builder(&dialog)
             .with_id(ID_OK)
-            .with_label("OK")
+            .with_label(&tr("OK"))
             .build(),
     );
     buttons.add_button(
         &Button::builder(&dialog)
             .with_id(ID_CANCEL)
-            .with_label("Cancel")
+            .with_label(&tr("Cancel"))
             .build(),
     );
     buttons.realize();
@@ -97,15 +101,15 @@ fn detection_page(
 ) -> Panel {
     let page = Panel::builder(book).build();
     let chained = CheckBox::builder(&page)
-        .with_label("Suggest chained streams as tracks")
+        .with_label(&tr("Suggest chained streams as tracks"))
         .with_value(chosen.get().chained_links)
         .build();
     let note = StaticText::builder(&page)
-        .with_label(
+        .with_label(&tr(
             "A chained Ogg file is several streams one after the other; each \
              one's start is offered as a track start. Turn this off for \
              recorded web radio that changes its title every few seconds.",
-        )
+        ))
         .build();
     note.wrap(TEXT_WIDTH);
     {
@@ -162,15 +166,15 @@ fn detector_controls(
             .build()
     };
     let timbre = check(
-        "A change of sound without a pause starts a new track",
+        &tr("A change of sound without a pause starts a new track"),
         d.timbre,
     );
     let key = check(
-        "A change of key or harmony starts a new track (finds few, adds false ones in songs)",
+        &tr("A change of key or harmony starts a new track (finds few, adds false ones in songs)"),
         d.key,
     );
     let defaults = Button::builder(page)
-        .with_label("Detection defaults")
+        .with_label(&tr("Detection defaults"))
         .build();
 
     // Shows `s` in the controls.
@@ -218,11 +222,11 @@ fn detector_controls(
         .with_gap(Size::new(GAP, GAP))
         .build();
     for (text, spin) in [
-        ("Shortest pause to suggest (s)", pause),
-        ("Pause that starts a new track (s)", gap),
-        ("Shortest track (s)", track),
+        (n_("Shortest pause to suggest (s)"), pause),
+        (n_("Pause that starts a new track (s)"), gap),
+        (n_("Shortest track (s)"), track),
     ] {
-        let label = StaticText::builder(page).with_label(text).build();
+        let label = StaticText::builder(page).with_label(&tr(text)).build();
         grid.add(&label, 0, SizerFlag::AlignCenterVertical, 0);
         grid.add(&spin, 0, SizerFlag::Expand, 0);
     }
@@ -230,6 +234,52 @@ fn detector_controls(
     sizer.add(&timbre, 0, SizerFlag::Left | SizerFlag::Right, GAP);
     sizer.add(&key, 0, SizerFlag::All, GAP);
     sizer.add(&defaults, 0, SizerFlag::All, GAP);
+}
+
+/// The "Language" page: the system's language or one of the built-in
+/// translations. Menus and windows are built once, so the choice takes
+/// effect at the next start; nothing to preview.
+fn language_page(book: &Notebook, chosen: &Rc<Cell<Options>>) -> Panel {
+    let page = Panel::builder(book).build();
+    let mut names = vec![tr("The system's language").into_owned()];
+    names.extend(LANGUAGES.iter().map(|(_, name)| name.to_string()));
+    let current = chosen
+        .get()
+        .language
+        .and_then(|code| LANGUAGES.iter().position(|(c, _)| *c == code))
+        .map_or(0, |i| i + 1);
+    let choice = Choice::builder(&page)
+        .with_choices(names)
+        .with_selection(u32::try_from(current).ok())
+        .build();
+    {
+        let chosen = Rc::clone(chosen);
+        choice.on_selection_changed(move |_| {
+            let mut o = chosen.get();
+            o.language = choice
+                .get_selection()
+                .and_then(|i| (i as usize).checked_sub(1))
+                .and_then(|i| LANGUAGES.get(i))
+                .map(|(code, _)| *code);
+            chosen.set(o);
+        });
+    }
+    let note = StaticText::builder(&page)
+        .with_label(&tr(
+            "The new language is used when the program starts the next time.",
+        ))
+        .build();
+    note.wrap(TEXT_WIDTH);
+    let sizer = BoxSizer::builder(Orientation::Vertical).build();
+    sizer.add(&choice, 0, SizerFlag::All, GAP);
+    sizer.add(
+        &note,
+        0,
+        SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        GAP,
+    );
+    page.set_sizer_and_fit(sizer, true);
+    page
 }
 
 /// `secs` seconds as whole milliseconds; never negative.
@@ -258,8 +308,8 @@ fn waveform_page(
     let tint = slider(&TRACK_TINT_RANGE, a.track_tint);
     let selection = slider(&SELECTION_RANGE, a.selection);
     let label = |text: &str| StaticText::builder(&page).with_label(text).build();
-    let tint_label = label("Track colours (percent; 0 turns them off)");
-    let selection_label = label("Selection (percent; stays ahead of the track colours)");
+    let tint_label = label(&tr("Track colours (percent; 0 turns them off)"));
+    let selection_label = label(&tr("Selection (percent; stays ahead of the track colours)"));
 
     // Either slider: take both values, let the rules settle them, show
     // the result in both sliders and preview it.
