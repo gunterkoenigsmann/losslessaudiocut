@@ -113,6 +113,25 @@ impl Editor {
     /// as saved ([`Editor::has_unexported_changes`] is false) and has no
     /// undo history.
     pub fn with_edits(total: SamplePos, edits: Edits) -> Self {
+        let edits = Self::fitted(total, edits);
+        let mut editor = Editor::new(total);
+        editor.exported = Some(edits.clone());
+        editor.edits = edits;
+        editor
+    }
+
+    /// Replaces the edits with `edits` (e.g. restored after a crash), as one
+    /// undoable change; what no longer fits the recording is dropped as in
+    /// [`Editor::with_edits`]. Unlike there, the result counts as unsaved.
+    /// Returns false if nothing changed.
+    pub fn replace_edits(&mut self, edits: Edits) -> bool {
+        let edits = Self::fitted(self.total, edits);
+        self.commit(edits)
+    }
+
+    /// `edits` clipped to a recording of `total` frames: deletions cut at
+    /// the end, splits and per-track tags outside it dropped.
+    fn fitted(total: SamplePos, edits: Edits) -> Edits {
         let mut deleted: Vec<Range<SamplePos>> = edits
             .deleted
             .into_iter()
@@ -134,16 +153,12 @@ impl Editor {
                 (*start == 0 || splits.binary_search(start).is_ok()) && !t.is_empty()
             })
             .collect();
-        let edits = Edits {
+        Edits {
             deleted,
             splits,
             all_tags: edits.all_tags,
             track_tags,
-        };
-        let mut editor = Editor::new(total);
-        editor.exported = Some(edits.clone());
-        editor.edits = edits;
-        editor
+        }
     }
 
     /// Length of the recording.
@@ -931,6 +946,33 @@ mod tests {
         );
         assert!(!e.has_unexported_changes(), "loaded edits count as saved");
         assert!(!e.can_undo());
+    }
+
+    /// Restored edits (after a crash) are fitted the same way, but count as
+    /// unsaved and can be undone back to what was there before.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)] // one deleted range is meant
+    fn replaced_edits_are_fitted_unsaved_and_undoable() {
+        let saved = Edits {
+            splits: vec![40],
+            ..Edits::default()
+        };
+        let mut e = Editor::with_edits(100, saved.clone());
+        let restored = Edits {
+            deleted: vec![90..200],
+            splits: vec![40, 60, 150],
+            ..Edits::default()
+        };
+        assert!(e.replace_edits(restored));
+        assert_eq!(e.deleted(), [90..100]);
+        assert_eq!(e.splits(), [40, 60]);
+        assert!(e.has_unexported_changes());
+        assert!(e.undo());
+        assert_eq!(e.edits(), &saved);
+        assert!(!e.has_unexported_changes());
+        // The same edits again change nothing.
+        let same = e.edits().clone();
+        assert!(!e.replace_edits(same));
     }
 
     #[test]

@@ -724,6 +724,7 @@ packets in the same state. This gives:
 | Channels | 1 to 4 (no fixed limit in code), one lane per channel |
 | Editing model | delete parts and join the rest into one file; split into tracks with own tags. Joining separate recordings is not planned. |
 | Projects | edits, splits, tags and view saved in a line-based text file (`.lacproj`, `lac_app::project`) that names the recording, relative to the project when inside its folder; unknown lines are skipped for forward compatibility |
+| Crash recovery | while edits are unsaved, the same format is written (at most every 2 s, by rename) to `<data dir>/recovery/<hash of the recording's path>.lacproj` (`lac_app::autosave`); removed once the edits are saved, exported or discarded, so a copy found later means the program ended abnormally and is offered for restoring |
 | Exactness | packet granularity first; sample-exact trimming metadata is a later, optional feature (the `CutPlan` fields exist from the start, set to 0) |
 | Scrubbing | grain restart while dragging (~40 ms grains, 5 ms crossfade) first; varispeed and pitch-preserving scrub later as further render modes |
 | Playback speed | adjustable (e.g. 0.5x-3x), pitch-preserving (WSOLA) by default, varispeed as option; listening only |
