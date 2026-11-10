@@ -45,12 +45,14 @@
 //! - [`i18n`]: translations of the user interface.
 //! - [`appearance`]: how strongly track tints and the selection colour.
 //! - [`project`]: project files, saving a recording's edits for later.
+//! - [`autosave`]: recovery copies of unsaved edits, for after a crash.
 //! - [`theme`]: light or dark windows, and the track list's colours in each.
 //!
 //! See `docs/architecture.md` in the repository for how this crate fits in.
 
 pub mod analysis_job;
 pub mod appearance;
+pub mod autosave;
 pub mod chapters;
 pub mod context_menu;
 pub mod detail;

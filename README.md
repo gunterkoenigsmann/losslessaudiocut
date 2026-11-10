@@ -66,6 +66,12 @@ command line) brings the recording back with them. A recording inside the
 project file's folder is stored by a relative path, so the folder can be
 moved as a whole.
 
+Edits that are neither exported nor saved are also kept in a recovery copy
+in the user's data folder (on Linux `~/.local/share/losslessaudiocut/recovery`),
+written a moment after each change. After a crash or a power cut the program
+offers to restore them, at start or when the recording is opened again.
+Saving, exporting or discarding the edits removes the copy.
+
 Edit > Settings (Ctrl+,) has a page per topic: *Detection* sets the
 shortest pause to suggest, how long a pause must be to start a new track,
 the shortest track, whether a change of sound or of key without a pause

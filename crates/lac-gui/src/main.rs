@@ -55,6 +55,7 @@ use std::time::{Duration, Instant};
 use icons::Icon;
 use lac_analysis::{Detection, Features, RegionKind};
 use lac_app::analysis_job::{AnalysisJob, AnalysisStatus};
+use lac_app::autosave::{Autosaver, Found, Recovery, Step};
 use lac_app::chapters::{Chapter, SuggestedStart, suggested_starts};
 use lac_app::context_menu::{self, Effect, Entry, RightPress};
 use lac_app::detail::{Detail, DetailLoader};
@@ -359,6 +360,21 @@ struct State {
     /// Why the project's edits may not fit the recording, for the status
     /// bar once it is read.
     project_note: String,
+    /// Where recovery copies of unsaved edits are kept (crash recovery,
+    /// issue #97); `None` without a home folder, or in tests.
+    recovery: Option<Recovery>,
+    /// The open recording's absolute path: the recovery copy's key.
+    audio_key: Option<PathBuf>,
+    /// When the recovery copy is written or removed.
+    autosaver: Autosaver,
+    /// A recovery copy found for the recording just read, with other
+    /// edits than it was opened with: offered by the timer.
+    pending_recovery: Option<Found>,
+    /// Restore the copy without asking: the user already chose to at
+    /// start.
+    restore_silently: bool,
+    /// An autosave failed and was reported; not again for this file.
+    autosave_failed: bool,
     /// The track list under the waveform.
     grid: Option<Grid>,
     /// The dockable panes around the waveform.
@@ -404,6 +420,13 @@ struct Scrub {
 impl State {
     /// Starts showing `path`, dropping (and so cancelling) any previous job.
     fn open(&mut self, path: PathBuf) {
+        // The previous file's edits were saved or discarded (see
+        // `confirm_discard`), so its recovery copy goes.
+        self.drop_recovery();
+        self.audio_key = Some(std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()));
+        self.autosaver = Autosaver::default();
+        self.pending_recovery = None;
+        self.autosave_failed = false;
         self.job = Some(PeakJob::start(&path, PUBLISH_INTERVAL, self.cache.clone()));
         self.detail_loader = Some(DetailLoader::start(&path));
         let path_for_analysis = path.clone();
@@ -433,6 +456,92 @@ impl State {
         self.project_path = None;
         self.pending_project = None;
         self.project_note = String::new();
+    }
+
+    /// Removes the open recording's recovery copy: its edits are saved or
+    /// discarded.
+    fn drop_recovery(&mut self) {
+        if let (Some(r), Some(audio)) = (&self.recovery, &self.audio_key) {
+            let _ = r.remove(audio);
+        }
+        self.autosaver = Autosaver::default();
+    }
+
+    /// The recovery copy of the recording just read, if it holds other
+    /// edits than those it was opened with; else none is offered, and the
+    /// saver knows about the copy.
+    fn find_recovery(&mut self) {
+        let (Some(r), Some(audio), Some(ed)) = (&self.recovery, &self.audio_key, &self.editor)
+        else {
+            return;
+        };
+        let found = r.load(audio);
+        let mut restored = ed.clone();
+        match found {
+            Some(f) if restored.replace_edits(f.project.edits.clone()) => {
+                self.pending_recovery = Some(f);
+            }
+            other => {
+                if let Some(f) = other {
+                    self.autosaver = Autosaver::with_copy(f.project.edits);
+                }
+                // Nothing to restore after all.
+                self.restore_silently = false;
+            }
+        }
+    }
+
+    /// Restores the edits of a recovery copy (one undoable step; they
+    /// count as unsaved) or, if not `restore`, throws the copy away.
+    fn use_recovery(&mut self, found: Found, restore: bool) -> String {
+        if !restore {
+            self.drop_recovery();
+            return tr("discarded the kept edits").into_owned();
+        }
+        let Some(ed) = &mut self.editor else {
+            return String::new();
+        };
+        ed.replace_edits(found.project.edits.clone());
+        self.autosaver = Autosaver::with_copy(found.project.edits);
+        tr("restored the edits kept after the program ended unexpectedly").into_owned()
+    }
+
+    /// Timer: writes or removes the recovery copy of the open recording's
+    /// edits (see [`Autosaver::step`]). Returns an error to show, once per
+    /// file.
+    fn autosave(&mut self) -> Option<String> {
+        if self.pending_recovery.is_some() {
+            // The copy is being offered; writing would overwrite it.
+            return None;
+        }
+        let (Some(r), Some(audio), Some(ed)) = (&self.recovery, &self.audio_key, &self.editor)
+        else {
+            return None;
+        };
+        let result =
+            match self
+                .autosaver
+                .step(ed.edits(), ed.has_unexported_changes(), Instant::now())
+            {
+                Step::Keep => Ok(()),
+                Step::Remove => r.remove(audio),
+                Step::Write(edits) => r.store(&Project {
+                    audio: audio.clone(),
+                    frames: Some(ed.total()),
+                    edits,
+                    view: self.view.as_ref().map(WaveformView::visible),
+                }),
+            };
+        match result {
+            Err(e) if !self.autosave_failed => {
+                self.autosave_failed = true;
+                Some(trf(
+                    "cannot keep a recovery copy of the edits in {dir}: {e}",
+                    &[("dir", &r.dir().display()), ("e", &e)],
+                ))
+            }
+            _ => None,
+        }
     }
 
     /// Opens the recording of `project` with its edits, which are applied
@@ -1008,6 +1117,7 @@ impl State {
                     Some(project) => self.editor_from(project, p.total_samples()),
                     None => Editor::new(p.total_samples()),
                 });
+                self.find_recovery();
             }
             self.peaks = Some(p);
         }
@@ -1116,6 +1226,7 @@ fn main() {
             list_palette,
             recent: recent_files,
             grid: Some(grid),
+            recovery: Recovery::default_dir().map(Recovery::new),
             ..State::default()
         }));
         bind_track_list(&grid, &frame, &panel, &state);
@@ -1214,7 +1325,7 @@ fn main() {
                     }
                     report(&frame, &msg);
                 }
-                let (status, detail, export, playing, analysis) = {
+                let (status, detail, export, playing, analysis, autosave) = {
                     let mut st = state.borrow_mut();
                     (
                         st.poll(),
@@ -1222,8 +1333,13 @@ fn main() {
                         st.poll_export(),
                         st.poll_player(),
                         st.poll_analysis(),
+                        st.autosave(),
                     )
                 };
+                if let Some(msg) = &autosave {
+                    report(&frame, msg);
+                }
+                offer_recovery(&frame, &state);
                 if playing {
                     let st = state.borrow();
                     frame.set_status_text(&st.time_status(), FIELD_TIME);
@@ -1257,6 +1373,7 @@ fn main() {
         // `wxdragon::main` returns right away, so leak this one handle.
         std::mem::forget(timer);
 
+        let opened = args.file.is_some();
         if let Some(path) = args.file {
             open_file(&frame, &state, path);
         }
@@ -1264,6 +1381,9 @@ fn main() {
         frame.centre();
         if panes::stored_geometry().maximized {
             frame.maximize(true);
+        }
+        if !opened {
+            offer_crashed_edits(&frame, &state);
         }
     });
 }
@@ -1930,6 +2050,71 @@ fn open_file(frame: &Frame, state: &Rc<RefCell<State>>, path: PathBuf) {
     update_chrome(frame, &state.borrow());
 }
 
+/// Asks whether to restore the recovery copy found for the recording just
+/// read (see [`State::find_recovery`]); restores it without asking if the
+/// user chose to at start.
+fn offer_recovery(frame: &Frame, state: &Rc<RefCell<State>>) {
+    // Taken out first: the dialog runs the event loop, and the timer must
+    // not offer it again meanwhile.
+    let (found, silently, name) = {
+        let mut st = state.borrow_mut();
+        let Some(found) = st.pending_recovery.take() else {
+            return;
+        };
+        let silently = std::mem::take(&mut st.restore_silently);
+        (found, silently, st.name())
+    };
+    let restore = silently || {
+        let dialog = MessageDialog::builder(
+            frame,
+            &trf(
+                "Edits of {name} that were neither exported nor saved were kept when \
+                 losslessaudiocut last ended unexpectedly. Restore them? (No discards them.)",
+                &[("name", &name)],
+            ),
+            &tr("Restore edits?"),
+        )
+        .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
+        .build();
+        dialog.show_modal() == ID_YES
+    };
+    let msg = state.borrow_mut().use_recovery(found, restore);
+    report(frame, &msg);
+    update_chrome(frame, &state.borrow());
+}
+
+/// At start without a file to open: if losslessaudiocut ended without
+/// saving or discarding edits (a crash, a power cut), offers to open the
+/// recording whose edits were kept last; they are then restored without
+/// asking again. Declining throws that copy away; others are offered when
+/// their recordings are opened.
+fn offer_crashed_edits(frame: &Frame, state: &Rc<RefCell<State>>) {
+    let found = {
+        let st = state.borrow();
+        let Some(r) = &st.recovery else { return };
+        r.all().into_iter().next()
+    };
+    let Some(found) = found else { return };
+    let audio = found.project.audio;
+    let dialog = MessageDialog::builder(
+        frame,
+        &trf(
+            "losslessaudiocut ended unexpectedly last time. Edits of {file} that were \
+             neither exported nor saved were kept. Open it and restore them? (No discards them.)",
+            &[("file", &audio.display())],
+        ),
+        &tr("Restore edits?"),
+    )
+    .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
+    .build();
+    if dialog.show_modal() == ID_YES {
+        state.borrow_mut().restore_silently = true;
+        open_file(frame, state, audio);
+    } else if let Some(r) = &state.borrow().recovery {
+        let _ = r.remove(&audio);
+    }
+}
+
 /// Reads the project file at `path`.
 fn read_project(path: &Path) -> Result<Project, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
@@ -2441,6 +2626,8 @@ fn bind_close(frame: &Frame, state: &Rc<RefCell<State>>) {
             ev.veto();
             return;
         }
+        // Saved or discarded: a normal end keeps no recovery copy.
+        state.borrow_mut().drop_recovery();
         let running = state.borrow_mut().export.take();
         if let Some(r) = running {
             report(&f, &tr("finishing the export…"));
