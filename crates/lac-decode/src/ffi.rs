@@ -51,6 +51,19 @@ impl Decoder {
         unsafe {
             let ptr = ctx.as_mut_ptr();
             (*ptr).sample_rate = section.sample_rate as i32;
+            // Our packets carry no timestamps, but when libavcodec drops
+            // leading samples itself (Opus pre-skip, see `delay`) or
+            // trailing padding, it shifts the frame's timestamps and logs
+            // "Could not update timestamps for skipped samples" for every
+            // frame if it lacks a packet time base (libavcodec/decode.c,
+            // `discard_samples`). One tick per sample is the natural base;
+            // it changes no decoded sample.
+            if section.sample_rate > 0 {
+                (*ptr).pkt_timebase = ff::ffi::AVRational {
+                    num: 1,
+                    den: section.sample_rate as i32,
+                };
+            }
             ff::ffi::av_channel_layout_default(&mut (*ptr).ch_layout, i32::from(section.channels));
             if let Codec::Pcm { block_align, .. } = section.codec {
                 (*ptr).block_align = i32::from(block_align);
@@ -219,4 +232,33 @@ fn to_interleaved_f32(frame: &ff::frame::Audio, channels: usize) -> Vec<f32> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A section with no packets, just enough to open a decoder.
+    fn section(codec: Codec, sample_rate: u32) -> DecodeSection {
+        DecodeSection {
+            codec,
+            sample_rate,
+            channels: 2,
+            extradata: Vec::new(),
+            packet_ends: Vec::new(),
+            keep: 0..0,
+        }
+    }
+
+    /// Without a packet time base libavcodec warns "Could not update
+    /// timestamps for skipped samples" for every Opus frame that loses its
+    /// pre-skip, flooding test and application logs.
+    #[test]
+    fn decoder_has_a_per_sample_packet_time_base() {
+        let decoder = Decoder::new(&section(Codec::Opus, 48_000)).expect("opus decoder");
+        // SAFETY: reading a plain struct field of the opened, valid
+        // context owned by `decoder.inner`.
+        let tb = unsafe { (*decoder.inner.as_ptr()).pkt_timebase };
+        assert_eq!((tb.num, tb.den), (1, 48_000));
+    }
 }
