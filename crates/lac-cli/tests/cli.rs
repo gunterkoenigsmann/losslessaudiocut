@@ -120,6 +120,21 @@ fn info_reports_length() {
     assert!(text.contains("channels:    1"), "{text}");
 }
 
+/// `lac info` describes the video track of a phone video.
+#[test]
+fn info_describes_video() {
+    let input = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../lac-container/tests/fixtures/video_h264_opengop_rot90.mp4");
+    let out = lac().arg("info").arg(&input).output().expect("run lac");
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("video:       H.264, 64x64, rotated 270°, 60 frames, 30.00 fps"),
+        "{text}"
+    );
+    assert!(text.contains("open GOP"), "{text}");
+}
+
 #[test]
 fn rejects_unsupported_format() {
     let d = temp_dir("format");

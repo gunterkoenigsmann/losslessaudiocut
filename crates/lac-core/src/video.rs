@@ -35,14 +35,42 @@ pub type MediaTime = i64;
 /// The compression format of a video stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodec {
-    /// H.264 / AVC (ISO/IEC 14496-10).
+    /// H.264 / AVC (ISO/IEC 14496-10), including Dolby Vision streams
+    /// built on it.
     H264,
-    /// H.265 / HEVC (ISO/IEC 23008-2).
+    /// H.265 / HEVC (ISO/IEC 23008-2), including Dolby Vision streams
+    /// built on it.
     Hevc,
-    /// Anything else, named by its four-character code (e.g. `mp4v`).
-    /// Such streams can be copied, but keyframes are only known from the
-    /// container.
+    /// AV1 (AOMedia Video 1).
+    Av1,
+    /// VP9.
+    Vp9,
+    /// MPEG-4 Part 2 Visual (ISO/IEC 14496-2), as old phones wrote it.
+    Mpeg4Visual,
+    /// Anything else, named by its four-character code (e.g. `apch` for
+    /// ProRes). Such streams can be copied, but keyframes are only known
+    /// from the container.
     Other([u8; 4]),
+}
+
+impl VideoCodec {
+    /// Human-readable name, e.g. `"H.264"`.
+    pub fn name(&self) -> String {
+        match self {
+            Self::H264 => "H.264".into(),
+            Self::Hevc => "HEVC".into(),
+            Self::Av1 => "AV1".into(),
+            Self::Vp9 => "VP9".into(),
+            Self::Mpeg4Visual => "MPEG-4 Visual".into(),
+            Self::Other(fourcc) => match fourcc {
+                // Apple ProRes 422 Proxy, LT, standard, HQ, 4444, 4444 XQ.
+                b"apco" | b"apcs" | b"apcn" | b"apch" | b"ap4h" | b"ap4x" => "ProRes".into(),
+                b"apv1" => "APV".into(),
+                b"jpeg" => "Motion JPEG".into(),
+                _ => String::from_utf8_lossy(fourcc).trim().to_owned(),
+            },
+        }
+    }
 }
 
 /// Basic parameters of a video stream, independent of its container.
@@ -720,6 +748,13 @@ mod tests {
                 .is_empty()
         );
         assert!(plan_video_cut(&empty, 0..1, true, true).is_err());
+    }
+
+    #[test]
+    fn codec_names() {
+        assert_eq!(VideoCodec::Hevc.name(), "HEVC");
+        assert_eq!(VideoCodec::Other(*b"apch").name(), "ProRes");
+        assert_eq!(VideoCodec::Other(*b"s263").name(), "s263");
     }
 
     #[test]

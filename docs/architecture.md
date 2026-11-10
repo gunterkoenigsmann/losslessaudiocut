@@ -777,6 +777,15 @@ stream's own timescale (`MediaTime`, e.g. 1/90000 s); the editor's timeline
 stays in audio sample positions, converted with `rescale` and an explicit
 rounding direction.
 
+Reading *(implemented)*: `lac_container::mp4::video` reads the first video
+track of MP4, QuickTime and 3GPP files (also from movie fragments) into a
+`VideoIndex`, for H.264, HEVC (also Dolby Vision), AV1, VP9, MPEG-4 Visual,
+ProRes, APV and any other codec by its sample entry. Claimed keyframes are
+checked in the bitstream where that is cheap (H.264 IDR, HEVC IRAP, AV1
+and VP9 key frames, MPEG-4 I-VOPs), because muxers also mark open-GOP
+I-frames as sync samples; those are demoted with a warning. `lac info`
+describes the video track. Exports still hold the audio only.
+
 The waveform, playback and analysis stay audio-only; the GUI adds a video
 preview pane driven by the audio clock and a keyframe thumbnail lane. Video
 is decoded with libavcodec from our own packet index, like audio.

@@ -158,3 +158,41 @@ $og -i "$tmp/aa.wav" $ma -b:a 128k -f adts adts_aac_stereo_44k.aac
 $synth "$tmp/ab.wav" 22050 1 16 1.0 0 speech
 $og -i "$tmp/ab.wav" $ma -b:a 48k -f adts adts_aac_mono_22k.aac
 $og -i "$tmp/aa.wav" -fflags +bitexact -c:a aac -b:a 96k -f adts adts_aac_pns_44k.aac
+
+# Phone-like videos with AAC audio: 64x64 pixels, 2 s at 30 fps, a
+# keyframe every 15 frames (phones write one about every second), in each
+# video codec phones record with. "bitexact" keeps encoder version strings
+# out of the containers; x264/x265 still write their version into an SEI.
+#
+# - H.264 without B-frames, the common Android case;
+# - H.264 with B-frames and an open GOP (non-IDR I-frames that the muxer
+#   marks as sync samples) and a display rotation (90 degrees counter-
+#   clockwise in ffmpeg's terms, set when remuxing), as a portrait video;
+# - H.264 fragmented (sync flags and composition offsets in trun boxes);
+# - HEVC in QuickTime .mov with B-frames and an open GOP (CRA with RASL
+#   pictures), as iPhones and Android "high efficiency" record it;
+# - AV1 (SVT-AV1) and VP9, as newer Android phones record;
+# - ProRes in .mov (every frame a keyframe, no stss), as iPhone Pro;
+# - MPEG-4 Part 2 in .3gp, as old phones.
+$synth "$tmp/va.wav" 48000 2 16 2.0
+vs="-f lavfi -i testsrc2=s=64x64:r=30:d=2"
+vo="-fflags +bitexact -c:a aac -aac_pns 0 -b:a 64k"
+$og $vs -i "$tmp/va.wav" $vo -c:v libx264 -bf 0 -g 15 -keyint_min 15 \
+    -sc_threshold 0 -pix_fmt yuv420p video_h264_aac.mp4
+$og $vs -i "$tmp/va.wav" $vo -c:v libx264 -bf 2 -g 15 -keyint_min 15 \
+    -sc_threshold 0 -x264-params open-gop=1 -pix_fmt yuv420p \
+    "$tmp/rot.mp4"
+$og -display_rotation 90 -i "$tmp/rot.mp4" -c copy -fflags +bitexact \
+    video_h264_opengop_rot90.mp4
+$og $vs -i "$tmp/va.wav" $vo -c:v libx264 -bf 2 -g 15 -keyint_min 15 \
+    -sc_threshold 0 -pix_fmt yuv420p \
+    -movflags frag_keyframe+empty_moov+default_base_moof video_h264_fragmented.mp4
+$og $vs -i "$tmp/va.wav" $vo -c:v libx265 -tag:v hvc1 -pix_fmt yuv420p \
+    -x265-params log-level=error:keyint=15:min-keyint=15:scenecut=0:bframes=2:open-gop=1 \
+    video_hevc_opengop.mov
+$og $vs -i "$tmp/va.wav" $vo -c:v libsvtav1 -g 15 -pix_fmt yuv420p \
+    -svtav1-params scd=0 video_av1.mp4
+$og $vs -i "$tmp/va.wav" $vo -c:v libvpx-vp9 -g 15 -keyint_min 15 -b:v 100k \
+    -pix_fmt yuv420p video_vp9.mp4
+$og $vs -i "$tmp/va.wav" $vo -c:v prores_ks -profile:v 0 video_prores.mov
+$og $vs -i "$tmp/va.wav" $vo -c:v mpeg4 -g 15 -bf 0 video_mpeg4.3gp

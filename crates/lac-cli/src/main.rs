@@ -240,6 +240,9 @@ fn info(path: &Path) -> Result<()> {
         format_samples(total, i.sample_rate),
         total
     );
+    if let Some(v) = src.video() {
+        println!("video:       {}", describe_video(v));
+    }
     let tags = src.tags();
     for f in TagField::ALL {
         if let Some(v) = tags.get(f) {
@@ -258,6 +261,29 @@ fn info(path: &Path) -> Result<()> {
         println!("note:        {n}");
     }
     Ok(())
+}
+
+/// One line about a video track: codec, size, rotation, frame rate and
+/// keyframe interval, e.g. "H.264, 1920x1080, rotated 90°, 1800 frames,
+/// 30.00 fps, a keyframe every 1.00 s".
+fn describe_video(v: &lac_core::VideoIndex) -> String {
+    let info = v.info();
+    let mut s = format!("{}, {}x{}", info.codec.name(), info.width, info.height);
+    if info.rotation != 0 {
+        s += &format!(", rotated {}°", info.rotation);
+    }
+    let n = v.frames().len();
+    s += &format!(", {n} frames");
+    let range = v.display_range();
+    let secs = (range.end - range.start) as f64 / f64::from(info.timescale);
+    if secs > 0.0 {
+        s += &format!(", {:.2} fps", n as f64 / secs);
+    }
+    let keys = (0..n).filter(|&i| v.is_clean_start(i)).count();
+    if keys > 1 && secs > 0.0 {
+        s += &format!(", a keyframe every {:.2} s", secs / keys as f64);
+    }
+    s
 }
 
 /// Parses `FIELD=VALUE` of `--tag`.
