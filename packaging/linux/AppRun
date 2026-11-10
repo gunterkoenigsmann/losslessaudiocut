@@ -1,0 +1,20 @@
+#!/bin/sh
+# Entry point of the AppImage (linuxdeploy's --custom-apprun; its GTK hook
+# runs before this). One AppImage holds both programs:
+#
+#   ./losslessaudiocut-*.AppImage [FILE]          the GUI
+#   ./losslessaudiocut-*.AppImage --cli ARGS...   the command line tool lac
+#   lac ARGS...                                   the same, through a symlink
+#                                                 named lac to the AppImage
+#
+# The AppImage runtime puts the path it was started as into $ARGV0, so a
+# symlink's name tells which program is wanted, as with busybox.
+here="$(dirname "$(readlink -f "$0")")"
+if [ "${1:-}" = "--cli" ]; then
+    shift
+    exec "$here/usr/bin/lac" "$@"
+fi
+case "$(basename "${ARGV0:-}")" in
+    lac) exec "$here/usr/bin/lac" "$@" ;;
+esac
+exec "$here/usr/bin/losslessaudiocut" "$@"
