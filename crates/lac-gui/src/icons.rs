@@ -52,6 +52,11 @@ pub enum Icon {
     ZoomOut,
     /// View > Zoom to fit: arrows pointing to both sides.
     ZoomFit,
+    /// Settings page "Detection": a lens over a pause between two sound
+    /// bursts.
+    Detection,
+    /// Settings page "Waveform": a waveform over two tinted tracks.
+    Waveform,
 }
 
 impl Icon {
@@ -100,6 +105,16 @@ impl Icon {
             Icon::ZoomFit => {
                 r#"<line x1="3" y1="4" x2="3" y2="20"/><line x1="21" y1="4" x2="21" y2="20"/><line x1="7" y1="12" x2="17" y2="12"/><polyline points="10,9 7,12 10,15"/><polyline points="14,9 17,12 14,15"/>"#.to_string()
             }
+            Icon::Detection => {
+                // Two bursts of sound with a pause between them, a lens on
+                // the pause.
+                r#"<line x1="3" y1="9" x2="3" y2="15"/><line x1="6" y1="7" x2="6" y2="17"/><line x1="18" y1="7" x2="18" y2="17"/><line x1="21" y1="9" x2="21" y2="15"/><circle cx="12" cy="12" r="4"/><line x1="15" y1="15" x2="19" y2="20"/>"#.to_string()
+            }
+            Icon::Waveform => {
+                // Two track areas side by side, shaded in two hues, with
+                // a wave across both.
+                r##"<rect x="2" y="4" width="10" height="16" fill="#5090f0" fill-opacity="0.35" stroke="none"/><rect x="12" y="4" width="10" height="16" fill="#f0b040" fill-opacity="0.35" stroke="none"/><path d="M2 12c2-6 4-6 5 0s3 6 5 0 3-6 5 0 3 6 5 0"/>"##.to_string()
+            }
         };
         svg(&shapes)
     }
@@ -109,7 +124,7 @@ impl Icon {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 14] = [
+    const ALL: [Icon; 16] = [
         Icon::Open,
         Icon::Export,
         Icon::Undo,
@@ -124,6 +139,8 @@ mod tests {
         Icon::ZoomIn,
         Icon::ZoomOut,
         Icon::ZoomFit,
+        Icon::Detection,
+        Icon::Waveform,
     ];
 
     /// A crude well-formedness check: NanoSVG skips what it cannot parse

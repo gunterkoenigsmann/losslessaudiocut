@@ -41,10 +41,12 @@
 //!   pointer.
 //! - [`context_menu`]: the waveform's right-click menu.
 //! - [`perspective`]: views of the waveform around the selection's edges.
+//! - [`appearance`]: how strongly track tints and the selection colour.
 //!
 //! See `docs/architecture.md` in the repository for how this crate fits in.
 
 pub mod analysis_job;
+pub mod appearance;
 pub mod chapters;
 pub mod context_menu;
 pub mod detail;

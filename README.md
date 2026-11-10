@@ -59,12 +59,17 @@ your choice. A `*` in the title marks edits that are not exported yet (an
 export of the selection does not count), and closing or opening another
 file asks before they are lost.
 
+Edit > Settings (Ctrl+,) has a page per topic: *Detection* turns off
+offering the streams of a chained Ogg file as tracks (for recorded web
+radio that changes its title every few seconds), *Waveform* sets how
+strongly tracks and the selection are coloured. Changes show at once;
+Cancel takes them back.
+
 Ctrl+K starts a new track at the cursor (or the selection start), Ctrl+J
 joins the track under the cursor with the one before it, and F2 names it.
 Track boundaries show as dashed lines with the track number and name, and
-each track is faintly tinted, with the same tint behind its row of the
-track list; drag
-one with the mouse to move it (the pointer turns into a left-right arrow
+each track is tinted, with the same tint behind its row of the track
+list; drag a boundary with the mouse to move it (the pointer turns into a left-right arrow
 over it; the whole drag is one undo step). With
 tracks, File > Export asks for a folder and writes one file per track,
 `<name>-01 <track name>.<ext>`, `<name>-02.<ext>`, …; a track that is

@@ -7,6 +7,7 @@
 //! setting only those that differ, so it needs no state of its own and a
 //! refresh while nothing changed costs no redraw.
 
+use lac_app::appearance::Appearance;
 use lac_app::track_list::{Bound, COLUMNS, Row};
 use lac_core::TagField;
 use wxdragon::prelude::*;
@@ -70,15 +71,16 @@ pub fn bound(col: i32) -> Option<Bound> {
     }
 }
 
-/// Shows `rows`. Does nothing while a cell is being edited, so that a
-/// refresh from the timer never throws away what the user is typing.
-pub fn refresh(grid: &Grid, rows: &[Row]) {
+/// Shows `rows`, tinted as `appearance` says. Does nothing while a cell
+/// is being edited, so that a refresh from the timer never throws away
+/// what the user is typing.
+pub fn refresh(grid: &Grid, rows: &[Row], appearance: &Appearance) {
     if grid.is_cell_edit_control_enabled() {
         return;
     }
     let want = i32::try_from(rows.len()).unwrap_or(i32::MAX);
     let have = grid.get_number_rows();
-    if have == want && rows_match(grid, rows) {
+    if have == want && rows_match(grid, rows, appearance) {
         return;
     }
     grid.begin_batch();
@@ -118,7 +120,7 @@ pub fn refresh(grid: &Grid, rows: &[Row]) {
             let colour = if row.deleted { DELETED } else { NORMAL };
             grid.set_cell_text_colour(r, c, &colour);
         }
-        let tint = row_tint(r as usize, rows.len());
+        let tint = row_tint(appearance, r as usize, rows.len());
         for c in 0..grid.get_number_cols() {
             grid.set_cell_background_colour(r, c, &tint);
         }
@@ -130,9 +132,9 @@ pub fn refresh(grid: &Grid, rows: &[Row]) {
 /// Background of row `row` of `rows`: the track's tint, the same hue as
 /// behind its part of the waveform (issue #98); plain with one track,
 /// which the waveform does not tint either.
-fn row_tint(row: usize, rows: usize) -> Colour {
+fn row_tint(appearance: &Appearance, row: usize, rows: usize) -> Colour {
     if rows > 1 {
-        tints::list(row)
+        tints::list(appearance, row)
     } else {
         tints::LIST_PLAIN
     }
@@ -145,7 +147,7 @@ fn set(grid: &Grid, row: i32, col: i32, text: &str, read_only: bool) {
 }
 
 /// Whether the grid shows `rows` already (texts and edit marks).
-fn rows_match(grid: &Grid, rows: &[Row]) -> bool {
+fn rows_match(grid: &Grid, rows: &[Row], appearance: &Appearance) -> bool {
     rows.iter().enumerate().all(|(r, row)| {
         let r = r as i32;
         grid.get_cell_value(r, START_COLUMN) == row.start
@@ -161,6 +163,6 @@ fn rows_match(grid: &Grid, rows: &[Row]) -> bool {
                 grid.get_cell_value(r, c) == cell.text && grid.get_cell_text_colour(r, c) == colour
             })
             // Going from one track to two tints the first row too.
-            && grid.get_cell_background_colour(r, 0) == row_tint(r as usize, rows.len())
+            && grid.get_cell_background_colour(r, 0) == row_tint(appearance, r as usize, rows.len())
     })
 }

@@ -40,6 +40,7 @@ mod options;
 mod panes;
 mod position_bar;
 mod recent;
+mod settings;
 mod tints;
 mod toolbar;
 mod track_list;
@@ -110,7 +111,9 @@ const ID_ALL_TRACKS: Id = ID_HIGHEST + 23;
 const ID_RULER: Id = ID_HIGHEST + 24;
 const ID_SUGGESTED_SPLITS: Id = ID_HIGHEST + 25;
 const ID_SUGGESTED_PAUSES: Id = ID_HIGHEST + 26;
-const ID_CHAINED_LINKS: Id = ID_HIGHEST + 27;
+/// Edit > Settings (issue #103); its id was Edit > Suggest chained
+/// streams', which moved into the dialog.
+const ID_SETTINGS: Id = ID_HIGHEST + 27;
 const ID_PLAY_TRACK_START: Id = ID_HIGHEST + 28;
 const ID_PLAY_TRACK_END: Id = ID_HIGHEST + 29;
 /// View > Perspective: entry `i` of [`Perspective::ALL`] has id
@@ -233,9 +236,6 @@ const DELETED_BACKGROUND: Colour = Colour::rgb(0x3a, 0x1e, 0x22);
 const DELETED_PEAK: Colour = Colour::rgb(0x6a, 0x58, 0x5c);
 /// RMS band in deleted parts.
 const DELETED_RMS: Colour = Colour::rgb(0x8c, 0x78, 0x7c);
-/// Background of the selection: brighter than any track tint, so a
-/// selected part never looks like just another track (issue #126).
-const SELECTION: Colour = Colour::rgb(0x48, 0x56, 0x70);
 /// Left and right edge of the selection.
 const SELECTION_EDGE: Colour = Colour::rgb(0xe8, 0xc0, 0x50);
 /// The cursor where playback starts.
@@ -1225,11 +1225,10 @@ fn menu_bar(options: Options) -> MenuBar {
             "Delete suggested &pauses\tCtrl+Shift+D",
             "Delete the silent and noise-only stretches the analysis found",
         )
-        .append_check_item(
-            ID_CHAINED_LINKS,
-            "Suggest &chained streams as tracks",
-            "Offer the start of each stream of a chained Ogg file as a track start; \
-             turn off for recorded web radio that changes its title every few seconds",
+        .append_item(
+            ID_SETTINGS,
+            "Se&ttings…\tCtrl+,",
+            "What the analysis suggests and how the waveform is coloured",
         )
         .append_separator()
         .append_item(
@@ -1322,7 +1321,6 @@ fn menu_bar(options: Options) -> MenuBar {
     bar.check_item(ID_KEEP_PITCH, options.keep_pitch);
     bar.check_item(ID_SCRUB_SELECTING, options.scrub_while_selecting);
     bar.check_item(ID_RULER, options.ruler);
-    bar.check_item(ID_CHAINED_LINKS, options.chained_links);
     bar
 }
 
@@ -1475,12 +1473,9 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
         let on = checked.unwrap_or(!st.options.ruler);
         st.options.ruler = on;
         st.options.save();
-    } else if id == ID_CHAINED_LINKS {
-        // The suggestion marks change; splits already made stay.
-        let mut st = state.borrow_mut();
-        let on = checked.unwrap_or(!st.options.chained_links);
-        st.options.chained_links = on;
-        st.options.save();
+    } else if id == ID_SETTINGS {
+        open_settings(&f, panel, state);
+        return;
     } else if id == ID_TO_START {
         let mut st = state.borrow_mut();
         if let Some(e) = &mut st.editor {
@@ -1582,6 +1577,28 @@ fn report(frame: &Frame, msg: &str) {
     log_pane::append(msg);
 }
 
+/// Edit > Settings: shows the dialog; its changes show at once and are
+/// stored on OK, Cancel brings back what was there before.
+fn open_settings(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
+    let before = state.borrow().options;
+    let preview: Rc<dyn Fn(Options)> = {
+        let (state, f, p) = (Rc::clone(state), *frame, *panel);
+        Rc::new(move |o| {
+            let Ok(mut st) = state.try_borrow_mut() else {
+                return;
+            };
+            st.options = o;
+            update_chrome(&f, &st);
+            p.refresh(false, None);
+        })
+    };
+    let chosen = settings::show(frame, before, Rc::clone(&preview));
+    preview(chosen.unwrap_or(before));
+    if chosen.is_some() {
+        state.borrow().options.save();
+    }
+}
+
 /// Title and edit field of the status bar, after anything that may have
 /// changed them.
 fn update_chrome(frame: &Frame, st: &State) {
@@ -1589,7 +1606,7 @@ fn update_chrome(frame: &Frame, st: &State) {
     frame.set_status_text(&st.edit_status(), FIELD_EDIT);
     frame.set_status_text(&st.time_status(), FIELD_TIME);
     if let Some(g) = &st.grid {
-        track_list::refresh(g, &st.track_rows());
+        track_list::refresh(g, &st.track_rows(), &st.options.appearance);
     }
     st.show_positions();
 }
@@ -2624,7 +2641,7 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
                 let Some(r) = view.pixel_span(&t.span) else {
                     continue;
                 };
-                let tint = tints::waveform(i, BACKGROUND);
+                let tint = tints::waveform(&st.options.appearance, i, BACKGROUND);
                 dc.set_pen(tint, 1, PenStyle::Solid);
                 dc.set_brush(tint, BrushStyle::Solid);
                 dc.draw_rectangle(px(r.start), 0, px(r.end - r.start), size.height);
@@ -2632,7 +2649,8 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
         }
         let deleted = editor.map_or_else(Vec::new, |e| spans(&mut e.deleted().iter().cloned()));
         let selected = editor.map_or_else(Vec::new, |e| spans(&mut e.selection().into_iter()));
-        for (colour, list) in [(DELETED_BACKGROUND, &deleted), (SELECTION, &selected)] {
+        let selection = tints::selection(&st.options.appearance, BACKGROUND);
+        for (colour, list) in [(DELETED_BACKGROUND, &deleted), (selection, &selected)] {
             dc.set_pen(colour, 1, PenStyle::Solid);
             dc.set_brush(colour, BrushStyle::Solid);
             for r in list {
@@ -2913,17 +2931,26 @@ mod tests {
 
     #[test]
     fn track_tints_stay_apart_from_selection_and_deletion() {
-        // The selection and deleted parts are drawn over the tints; each
-        // must still look different from every track's tint (issue #126).
-        for i in 0..8 {
-            let tint = tints::waveform(i, BACKGROUND);
-            for (what, colour) in [
-                ("selection", SELECTION),
-                ("deleted", DELETED_BACKGROUND),
-                ("peaks", PEAK),
-            ] {
-                let d = tints::distance(tint, colour);
-                assert!(d >= 60, "tint {i} vs {what}: {d}");
+        use lac_app::appearance::{Appearance, SELECTION_RANGE, TRACK_TINT_RANGE, distance};
+        use tints::rgb;
+        // The selection and deleted parts are drawn over the tints, the
+        // peaks over everything; at every setting each must still look
+        // different from what it is drawn on (issues #126, #132).
+        for track_tint in TRACK_TINT_RANGE {
+            for selection in SELECTION_RANGE {
+                let a = Appearance {
+                    track_tint,
+                    selection,
+                }
+                .normalized();
+                let sel = rgb(tints::selection(&a, BACKGROUND));
+                assert!(distance(sel, rgb(DELETED_BACKGROUND)) >= 60, "{a:?}");
+                assert!(distance(sel, rgb(PEAK)) >= 100, "{a:?}");
+                for i in 0..4 {
+                    let tint = rgb(tints::waveform(&a, i, BACKGROUND));
+                    assert!(distance(tint, rgb(DELETED_BACKGROUND)) >= 30, "{a:?} {i}");
+                    assert!(distance(tint, rgb(PEAK)) >= 150, "{a:?} {i}");
+                }
             }
         }
     }
@@ -3187,7 +3214,7 @@ mod tests {
         let last = ID_CONTEXT_FIRST + CONTEXT_MAX as Id - 1;
         assert_eq!(context_index(last), Some(CONTEXT_MAX - 1));
         assert_eq!(context_index(last + 1), None);
-        assert_eq!(context_index(ID_CHAINED_LINKS), None);
+        assert_eq!(context_index(ID_SETTINGS), None);
         for id in ID_CONTEXT_FIRST..=last {
             assert_eq!(panes::pane_for(id), None, "{id} toggles a pane");
             assert_eq!(recent::index_of(id), None, "{id} opens a recent file");

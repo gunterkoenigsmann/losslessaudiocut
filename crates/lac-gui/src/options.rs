@@ -2,12 +2,13 @@
 //! store (the registry on Windows, a file in the home or config directory
 //! elsewhere).
 //!
-//! Only on/off choices from the menus live here; until there is a
-//! settings dialog (issue #103) they are all menu check items. Which panes
+//! On/off choices from the menus live here, and what the settings dialog
+//! (issue #103, `settings.rs`) sets. Which panes
 //! are shown, and where, is the window layout's business (see
 //! `panes.rs`); everything else about a session (the open file, the edits) is
 //! deliberately not remembered.
 
+use lac_app::appearance::Appearance;
 use wxdragon::config::{Config, ConfigStyle};
 
 /// Key of [`Options::keep_pitch`].
@@ -18,6 +19,10 @@ const SCRUB_WHILE_SELECTING: &str = "/Playback/ScrubWhileSelecting";
 const RULER: &str = "/View/Ruler";
 /// Key of [`Options::chained_links`].
 const CHAINED_LINKS: &str = "/Tracks/ChainedLinks";
+/// Key of [`Appearance::track_tint`].
+const TRACK_TINT: &str = "/View/TrackTint";
+/// Key of [`Appearance::selection`].
+const SELECTION: &str = "/View/Selection";
 
 /// The remembered options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,10 +34,13 @@ pub struct Options {
     pub scrub_while_selecting: bool,
     /// View > Time ruler: the time scale under the waveform.
     pub ruler: bool,
-    /// Edit > Suggest chained streams as tracks: the links of a chained
-    /// Ogg file are offered as track starts. Off for recorded web radio,
-    /// whose stream may change its title every few seconds.
+    /// Settings > Detection > Suggest chained streams as tracks: the links
+    /// of a chained Ogg file are offered as track starts. Off for recorded
+    /// web radio, whose stream may change its title every few seconds.
     pub chained_links: bool,
+    /// Settings > Waveform: how strongly tracks and the selection are
+    /// coloured (issue #132).
+    pub appearance: Appearance,
 }
 
 impl Default for Options {
@@ -42,6 +50,7 @@ impl Default for Options {
             scrub_while_selecting: true,
             ruler: true,
             chained_links: true,
+            appearance: Appearance::default(),
         }
     }
 }
@@ -56,6 +65,11 @@ impl Options {
             scrub_while_selecting: c.read_bool(SCRUB_WHILE_SELECTING, d.scrub_while_selecting),
             ruler: c.read_bool(RULER, d.ruler),
             chained_links: c.read_bool(CHAINED_LINKS, d.chained_links),
+            appearance: Appearance {
+                track_tint: percent(c.read_long(TRACK_TINT, d.appearance.track_tint.into())),
+                selection: percent(c.read_long(SELECTION, d.appearance.selection.into())),
+            }
+            .normalized(),
         }
     }
 
@@ -67,8 +81,16 @@ impl Options {
         c.write_bool(SCRUB_WHILE_SELECTING, self.scrub_while_selecting);
         c.write_bool(RULER, self.ruler);
         c.write_bool(CHAINED_LINKS, self.chained_links);
+        c.write_long(TRACK_TINT, self.appearance.track_tint.into());
+        c.write_long(SELECTION, self.appearance.selection.into());
         c.flush(false);
     }
+}
+
+/// A stored percentage; anything out of range (a hand-edited store) is
+/// pulled into range, [`Appearance::normalized`] does the rest.
+fn percent(stored: i64) -> u8 {
+    u8::try_from(stored.clamp(0, 100)).unwrap_or(0)
 }
 
 /// The application's config store.
@@ -97,7 +119,15 @@ mod tests {
                 scrub_while_selecting: true,
                 ruler: true,
                 chained_links: true,
+                appearance: Appearance::default(),
             }
         );
+    }
+
+    #[test]
+    fn stored_percentages_are_pulled_into_range() {
+        assert_eq!(percent(-5), 0);
+        assert_eq!(percent(40), 40);
+        assert_eq!(percent(1_000_000), 100);
     }
 }
