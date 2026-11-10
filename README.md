@@ -192,6 +192,24 @@ intelligible when skimming through long recordings; with *Play > Keep pitch*
 switched off, the pitch follows the speed like a tape. The speed only
 affects listening, never the exported files.
 
+*Play > Control surface (Mackie Control)* lets a DAW controller in its
+Mackie Control mode (Behringer X-Touch, iCON Platform, PreSonus FaderPort
+and most others) drive the editor over MIDI, the same on every device:
+
+| Control | Does |
+|---|---|
+| Play / Stop | starts / stops playback |
+| Rewind / Fast forward | moves the cursor 5 s back / ahead |
+| Jog wheel | moves the cursor 4 pixels of the waveform per step |
+| Cursor left / right | to the previous / next track start |
+| Cursor up / down | zooms in / out |
+| Marker | splits the track at the cursor |
+| Undo | undoes the last edit |
+
+It is off by default, because a MIDI keyboard's notes would reach the
+transport too. Devices are found when switched on and when plugged in
+later.
+
 ## Command line
 
 ```sh

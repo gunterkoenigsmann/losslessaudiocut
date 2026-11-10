@@ -16,6 +16,8 @@ lac-app.workspace = true
 lac-core.workspace = true
 lac-peaks.workspace = true
 lac-playback.workspace = true
+# MIDI input from control surfaces (issue #95, see surface.rs).
+midir.workspace = true
 # Without default features: they pull in the Linux tray icon library
 # (appindicator) and image formats we do not use. `aui` gives the dockable
 # panes (toolbar and friends, see `panes.rs`).
