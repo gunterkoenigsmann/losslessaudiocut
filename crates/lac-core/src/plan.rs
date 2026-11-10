@@ -81,6 +81,9 @@ pub struct CutPlan {
     /// Like `padding_before`, after `actual`: the hidden end of the last
     /// packet (e.g. MP3 encoder padding) when the end cannot be trimmed.
     pub padding_after: SamplePos,
+    /// The plan for the file's video track over the same part, for files
+    /// with video ([`crate::plan_av_cuts`]); `None` for audio-only files.
+    pub video: Option<crate::VideoCutPlan>,
 }
 
 impl CutPlan {
@@ -109,6 +112,9 @@ pub enum PlanError {
         /// Length of the stream.
         len: SamplePos,
     },
+    /// Planning the video track of the file failed.
+    #[error(transparent)]
+    Video(#[from] crate::VideoPlanError),
 }
 
 /// Plans the lossless extraction of the source range `range`.
@@ -137,6 +143,7 @@ pub fn plan_cut(
             actual: range.start..range.start,
             padding_before: 0,
             padding_after: 0,
+            video: None,
         });
     }
     let packets = index.packets();
@@ -178,6 +185,7 @@ pub fn plan_cut(
         actual: actual_start..actual_end,
         padding_before,
         padding_after,
+        video: None,
     })
 }
 

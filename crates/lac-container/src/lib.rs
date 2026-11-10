@@ -29,8 +29,11 @@ pub mod wav;
 mod window;
 
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 
-use lac_core::{CutCapabilities, CutPlan, PacketIndex, SamplePos, Tags, VideoIndex};
+use lac_core::{
+    CutCapabilities, CutPlan, PacketIndex, PlanError, SamplePos, Tags, VideoIndex, plan_cuts,
+};
 
 pub use decode::{Codec, DecodeSection};
 
@@ -78,10 +81,17 @@ pub trait Container: Send {
         &[]
     }
     /// The frames of the file's video track, for files that have one (MP4,
-    /// QuickTime, 3GPP). Exports still contain the audio only (issue
-    /// #156).
+    /// QuickTime, 3GPP).
     fn video(&self) -> Option<&VideoIndex> {
         None
+    }
+    /// Plans the joined output of the kept `ranges` (sorted, not
+    /// overlapping) for [`Container::write_cut`]. Audio-only formats plan
+    /// with [`plan_cuts`]; files with video plan both tracks together
+    /// ([`lac_core::plan_av_cuts`]), which moves joins to keyframes and may
+    /// merge parts, so there can be fewer plans than ranges.
+    fn plan(&self, ranges: &[Range<SamplePos>]) -> std::result::Result<Vec<CutPlan>, PlanError> {
+        plan_cuts(self.index(), self.capabilities(), ranges)
     }
     /// Notes that apply to every cut of this file, for the export report:
     /// where a cut decodes differently in some players although every
@@ -389,9 +399,13 @@ impl Container for mp4::Mp4File {
         "MP4"
     }
     fn details(&self) -> String {
+        let video = self
+            .video()
+            .map(|v| format!(" with {} video", v.index().info().codec.name()))
+            .unwrap_or_default();
         match self.other_tracks() {
-            0 => self.codec().name().into(),
-            n => format!("{}, {n} other track(s) ignored", self.codec().name()),
+            0 => format!("{}{video}", self.codec().name()),
+            n => format!("{}{video}, {n} other track(s) ignored", self.codec().name()),
         }
     }
     fn index(&self) -> &PacketIndex {
@@ -408,6 +422,9 @@ impl Container for mp4::Mp4File {
     }
     fn video(&self) -> Option<&VideoIndex> {
         mp4::Mp4File::video(self).map(mp4::video::Mp4Video::index)
+    }
+    fn plan(&self, ranges: &[Range<SamplePos>]) -> std::result::Result<Vec<CutPlan>, PlanError> {
+        mp4::Mp4File::plan(self, ranges)
     }
     fn cut_notes(&self, r: &mut dyn ReadSeek) -> Result<Vec<String>> {
         Ok(if self.uses_noise_substitution(r)? {

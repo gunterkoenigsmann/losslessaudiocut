@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use lac_container::{Container, ContainerError};
 use lac_core::{
     AudioStreamInfo, CutPlan, EditError, EditList, PacketIndex, PlanError, SamplePos, SourceId,
-    Tags, plan_cuts,
+    Tags,
 };
 
 use crate::ranges;
@@ -289,8 +289,7 @@ impl Source {
             return Err(AppError::OutputIsInput);
         }
         let kept = self.kept_ranges(request)?;
-        let plans: Vec<CutPlan> =
-            plan_cuts(self.container.index(), self.container.capabilities(), &kept)?;
+        let plans: Vec<CutPlan> = self.container.plan(&kept)?;
 
         let write_err = |source: ContainerError| AppError::Write {
             path: output.to_path_buf(),
@@ -303,13 +302,27 @@ impl Source {
             .map_err(write_err)?;
         w.flush().map_err(|e| write_err(e.into()))?;
 
-        Ok(kept
+        // A video file's plan may merge parts (see `Container::plan`);
+        // each plan then stands for all requested ranges it overlaps. (Its
+        // audio may end up to half a packet short of a request at a join,
+        // so overlap, not containment.)
+        Ok(plans
             .into_iter()
-            .zip(plans)
-            .map(|(requested, p)| KeptRange {
-                requested,
-                padding: p.padding_before + p.padding_after,
-                actual: p.actual,
+            .filter_map(|p| {
+                let inside = kept
+                    .iter()
+                    .filter(|r| r.start < p.actual.end && p.actual.start < r.end);
+                let requested = inside
+                    .clone()
+                    .map(|r| r.start)
+                    .min()
+                    .zip(inside.map(|r| r.end).max())
+                    .map(|(a, b)| a..b)?;
+                Some(KeptRange {
+                    requested,
+                    padding: p.padding_before + p.padding_after,
+                    actual: p.actual,
+                })
             })
             .collect())
     }
