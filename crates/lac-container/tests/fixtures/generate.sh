@@ -121,6 +121,12 @@ $synth "$tmp/la.wav" 44100 2 16 0.75
 $og -i "$tmp/la.wav" -fflags +bitexact -c:a alac mp4_alac_stereo16_44k.m4a
 $synth "$tmp/lb.wav" 48000 1 24 0.5
 $og -i "$tmp/lb.wav" -fflags +bitexact -c:a alac mp4_alac_mono24_48k.m4a
+# 24-bit stereo with correlated channels at the highest compression level:
+# stereo mixing and the low byte of each sample stored apart ("shifted
+# bytes") together.
+$synth "$tmp/lc.wav" 44100 2 24 0.4
+$og -i "$tmp/lc.wav" -af "pan=stereo|c0=0.8*c0+0.2*c1|c1=0.6*c0+0.4*c1" \
+    -fflags +bitexact -c:a alac -compression_level 2 mp4_alac_stereo24_44k.m4a
 
 # Fragmented MP4, as recorders write it so that an interrupted recording
 # stays readable: AAC with an empty moov and 200 ms fragments whose data

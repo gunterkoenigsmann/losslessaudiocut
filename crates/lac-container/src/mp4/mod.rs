@@ -45,11 +45,13 @@
 //!
 //! A cut is a fresh file: the source's `ftyp`, a `moov` with one track
 //! (the source's sample description `stsd` verbatim, new sample tables, an
-//! edit list), and one `mdat` with the kept samples, verbatim. `moov`
+//! edit list), and one `mdat` with the kept samples. `moov`
 //! comes first, so players can start before the whole file is read.
 //!
-//! - **Start:** for AAC, [`AAC_PREROLL_FRAMES`] samples before the first kept
-//!   one are written as pre-roll (the MDCT overlap of the next frame needs
+//! For AAC:
+//!
+//! - **Start:** [`AAC_PREROLL_FRAMES`] samples before the first kept one
+//!   are written as pre-roll (the MDCT overlap of the next frame needs
 //!   them), and hidden, together with the head of the first kept sample,
 //!   by the edit list's `media_time`, so the start is sample-exact.
 //! - **End:** the tail of the last sample is hidden by the edit list's
@@ -58,10 +60,16 @@
 //! - **Joins:** an edit list could join trimmed parts, but players handle
 //!   multi-entry edit lists poorly, so kept parts are joined in one
 //!   stream without pre-roll, and inner cut points are widened to sample
-//!   boundaries ([`CutCapabilities::trims_at_file_ends_only`]). For AAC the
-//!   first frame after a join overlaps with a foreign predecessor: a
-//!   transient of one frame. ALAC frames are independent, so ALAC joins
-//!   are bit-exact.
+//!   boundaries ([`CutCapabilities::trims_at_file_ends_only`]). The first
+//!   frame after a join overlaps with a foreign predecessor: a transient
+//!   of one frame.
+//!
+//! ALAC is lossless and its frames are independent, so every frame that a
+//! cut point cuts (at the file's ends or at a join, or by the source's own
+//! edit list) is decoded and written back as an uncompressed ALAC frame
+//! of exactly the kept samples (see [`alac`]). The other frames are copied
+//! verbatim, the edit list keeps everything, and the cut is sample-exact
+//! and bit-exact everywhere.
 //!
 //! ## Tags
 //!
@@ -69,6 +77,7 @@
 //! lists and other `udta` content are not copied.
 
 pub mod aac;
+pub mod alac;
 pub mod boxes;
 pub mod ilst;
 
@@ -379,16 +388,24 @@ impl Mp4File {
         Ok(false)
     }
 
-    /// Sample-exact at the start and end of the output file (edit list);
-    /// joins inside the file are packet-granular. Pre-roll is added and
-    /// hidden inside [`Mp4File::write_cut`].
+    /// AAC: sample-exact at the start and end of the output file (edit
+    /// list); joins inside the file are packet-granular. Pre-roll is added
+    /// and hidden inside [`Mp4File::write_cut`]. ALAC: sample-exact
+    /// everywhere, since a frame cut by a cut point is rewritten as an
+    /// uncompressed frame of the kept samples (see [`alac`]).
     pub fn capabilities(&self) -> CutCapabilities {
-        CutCapabilities {
-            preroll_packets: 0,
-            can_trim_start: true,
-            can_trim_end: true,
-            lossless_reencode: false,
-            trims_at_file_ends_only: true,
+        match self.codec {
+            Mp4Codec::Aac { .. } => CutCapabilities {
+                preroll_packets: 0,
+                can_trim_start: true,
+                can_trim_end: true,
+                lossless_reencode: false,
+                trims_at_file_ends_only: true,
+            },
+            Mp4Codec::Alac { .. } => CutCapabilities {
+                lossless_reencode: true,
+                ..CutCapabilities::default()
+            },
         }
     }
 
@@ -436,10 +453,10 @@ impl Mp4File {
         read_raw(r, p)
     }
 
-    /// Writes the kept samples of `plans`, joined, as a new MP4 file. Only
-    /// the start of the first and the end of the last non-empty plan may
-    /// be trimmed (see [`Mp4File::capabilities`]). `tags`, or else the
-    /// source's tags, are written as the `ilst`.
+    /// Writes the kept samples of `plans`, joined, as a new MP4 file. For
+    /// AAC only the start of the first and the end of the last non-empty
+    /// plan may be trimmed (see [`Mp4File::capabilities`]). `tags`, or
+    /// else the source's tags, are written as the `ilst`.
     pub fn write_cut<R, W>(
         &self,
         r: &mut R,
@@ -460,13 +477,19 @@ impl Mp4File {
                     p.packets
                 )));
             }
-            if (p.trim_start != 0 && i != 0) || (p.trim_end != 0 && i + 1 != kept.len()) {
+            let trims_inside =
+                (p.trim_start != 0 && i != 0) || (p.trim_end != 0 && i + 1 != kept.len());
+            if trims_inside && matches!(self.codec, Mp4Codec::Aac { .. }) {
                 return Err(ContainerError::InvalidPlan(
-                    "MP4 can only trim at the start and end of the file".into(),
+                    "MP4 with AAC can only trim at the start and end of the file".into(),
                 ));
             }
         }
         let tags = tags.unwrap_or(&self.tags);
+        if let Mp4Codec::Alac { cookie } = &self.codec {
+            let samples = self.alac_samples(r, cookie, &kept)?;
+            return self.write_file(r, &samples, 0, 0, tags, w);
+        }
         let (Some(first), Some(last)) = (kept.first(), kept.last()) else {
             // Nothing kept: a valid file with an empty track.
             return self.write_file(r, &[], 0, 0, tags, w);
@@ -474,14 +497,14 @@ impl Mp4File {
 
         // Raw packets to write: pre-roll, then the kept entries in order.
         let r_first = self.entry_raw[first.packets.start];
-        let preroll = match self.codec {
-            Mp4Codec::Aac { .. } => AAC_PREROLL_FRAMES,
-            Mp4Codec::Alac { .. } => 0,
-        };
-        let r0 = r_first.saturating_sub(preroll);
-        let mut order: Vec<usize> = (r0..r_first).collect();
+        let r0 = r_first.saturating_sub(AAC_PREROLL_FRAMES);
+        let mut order: Vec<OutSample> = (r0..r_first).map(OutSample::Source).collect();
         for p in &kept {
-            order.extend(p.packets.clone().map(|e| self.entry_raw[e]));
+            order.extend(
+                p.packets
+                    .clone()
+                    .map(|e| OutSample::Source(self.entry_raw[e])),
+            );
         }
 
         // media_time: the pre-roll plus whatever of the first packet lies
@@ -496,13 +519,73 @@ impl Mp4File {
         self.write_file(r, &order, media_time, discard, tags, w)
     }
 
-    /// Writes `ftyp`, `moov` and `mdat` for the raw packets `order`, of
-    /// whose decoder output the first `media_time` and the last `discard`
-    /// samples are hidden.
+    /// The samples of an ALAC cut: kept frames verbatim, and each frame
+    /// that a cut point (or the source's edit list) cuts decoded and
+    /// rewritten as an uncompressed frame of exactly its kept samples.
+    fn alac_samples<R: Read + Seek + ?Sized>(
+        &self,
+        r: &mut R,
+        cookie: &[u8],
+        kept: &[&CutPlan],
+    ) -> Result<Vec<OutSample>> {
+        let cfg = alac::AlacConfig::parse(cookie)
+            .map_err(|e| malformed(0, &format!("sample description: {e}")))?;
+        let mut out = Vec::new();
+        for p in kept {
+            for e in p.packets.clone() {
+                let info = &self.index.packets()[e];
+                let raw_i = self.entry_raw[e];
+                let mut skip = u64::from(info.hidden_before);
+                let mut drop = u64::from(info.hidden_after);
+                if e == p.packets.start {
+                    skip += p.trim_start;
+                }
+                if e + 1 == p.packets.end {
+                    drop += p.trim_end;
+                }
+                if skip == 0 && drop == 0 {
+                    out.push(OutSample::Source(raw_i));
+                    continue;
+                }
+                let raw = &self.raw[raw_i];
+                let frame = alac::decode(&cfg, &read_raw(r, raw)?)
+                    .map_err(|err| malformed(raw.offset, &err.to_string()))?;
+                let len = frame.len() as u64;
+                if len != u64::from(raw.out) {
+                    return Err(malformed(
+                        raw.offset,
+                        "ALAC frame length differs from its sample duration",
+                    ));
+                }
+                let end = len
+                    .checked_sub(drop)
+                    .filter(|&end| end > skip)
+                    .ok_or_else(|| {
+                        ContainerError::InvalidPlan(format!("trims beyond packet {e}"))
+                    })?;
+                let data = frame.encode_escaped(&cfg, skip as usize..end as usize);
+                if u32::try_from(data.len()).is_err() {
+                    return Err(ContainerError::InvalidPlan(format!(
+                        "uncompressed frame of packet {e} too large"
+                    )));
+                }
+                out.push(OutSample::Rewritten {
+                    data,
+                    // At most one frame's length.
+                    out: (end - skip) as u32,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Writes `ftyp`, `moov` and `mdat` for `samples`, of whose decoder
+    /// output the first `media_time` and the last `discard` samples are
+    /// hidden.
     fn write_file<R, W>(
         &self,
         r: &mut R,
-        order: &[usize],
+        samples: &[OutSample],
         media_time: u64,
         discard: u64,
         tags: &Tags,
@@ -512,13 +595,25 @@ impl Mp4File {
         R: Read + Seek + ?Sized,
         W: Write + Seek + ?Sized,
     {
-        let packets: Vec<&RawPacket> = order.iter().map(|&i| &self.raw[i]).collect();
+        let sizes: Vec<u32> = samples
+            .iter()
+            .map(|s| match s {
+                OutSample::Source(i) => self.raw[*i].len,
+                // Fits: checked in `alac_samples`.
+                OutSample::Rewritten { data, .. } => data.len() as u32,
+            })
+            .collect();
         // Sample durations: the decoder output. For AAC, whose frames all
         // decode to the same length, the last one is shortened by the
-        // discarded tail, as ffmpeg writes it. An ALAC frame's duration is
-        // its real length (a reader takes it as such, see `parse_track`),
-        // so there only the edit list states the trim.
-        let mut durations: Vec<u32> = packets.iter().map(|p| p.out).collect();
+        // discarded tail, as ffmpeg writes it. ALAC cuts discard nothing:
+        // cut frames are rewritten to their kept length.
+        let mut durations: Vec<u32> = samples
+            .iter()
+            .map(|s| match s {
+                OutSample::Source(i) => self.raw[*i].out,
+                OutSample::Rewritten { out, .. } => *out,
+            })
+            .collect();
         let decoded: u64 = durations.iter().map(|&d| u64::from(d)).sum();
         if let (Some(d), Mp4Codec::Aac { .. }) = (durations.last_mut(), &self.codec) {
             // discard < out: the last packet keeps at least one sample.
@@ -526,12 +621,14 @@ impl Mp4File {
         }
         let media_duration: u64 = durations.iter().map(|&d| u64::from(d)).sum();
         let duration = decoded - media_time - discard;
-        let data_len: u64 = packets.iter().map(|p| u64::from(p.len)).sum();
+        let data_len: u64 = sizes.iter().map(|&s| u64::from(s)).sum();
         let udta = ilst::udta(&ilst::write(tags, &self.ilst_other));
+        let stsd = self.stsd_for(sizes.iter().copied().max().unwrap_or(0));
 
         let table = SampleTable {
+            stsd,
             durations: &durations,
-            sizes: packets.iter().map(|p| p.len).collect(),
+            sizes,
             media_time,
             duration,
             media_duration,
@@ -555,10 +652,36 @@ impl Mp4File {
             head.extend(b"mdat");
         }
         w.write_all(&head)?;
-        for p in packets {
-            w.write_all(&read_raw(r, p)?)?;
+        for s in samples {
+            match s {
+                OutSample::Source(i) => w.write_all(&read_raw(r, &self.raw[*i])?)?,
+                OutSample::Rewritten { data, .. } => w.write_all(data)?,
+            }
         }
         Ok(())
+    }
+
+    /// The source's `stsd` for an output whose largest sample has
+    /// `largest` bytes. An ALAC configuration states the largest frame of
+    /// the stream (0 for unknown); an uncompressed frame may exceed it, so
+    /// it is raised then, as decoders may size their buffers by it.
+    fn stsd_for(&self, largest: u32) -> Vec<u8> {
+        let mut stsd = self.stsd.clone();
+        let Mp4Codec::Alac { cookie } = &self.codec else {
+            return stsd;
+        };
+        let Ok(cfg) = alac::AlacConfig::parse(cookie) else {
+            return stsd;
+        };
+        if cfg.max_frame_bytes == 0 || cfg.max_frame_bytes >= largest {
+            return stsd;
+        }
+        // The cookie is the sample entry's `alac` box, verbatim.
+        if let Some(at) = stsd.windows(cookie.len()).position(|w| w == &cookie[..]) {
+            let field = at + alac::MAX_FRAME_BYTES_AT;
+            stsd[field..field + 4].copy_from_slice(&largest.to_be_bytes());
+        }
+        stsd
     }
 
     /// The `moov` box for `t`, with the media data starting at file offset
@@ -637,7 +760,7 @@ impl Mp4File {
         let mut dinf = Vec::new();
         boxes::put_full(&mut dinf, b"dref", 0, 0, &dref);
 
-        let mut stbl = self.stsd.clone();
+        let mut stbl = t.stsd.clone();
         // stts: runs of equal durations.
         let mut runs: Vec<(u32, u32)> = Vec::new();
         for &d in t.durations {
@@ -719,8 +842,18 @@ impl Mp4File {
     }
 }
 
+/// A sample of an output file.
+enum OutSample {
+    /// A raw packet of the source, copied verbatim.
+    Source(usize),
+    /// A rewritten ALAC frame and its decoder output in samples.
+    Rewritten { data: Vec<u8>, out: u32 },
+}
+
 /// What the sample table of an output file holds.
 struct SampleTable<'a> {
+    /// The `stsd` box, header included.
+    stsd: Vec<u8>,
     durations: &'a [u32],
     sizes: Vec<u32>,
     /// Edit list start, in samples.

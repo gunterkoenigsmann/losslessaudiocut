@@ -13,7 +13,9 @@
 //!    the source restricted to the plans' actual ranges, bit for bit,
 //!    except within [`join_window`] after each join: there the first AAC
 //!    frame overlaps (MDCT) with a frame that was not its predecessor.
-//!    ALAC frames are independent, so ALAC has no such window.
+//!    ALAC frames are independent, so ALAC has no such window; frames cut
+//!    by a cut point are rewritten uncompressed, so ALAC cuts are
+//!    sample-exact at joins too.
 //! 3. ffmpeg honours the edit list's start. Whether it honours its end
 //!    depends on the version: ffmpeg 6.1 decodes the last frame whole, so
 //!    its output is our planned length plus the hidden tail of the last
@@ -38,23 +40,32 @@ mod common;
 use std::io::Cursor;
 use std::ops::Range;
 
-use common::{ffmpeg_decode, fixture, temp_file};
-use lac_container::mp4::{Mp4Codec, Mp4File};
+use common::{ffmpeg_decode, ffmpeg_decode_with, fixture, temp_file};
+use lac_container::mp4::{Mp4Codec, Mp4File, alac};
 use lac_core::{CutPlan, EditList, SourceId, Tags, plan_cuts};
 use proptest::prelude::*;
 
 /// Fixtures: (name, sample rate, channels, length in samples). With an
 /// edit list the length is exactly the encoder's input; without one it
 /// includes the 1024 priming samples.
-const FIXTURES: [(&str, u32, u16, u64); 8] = [
+const FIXTURES: [(&str, u32, u16, u64); 9] = [
     ("mp4_aac_stereo_44k.m4a", 44_100, 2, 66_150),
     ("mp4_aac_mono_48k.m4a", 48_000, 1, 48_000),
     ("mp4_aac_noedit_22k.m4a", 22_050, 2, 22_050 + 1024),
     ("mp4_aac_with_video.mp4", 48_000, 1, 48_000),
     ("mp4_alac_stereo16_44k.m4a", 44_100, 2, 33_075),
     ("mp4_alac_mono24_48k.m4a", 48_000, 1, 24_000),
+    ("mp4_alac_stereo24_44k.m4a", 44_100, 2, 17_640),
     ("mp4_aac_fragmented_44k.m4a", 44_100, 2, 66_150 + 1024),
     ("mp4_alac_fragmented_48k.m4a", 48_000, 1, 24_000),
+];
+
+/// The ALAC fixtures.
+const ALAC_FIXTURES: [&str; 4] = [
+    "mp4_alac_stereo16_44k.m4a",
+    "mp4_alac_stereo24_44k.m4a",
+    "mp4_alac_mono24_48k.m4a",
+    "mp4_alac_fragmented_48k.m4a",
 ];
 
 /// The largest decoder output of one sample: an AAC-LC frame always
@@ -116,21 +127,66 @@ fn payloads(f: &Mp4File, bytes: &[u8], entries: impl Iterator<Item = usize>) -> 
         .collect()
 }
 
-/// Checks oracle 1 and returns the re-opened output.
+/// Checks oracle 1 and returns the re-opened output. ALAC frames that a
+/// cut point cuts are rewritten (uncompressed, issue #75): those must
+/// decode to exactly the kept part of the source frame.
 fn assert_samples_copied(src: &[u8], out: &[u8], plans: &[CutPlan]) -> Mp4File {
     let f = open(src);
     let o = open(out);
     assert!(o.warnings().is_empty(), "{:?}", o.warnings());
     assert_eq!(o.other_tracks(), 0);
-    assert_eq!(o.codec(), f.codec());
+    match (o.codec(), f.codec()) {
+        (Mp4Codec::Alac { cookie: a }, Mp4Codec::Alac { cookie: b }) => {
+            // Rewritten frames may raise the largest frame size, and only
+            // that (`maxFrameBytes`).
+            let at = alac::MAX_FRAME_BYTES_AT;
+            assert_eq!(a[..at], b[..at]);
+            assert_eq!(a[at + 4..], b[at + 4..]);
+            let max = |c: &[u8]| u32::from_be_bytes(c[at..at + 4].try_into().expect("4 bytes"));
+            assert!(max(a) >= max(b));
+        }
+        (a, b) => assert_eq!(a, b),
+    }
     assert_eq!(o.index().info(), f.index().info());
-    let want: Vec<_> = plans
-        .iter()
-        .flat_map(|p| payloads(&f, src, p.packets.clone()))
-        .collect();
+    let alac_cfg = match f.codec() {
+        Mp4Codec::Alac { cookie } => Some(alac::AlacConfig::parse(cookie).expect("config")),
+        Mp4Codec::Aac { .. } => None,
+    };
     let got = payloads(&o, out, 0..o.index().packets().len());
-    assert_eq!(got.len(), want.len(), "sample count");
-    assert!(got == want, "sample payloads differ");
+    let mut k = 0;
+    for p in plans {
+        for e in p.packets.clone() {
+            let want = payloads(&f, src, e..e + 1).remove(0);
+            let g = got
+                .get(k)
+                .unwrap_or_else(|| panic!("output ends before packet {e}"));
+            k += 1;
+            let info = &f.index().packets()[e];
+            let mut skip = u64::from(info.hidden_before);
+            let mut drop = u64::from(info.hidden_after);
+            if e == p.packets.start {
+                skip += p.trim_start;
+            }
+            if e + 1 == p.packets.end {
+                drop += p.trim_end;
+            }
+            match &alac_cfg {
+                Some(cfg) if skip > 0 || drop > 0 => {
+                    let a = alac::decode(cfg, &want).expect("source frame");
+                    let b = alac::decode(cfg, g).expect("rewritten frame");
+                    let (skip, end) = (skip as usize, a.len() - drop as usize);
+                    assert_eq!(b.len(), end - skip, "packet {e}");
+                    for (x, y) in a.elements.iter().zip(&b.elements) {
+                        for (cx, cy) in x.channels.iter().zip(&y.channels) {
+                            assert!(cx[skip..end] == cy[..], "packet {e}: samples differ");
+                        }
+                    }
+                }
+                _ => assert!(*g == want, "packet {e}: payload differs"),
+            }
+        }
+    }
+    assert_eq!(k, got.len(), "sample count");
     let len: u64 = plans.iter().map(CutPlan::output_len).sum();
     assert_eq!(o.index().total_samples(), len, "length");
     o
@@ -322,6 +378,47 @@ fn fragments_hold_the_same_samples_as_a_sample_table() {
     assert!(plain == frag, "sample payloads differ");
 }
 
+/// Our ALAC decoder (used to rewrite boundary frames, issue #75) decodes
+/// every frame of every ALAC fixture exactly like ffmpeg's.
+#[test]
+fn alac_decoder_matches_ffmpeg() {
+    for name in ALAC_FIXTURES {
+        let src = fixture(name);
+        let f = open(&src);
+        let Mp4Codec::Alac { cookie } = f.codec() else {
+            panic!("{name} is not ALAC");
+        };
+        let cfg = alac::AlacConfig::parse(cookie).expect("config");
+        let mut r = Cursor::new(&src);
+        let sections = f.decode_sections(&mut r).expect("sections");
+        let mut ours: Vec<i32> = Vec::new();
+        for i in 0..sections[0].packet_ends.len() {
+            let packet = f.read_decode_packet(&mut r, 0, i).expect("packet");
+            let frame = alac::decode(&cfg, &packet).expect("decodes");
+            let channels: Vec<&Vec<i32>> =
+                frame.elements.iter().flat_map(|e| &e.channels).collect();
+            for s in 0..frame.len() {
+                // ffmpeg's s32 output holds the samples' top bits.
+                ours.extend(channels.iter().map(|c| c[s] << (32 - cfg.bit_depth)));
+            }
+        }
+        let path = temp_file(&format!("alac-{name}"), &src);
+        let Some(d) = ffmpeg_decode_with(&path, "s32le", &["-ignore_editlist", "1"]) else {
+            return;
+        };
+        let theirs: Vec<i32> = d
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&b| i32::from_le_bytes(b))
+            .collect();
+        assert_eq!(ours.len(), theirs.len(), "{name}");
+        if let Some(i) = (0..ours.len()).find(|&i| ours[i] != theirs[i]) {
+            panic!("{name}: sample {i} differs: {} vs {}", ours[i], theirs[i]);
+        }
+    }
+}
+
 // ------------------------------------------------------------ cutting
 
 #[test]
@@ -369,6 +466,35 @@ fn deletes_join_in_one_stream() {
         assert_eq!(p[2].actual.end, len, "{name}");
         let out = write(&src, &f, &p);
         assert_samples_copied(&src, &out, &p);
+        assert_decodes_like_source(name, &src, &out, &p);
+    }
+}
+
+/// ALAC joins are sample-exact (issue #75): frames that a cut point cuts
+/// are rewritten uncompressed, so every range is kept exactly, at the
+/// file's ends and at joins, in any order, and ffmpeg plays exactly the
+/// kept samples.
+#[test]
+fn alac_joins_are_sample_exact() {
+    for name in ALAC_FIXTURES {
+        let src = fixture(name);
+        let f = open(&src);
+        let len = f.index().total_samples();
+        let ranges = [
+            1_001..5_003,
+            len / 2..len / 2 + 1,
+            7_777..len - 333,
+            17..4_096,
+            4_095..4_097,
+        ];
+        let p = plans(&f, &ranges);
+        for (plan, r) in p.iter().zip(&ranges) {
+            assert!(plan.is_exact(r), "{name}: {r:?} {plan:?}");
+        }
+        let out = write(&src, &f, &p);
+        let o = assert_samples_copied(&src, &out, &p);
+        let want: u64 = ranges.iter().map(|r| r.end - r.start).sum();
+        assert_eq!(o.index().total_samples(), want, "{name}");
         assert_decodes_like_source(name, &src, &out, &p);
     }
 }
