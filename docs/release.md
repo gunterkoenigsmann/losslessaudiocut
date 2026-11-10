@@ -111,7 +111,11 @@ development version such as `0.1.0-dev.20261104.b46df06`.
    git push origin vX.Y.Z
    ```
    A tag that does not match `Cargo.toml` fails the workflow before
-   anything is built.
+   anything is built. The `v` must be lowercase: a tag such as `V1.0.0`
+   does not start the workflow at all. Push the tag from the command
+   line; GitHub's web interface only creates tags together with a
+   release, and a release that exists before the workflow runs keeps its
+   own text instead of the notes below.
 3. The workflow creates the GitHub release with notes generated from the
    merged pull requests. Hand-written notes (highlights, known
    limitations) go into `docs/release-notes/vX.Y.Z.md`, best in the
