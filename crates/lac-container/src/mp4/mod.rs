@@ -14,7 +14,15 @@
 //! the file (`stco`/`co64` chunk offsets plus `stsc`, which maps chunks to
 //! samples). Only the first audio track is used; other tracks (video,
 //! chapters as text tracks, ...) are ignored with a warning and not
-//! written. Fragmented files (`moof`) are not supported yet.
+//! written.
+//!
+//! Fragmented files, as recorders and streaming tools write them so that
+//! an interrupted recording stays readable, add samples after `moov` in
+//! movie fragments (ISO/IEC 14496-12 8.8): each `moof` holds a `traf` per
+//! track whose `trun` boxes list further samples (sizes, durations, a data
+//! offset), with defaults from the track's `trex` (in `moov/mvex`) and the
+//! fragment's `tfhd`. They are appended to the samples of the `moov`
+//! sample table, which is often empty. Cuts are written unfragmented.
 //!
 //! ## Timeline
 //!
@@ -161,6 +169,9 @@ impl Mp4File {
         let mut warnings = Vec::new();
         let mut ftyp = None;
         let mut moov = None;
+        // Movie fragments: (file offset of the moof box, its payload).
+        let mut fragments: Vec<(u64, Vec<u8>)> = Vec::new();
+        let mut fragment_bytes = 0u64;
         let mut pos = 0u64;
         while pos + 8 <= len {
             let mut head = [0u8; 16];
@@ -197,10 +208,16 @@ impl Mp4File {
                     read_exact_at(r, pos + hlen as u64, &mut b)?;
                     moov = Some(b);
                 }
-                b"moof" => {
-                    return Err(ContainerError::Unsupported(
-                        "fragmented MP4 (moof boxes)".into(),
-                    ));
+                b"moof" if end <= len => {
+                    // Fragments hold the sample tables of the rest of the
+                    // file, so they share moov's bound.
+                    fragment_bytes += size;
+                    if fragment_bytes > MAX_MOOV {
+                        return Err(malformed(pos, "implausibly large movie fragments"));
+                    }
+                    let mut b = vec![0u8; (size - hlen as u64) as usize];
+                    read_exact_at(r, pos + hlen as u64, &mut b)?;
+                    fragments.push((pos, b));
                 }
                 _ => {}
             }
@@ -228,7 +245,17 @@ impl Mp4File {
                 other_tracks += 1;
                 continue;
             }
-            track = Some(parse_track(trak, movie_timescale, len, &mut warnings)?);
+            let frag = Fragments {
+                moofs: &fragments,
+                defaults: parse_trex(&moov),
+            };
+            track = Some(parse_track(
+                trak,
+                movie_timescale,
+                &frag,
+                len,
+                &mut warnings,
+            )?);
         }
         let t = track.ok_or_else(|| {
             ContainerError::Unsupported("no audio track found in the MP4 file".into())
@@ -731,10 +758,12 @@ fn parse_mvhd_timescale(b: &[u8]) -> Option<u32> {
     r.u32().filter(|&t| t > 0)
 }
 
-/// Parses an audio `trak` box.
+/// Parses an audio `trak` box, with its samples in the movie fragments
+/// `frag`.
 fn parse_track(
     trak: BoxRef,
     movie_timescale: u32,
+    frag: &Fragments,
     file_len: u64,
     warnings: &mut Vec<String>,
 ) -> Result<Track> {
@@ -779,10 +808,10 @@ fn parse_track(
     .ok_or_else(|| at("missing or invalid chunk offsets"))?;
     let stsc = parse_stsc(get(b"stsc").ok_or_else(|| at("no stsc box"))?)
         .ok_or_else(|| at("invalid stsc box"))?;
+    let several_descriptions =
+        || ContainerError::Unsupported("MP4 track with several sample descriptions".into());
     if stsc.iter().any(|e| e.2 != 1) {
-        return Err(ContainerError::Unsupported(
-            "MP4 track with several sample descriptions".into(),
-        ));
+        return Err(several_descriptions());
     }
 
     // Each sample's file offset: chunk offset plus the sizes before it.
@@ -818,6 +847,39 @@ fn parse_track(
             "the chunk table covers only {} of {count} samples",
             offsets.len()
         ));
+        count = offsets.len();
+    }
+    let (mut sizes, mut durations) = (sizes, durations);
+    sizes.truncate(count);
+    durations.truncate(count);
+    offsets.truncate(count);
+
+    // Samples in movie fragments follow those of the sample table.
+    if !frag.moofs.is_empty() {
+        let track_id = boxes::find(trak.body, b"tkhd")
+            .and_then(|b| parse_tkhd_track_id(b.body))
+            .ok_or_else(|| at("invalid tkhd box"))?;
+        let mut samples = Vec::new();
+        for (i, (moof_pos, moof)) in frag.moofs.iter().enumerate() {
+            let budget = max_samples.saturating_sub(count + samples.len());
+            match parse_moof(moof, *moof_pos, track_id, &frag.defaults, budget) {
+                Ok(s) => samples.extend(s),
+                Err(FragmentError::SeveralDescriptions) => return Err(several_descriptions()),
+                Err(FragmentError::Invalid) => {
+                    warnings.push(format!(
+                        "ignoring damaged movie fragments from byte {moof_pos} on ({} of {})",
+                        frag.moofs.len() - i,
+                        frag.moofs.len()
+                    ));
+                    break;
+                }
+            }
+        }
+        for s in samples {
+            offsets.push(s.offset);
+            sizes.push(s.size);
+            durations.push(s.duration);
+        }
         count = offsets.len();
     }
 
@@ -897,6 +959,194 @@ fn parse_track(
         raw,
         audible,
     })
+}
+
+/// The movie fragments of a file and the sample defaults they start from.
+struct Fragments<'a> {
+    /// Each `moof` box: its file offset and payload.
+    moofs: &'a [(u64, Vec<u8>)],
+    /// `trex` defaults by track ID.
+    defaults: Vec<(u32, SampleDefaults)>,
+}
+
+/// Defaults for the samples of a track fragment (`trex`, ISO/IEC 14496-12
+/// 8.8.3, overridden by `tfhd`, 8.8.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SampleDefaults {
+    description: u32,
+    duration: u32,
+    size: u32,
+}
+
+impl Default for SampleDefaults {
+    /// What a track without `trex` gets: the first sample description and
+    /// no duration or size (each `trun` must then give them).
+    fn default() -> Self {
+        Self {
+            description: 1,
+            duration: 0,
+            size: 0,
+        }
+    }
+}
+
+/// A sample found in a movie fragment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FragmentSample {
+    offset: u64,
+    size: u32,
+    duration: u32,
+}
+
+/// Why a fragment's samples could not be listed.
+#[derive(Debug, PartialEq, Eq)]
+enum FragmentError {
+    /// A box is too short, or holds more samples than the file can.
+    Invalid,
+    /// The samples use another sample description than the first.
+    SeveralDescriptions,
+}
+
+/// The `trex` boxes of `moov/mvex`: sample defaults by track ID.
+fn parse_trex(moov: &[u8]) -> Vec<(u32, SampleDefaults)> {
+    let Some(mvex) = boxes::find(moov, b"mvex") else {
+        return Vec::new();
+    };
+    boxes::Boxes::new(mvex.body)
+        .filter(|b| &b.kind == b"trex")
+        .filter_map(|b| {
+            let mut r = Reader::new(b.body);
+            r.u32()?; // version and flags
+            let id = r.u32()?;
+            let description = r.u32()?;
+            let duration = r.u32()?;
+            let size = r.u32()?;
+            Some((
+                id,
+                SampleDefaults {
+                    description,
+                    duration,
+                    size,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// The track ID from a `tkhd` body (ISO/IEC 14496-12 8.3.2).
+fn parse_tkhd_track_id(b: &[u8]) -> Option<u32> {
+    let mut r = Reader::new(b);
+    let version = r.u8()?;
+    r.bytes(3)?;
+    // Creation and modification time.
+    r.bytes(if version == 1 { 16 } else { 8 })?;
+    r.u32()
+}
+
+/// The samples of track `track_id` in the `moof` payload `moof`, whose box
+/// starts at file offset `moof_pos`; at most `max` of them. Each `traf`
+/// (ISO/IEC 14496-12 8.8.6) takes its defaults from `tfhd`, falling back
+/// to the track's `trex`, and lists samples in `trun` boxes (8.8.8).
+fn parse_moof(
+    moof: &[u8],
+    moof_pos: u64,
+    track_id: u32,
+    trex: &[(u32, SampleDefaults)],
+    max: usize,
+) -> std::result::Result<Vec<FragmentSample>, FragmentError> {
+    use FragmentError::Invalid;
+    let mut out = Vec::new();
+    // 8.8.7.1: without an explicit base, the first traf's data starts at
+    // the moof box and each further traf's where the previous one's ends.
+    let mut previous_end = moof_pos;
+    for traf in boxes::Boxes::new(moof).filter(|b| &b.kind == b"traf") {
+        let tfhd = boxes::find(traf.body, b"tfhd").ok_or(Invalid)?;
+        let mut r = Reader::new(tfhd.body);
+        let flags = r.u32().ok_or(Invalid)? & 0xFF_FFFF;
+        let id = r.u32().ok_or(Invalid)?;
+        let mut d = trex
+            .iter()
+            .find(|t| t.0 == id)
+            .map_or_else(SampleDefaults::default, |t| t.1);
+        let base = if flags & 0x01 != 0 {
+            r.u64().ok_or(Invalid)?
+        } else if flags & 0x2_0000 != 0 {
+            // default-base-is-moof
+            moof_pos
+        } else {
+            previous_end
+        };
+        if flags & 0x02 != 0 {
+            d.description = r.u32().ok_or(Invalid)?;
+        }
+        if flags & 0x08 != 0 {
+            d.duration = r.u32().ok_or(Invalid)?;
+        }
+        if flags & 0x10 != 0 {
+            d.size = r.u32().ok_or(Invalid)?;
+        }
+        // 0x20 (default sample flags) and 0x1_0000 (duration-is-empty,
+        // which comes without trun boxes) need no handling.
+
+        let mine = id == track_id;
+        if mine && d.description != 1 {
+            return Err(FragmentError::SeveralDescriptions);
+        }
+        let mut data = base;
+        for trun in boxes::Boxes::new(traf.body).filter(|b| &b.kind == b"trun") {
+            let mut r = Reader::new(trun.body);
+            let flags = r.u32().ok_or(Invalid)? & 0xFF_FFFF;
+            let n = r.u32().ok_or(Invalid)? as usize;
+            if flags & 0x01 != 0 {
+                // Signed, relative to the base; without it a run's data
+                // follows the previous run's.
+                let rel = i64::from(r.u32().ok_or(Invalid)? as i32);
+                data = base.checked_add_signed(rel).ok_or(Invalid)?;
+            }
+            if flags & 0x04 != 0 {
+                r.u32().ok_or(Invalid)?; // first sample flags
+            }
+            if mine && out.len().saturating_add(n) > max {
+                return Err(Invalid);
+            }
+            for _ in 0..n {
+                let duration = if flags & 0x100 != 0 {
+                    r.u32().ok_or(Invalid)?
+                } else {
+                    d.duration
+                };
+                let size = if flags & 0x200 != 0 {
+                    r.u32().ok_or(Invalid)?
+                } else {
+                    d.size
+                };
+                if flags & 0x400 != 0 {
+                    r.u32().ok_or(Invalid)?; // sample flags
+                }
+                if flags & 0x800 != 0 {
+                    r.u32().ok_or(Invalid)?; // composition time offset
+                }
+                if mine {
+                    out.push(FragmentSample {
+                        offset: data,
+                        size,
+                        duration,
+                    });
+                }
+                data = data.checked_add(u64::from(size)).ok_or(Invalid)?;
+                if !mine && flags & 0xF00 == 0 {
+                    // Another track's run without per-sample fields: its
+                    // end is known without walking (maybe 2^32) samples.
+                    data = data
+                        .checked_add(u64::from(size) * (n as u64 - 1))
+                        .ok_or(Invalid)?;
+                    break;
+                }
+            }
+        }
+        previous_end = data;
+    }
+    Ok(out)
 }
 
 /// Parses an `stsd` body: the codec and channel count of its first entry.
@@ -1275,5 +1525,114 @@ mod tests {
         elst.extend([0, 0, 0, 10, 0xFF, 0xFF, 0xFF, 0xFF, 0, 1, 0, 0]);
         elst.extend([0, 0, 5, 0xDC, 0, 0, 4, 0, 0, 1, 0, 0]);
         assert_eq!(parse_elst(&elst), Some(vec![(10, -1), (1500, 1024)]));
+    }
+
+    /// A `tfhd` body: flags, track ID and the optional fields in order.
+    fn tfhd(flags: u32, id: u32, fields: &[u32]) -> Vec<u8> {
+        let mut b = flags.to_be_bytes().to_vec();
+        b.extend(id.to_be_bytes());
+        fields.iter().for_each(|f| b.extend(f.to_be_bytes()));
+        let mut out = Vec::new();
+        boxes::put(&mut out, b"tfhd", &b);
+        out
+    }
+
+    /// A `trun` box: flags, sample count and the remaining fields.
+    fn trun(flags: u32, count: u32, fields: &[u32]) -> Vec<u8> {
+        let mut b = flags.to_be_bytes().to_vec();
+        b.extend(count.to_be_bytes());
+        fields.iter().for_each(|f| b.extend(f.to_be_bytes()));
+        let mut out = Vec::new();
+        boxes::put(&mut out, b"trun", &b);
+        out
+    }
+
+    fn traf(children: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = Vec::new();
+        boxes::put(&mut out, b"traf", &children.concat());
+        out
+    }
+
+    fn sample(offset: u64, size: u32, duration: u32) -> FragmentSample {
+        FragmentSample {
+            offset,
+            size,
+            duration,
+        }
+    }
+
+    /// ISO/IEC 14496-12 8.8.7.1: without a base offset, the first traf's
+    /// data starts at the moof box, a further traf's where the previous
+    /// one's ends, and a trun without data offset follows the previous run.
+    #[test]
+    fn fragment_data_offsets_chain() {
+        let trex = [(
+            2,
+            SampleDefaults {
+                description: 1,
+                duration: 1024,
+                size: 0,
+            },
+        )];
+        let moof = [
+            // Track 1 (video, say): 3 samples of 100 bytes from moof + 50.
+            traf(&[tfhd(0x10, 1, &[100]), trun(0x01, 3, &[50])]),
+            // Track 2: two runs, the second continuing the first; the
+            // durations come from trex, the sizes from the runs.
+            traf(&[
+                tfhd(0, 2, &[]),
+                trun(0x200, 2, &[10, 20]),
+                trun(0x300, 1, &[512, 7]),
+            ]),
+        ]
+        .concat();
+        let got = parse_moof(&moof, 1000, 2, &trex, 100).expect("valid");
+        assert_eq!(
+            got,
+            [
+                sample(1350, 10, 1024),
+                sample(1360, 20, 1024),
+                sample(1380, 7, 512)
+            ]
+        );
+        // An explicit base, and default-base-is-moof with a negative data
+        // offset (data before the moof box).
+        let moof = traf(&[tfhd(0x01 | 0x10, 2, &[0, 5000, 4]), trun(0, 2, &[])]);
+        let got = parse_moof(&moof, 1000, 2, &trex, 100).expect("valid");
+        assert_eq!(got, [sample(5000, 4, 1024), sample(5004, 4, 1024)]);
+        let moof = traf(&[tfhd(0x2_0000, 2, &[]), trun(0x201, 1, &[-200i32 as u32, 9])]);
+        let got = parse_moof(&moof, 1000, 2, &trex, 100).expect("valid");
+        assert_eq!(got, [sample(800, 9, 1024)]);
+    }
+
+    /// Damage is an error, never a panic or a huge allocation.
+    #[test]
+    fn damaged_fragments_are_refused() {
+        let trex = [(1, SampleDefaults::default())];
+        let moof = traf(&[tfhd(0x10, 1, &[100]), trun(0x300, 3, &[1, 2, 3, 4])]);
+        for n in 0..moof.len() {
+            // A cut-off box ends the box iteration early, which may just
+            // lose samples; it must never panic.
+            let _ = parse_moof(&moof[..n], 0, 1, &trex, 100);
+        }
+        assert_eq!(
+            parse_moof(&moof, 0, 1, &trex, 100),
+            Err(FragmentError::Invalid)
+        );
+        // 2^32 - 1 samples without per-sample fields: beyond the budget
+        // for the audio track, skipped in one step for another track.
+        let huge = traf(&[tfhd(0x10, 1, &[100]), trun(0, u32::MAX, &[])]);
+        assert_eq!(
+            parse_moof(&huge, 0, 1, &trex, 1000),
+            Err(FragmentError::Invalid)
+        );
+        assert_eq!(parse_moof(&huge, 0, 2, &trex, 1000), Ok(Vec::new()));
+        // Another sample description than the first.
+        let other = traf(&[tfhd(0x02, 1, &[2]), trun(0, 0, &[])]);
+        assert_eq!(
+            parse_moof(&other, 0, 1, &trex, 10),
+            Err(FragmentError::SeveralDescriptions)
+        );
+        assert_eq!(parse_moof(&other, 0, 3, &trex, 10), Ok(Vec::new()));
     }
 }

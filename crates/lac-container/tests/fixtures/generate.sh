@@ -122,6 +122,18 @@ $og -i "$tmp/la.wav" -fflags +bitexact -c:a alac mp4_alac_stereo16_44k.m4a
 $synth "$tmp/lb.wav" 48000 1 24 0.5
 $og -i "$tmp/lb.wav" -fflags +bitexact -c:a alac mp4_alac_mono24_48k.m4a
 
+# Fragmented MP4, as recorders write it so that an interrupted recording
+# stays readable: AAC with an empty moov and 200 ms fragments whose data
+# offsets count from the moof box (no edit list, so the priming samples
+# are part of the timeline), and ALAC whose first samples are in moov's
+# sample table and the rest in 150 ms fragments with explicit base
+# offsets.
+$og -i "$tmp/ma.wav" $ma -b:a 128k \
+    -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 200000 \
+    mp4_aac_fragmented_44k.m4a
+$og -i "$tmp/lb.wav" -fflags +bitexact -c:a alac -movflags frag_keyframe \
+    -frag_duration 150000 mp4_alac_fragmented_48k.m4a
+
 # Raw AC-3, encoded by ffmpeg's native (fixed-point) AC-3 encoder: stereo
 # 2/0 at 44.1 kHz (frame sizes alternate between 834 and 836 bytes),
 # 5.1 (3/2 + LFE) at 48 kHz and mono at 32 kHz.

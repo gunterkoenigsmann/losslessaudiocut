@@ -1,8 +1,9 @@
 //! Tests of the MP4 demuxer and muxer with AAC and ALAC.
 //!
 //! Fixtures come from `tests/fixtures/generate.sh` (ffmpeg's AAC-LC
-//! encoder: moov after and before mdat, without an edit list, and with a
-//! video track; ffmpeg's ALAC encoder at 16 and 24 bit).
+//! encoder: moov after and before mdat, without an edit list, with a
+//! video track, and fragmented; ffmpeg's ALAC encoder at 16 and 24 bit,
+//! and fragmented).
 //!
 //! Oracles:
 //! 1. Samples are copied verbatim: re-opening the output with our demuxer
@@ -45,13 +46,15 @@ use proptest::prelude::*;
 /// Fixtures: (name, sample rate, channels, length in samples). With an
 /// edit list the length is exactly the encoder's input; without one it
 /// includes the 1024 priming samples.
-const FIXTURES: [(&str, u32, u16, u64); 6] = [
+const FIXTURES: [(&str, u32, u16, u64); 8] = [
     ("mp4_aac_stereo_44k.m4a", 44_100, 2, 66_150),
     ("mp4_aac_mono_48k.m4a", 48_000, 1, 48_000),
     ("mp4_aac_noedit_22k.m4a", 22_050, 2, 22_050 + 1024),
     ("mp4_aac_with_video.mp4", 48_000, 1, 48_000),
     ("mp4_alac_stereo16_44k.m4a", 44_100, 2, 33_075),
     ("mp4_alac_mono24_48k.m4a", 48_000, 1, 24_000),
+    ("mp4_aac_fragmented_44k.m4a", 44_100, 2, 66_150 + 1024),
+    ("mp4_alac_fragmented_48k.m4a", 48_000, 1, 24_000),
 ];
 
 /// The largest decoder output of one sample: an AAC-LC frame always
@@ -274,6 +277,49 @@ fn truncated_and_damaged_files_do_not_panic() {
     // moov after mdat: a file cut short loses it, which is an error.
     let src = fixture("mp4_aac_stereo_44k.m4a");
     assert!(Mp4File::open(&mut Cursor::new(&src[..src.len() / 2])).is_err());
+}
+
+/// A recording that was interrupted while it was written in fragments
+/// keeps every complete fragment (the reason recorders fragment).
+#[test]
+fn interrupted_fragmented_recording_opens() {
+    for name in ["mp4_aac_fragmented_44k.m4a", "mp4_alac_fragmented_48k.m4a"] {
+        let src = fixture(name);
+        let full = open(&src).index().total_samples();
+        let mut last = 0;
+        for cut in [src.len() / 2, src.len() * 3 / 4, src.len() - 300] {
+            let f = Mp4File::open(&mut Cursor::new(&src[..cut])).expect("opens");
+            let len = f.index().total_samples();
+            assert!(last < len && len < full, "{name} {cut}: {len}");
+            assert!(!f.warnings().is_empty(), "{name} {cut}");
+            last = len;
+            // What is left cuts like any file.
+            let truncated = &src[..cut];
+            let p = plans(&f, &[100..len - 100]);
+            let out = write(truncated, &f, &p);
+            assert_samples_copied(truncated, &out, &p);
+        }
+    }
+}
+
+/// Fragments read the same samples as the sample table of an unfragmented
+/// file with the same content: the AAC fixtures share their input and
+/// encoder settings, so their samples agree one for one (the timelines
+/// differ: only the unfragmented file hides the priming by an edit list).
+#[test]
+fn fragments_hold_the_same_samples_as_a_sample_table() {
+    let all = |bytes: &[u8]| -> Vec<Vec<u8>> {
+        let f = open(bytes);
+        let mut r = Cursor::new(bytes);
+        let sections = f.decode_sections(&mut r).expect("sections");
+        (0..sections[0].packet_ends.len())
+            .map(|i| f.read_decode_packet(&mut r, 0, i).expect("sample"))
+            .collect()
+    };
+    let plain = all(&fixture("mp4_aac_stereo_44k.m4a"));
+    let frag = all(&fixture("mp4_aac_fragmented_44k.m4a"));
+    assert_eq!(plain.len(), frag.len());
+    assert!(plain == frag, "sample payloads differ");
 }
 
 // ------------------------------------------------------------ cutting

@@ -72,7 +72,7 @@ fn ffmpeg_file(path: &Path) -> Option<Vec<f32>> {
 }
 
 /// Fixtures whose timeline ffmpeg reproduces exactly.
-const EXACT: [&str; 29] = [
+const EXACT: [&str; 30] = [
     "adts_aac_stereo_44k.aac",
     "adts_aac_mono_22k.aac",
     "ac3_stereo_44k.ac3",
@@ -80,6 +80,7 @@ const EXACT: [&str; 29] = [
     "ac3_mono_32k.ac3",
     "mp4_alac_stereo16_44k.m4a",
     "mp4_alac_mono24_48k.m4a",
+    "mp4_alac_fragmented_48k.m4a",
     "aiff_s16_44k.aiff",
     "aiff_s24_48k_mono.aif",
     "aifc_sowt_22k.aifc",
@@ -207,11 +208,12 @@ fn mp4_decodes_like_ffmpeg_up_to_its_untrimmed_end() {
 }
 
 /// The MP4 fixtures without perceptual noise substitution.
-const MP4: [&str; 4] = [
+const MP4: [&str; 5] = [
     "mp4_aac_stereo_44k.m4a",
     "mp4_aac_mono_48k.m4a",
     "mp4_aac_noedit_22k.m4a",
     "mp4_aac_with_video.mp4",
+    "mp4_aac_fragmented_44k.m4a",
 ];
 
 /// Files where our timeline deliberately differs from ffmpeg's (random
@@ -289,7 +291,7 @@ fn sink_can_stop_decoding() {
 }
 
 /// Every fixture with its chained and damaged variants.
-const ALL: [&str; 42] = [
+const ALL: [&str; 44] = [
     "adts_aac_stereo_44k.aac",
     "adts_aac_mono_22k.aac",
     "ac3_stereo_44k.ac3",
@@ -301,6 +303,8 @@ const ALL: [&str; 42] = [
     "mp4_aac_mono_48k.m4a",
     "mp4_aac_noedit_22k.m4a",
     "mp4_aac_with_video.mp4",
+    "mp4_aac_fragmented_44k.m4a",
+    "mp4_alac_fragmented_48k.m4a",
     "aiff_s16_44k.aiff",
     "aiff_s24_48k_mono.aif",
     "aifc_sowt_22k.aifc",
