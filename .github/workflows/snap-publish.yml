@@ -60,7 +60,8 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.targets) }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    # As long as in snap.yml: Snap Store downloads can be slow.
+    timeout-minutes: 180
     env:
       # Secrets cannot be used in `if:` directly; an env var can.
       SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}

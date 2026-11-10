@@ -36,9 +36,12 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     # The build runs in a fresh LXD container without any cache: Rust
-    # toolchain, all crates and wxWidgets from source. Generous on purpose,
-    # so only a real hang hits it.
-    timeout-minutes: 90
+    # toolchain, all crates and wxWidgets from source. A good run takes
+    # about 40 minutes, but downloads from the Snap Store (LXD, the GNOME
+    # SDK) are sometimes slow from GitHub's runners and add an hour or
+    # more (2026-11-10: every run hit the former 90-minute limit). So the
+    # limit only catches a real hang.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
       - uses: snapcore/action-build@v1
