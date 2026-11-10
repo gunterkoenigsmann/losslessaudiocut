@@ -85,7 +85,7 @@ jobs:
         id: build
       - name: Upload snap as artifact
         if: steps.check.outputs.build == 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: snap-${{ matrix.channel }}-${{ matrix.arch }}
           path: ${{ steps.build.outputs.snap }}

@@ -57,6 +57,7 @@ pub mod appearance;
 pub mod autosave;
 pub mod chapters;
 pub mod context_menu;
+pub mod control_surface;
 pub mod detail;
 pub mod detector_settings;
 pub mod editor;
