@@ -48,17 +48,20 @@ jobs:
             echo "::notice::No GitHub release yet; publishing edge only."
           fi
           targets="$targets]"
+          # Every channel for every architecture, each on a native runner.
+          targets="$(jq -c '[.[] | (. + {arch: "amd64", runner: "ubuntu-latest"}), (. + {arch: "arm64", runner: "ubuntu-24.04-arm"})]' <<< "$targets")"
           echo "targets=$targets" >> "$GITHUB_OUTPUT"
 
   publish:
-    name: ${{ matrix.channel }}
+    name: ${{ matrix.channel }} (${{ matrix.arch }})
     needs: plan
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.targets) }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
+    runs-on: ${{ matrix.runner }}
+    # As long as in snap.yml: Snap Store downloads can be slow.
+    timeout-minutes: 180
     env:
       # Secrets cannot be used in `if:` directly; an env var can.
       SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
@@ -66,20 +69,33 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ matrix.ref }}
+      # A release older than the arm64 platform has no arm64 recipe; its
+      # stable snap stays amd64-only until the next release.
+      - name: Check the platform
+        id: check
+        run: |
+          if grep -qE '^  ${{ matrix.arch }}:' snap/snapcraft.yaml; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::${{ matrix.ref }} has no ${{ matrix.arch }} platform; skipped."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: snapcore/action-build@v1
+        if: steps.check.outputs.build == 'true'
         id: build
       - name: Upload snap as artifact
+        if: steps.check.outputs.build == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: snap-${{ matrix.channel }}
+          name: snap-${{ matrix.channel }}-${{ matrix.arch }}
           path: ${{ steps.build.outputs.snap }}
           if-no-files-found: error
       - name: Publish to ${{ matrix.channel }}
-        if: env.SNAPCRAFT_STORE_CREDENTIALS != ''
+        if: steps.check.outputs.build == 'true' && env.SNAPCRAFT_STORE_CREDENTIALS != ''
         uses: snapcore/action-publish@v1
         with:
           snap: ${{ steps.build.outputs.snap }}
           release: ${{ matrix.channel }}
       - name: No store credentials
-        if: env.SNAPCRAFT_STORE_CREDENTIALS == ''
+        if: steps.check.outputs.build == 'true' && env.SNAPCRAFT_STORE_CREDENTIALS == ''
         run: echo "::warning::SNAPCRAFT_STORE_CREDENTIALS is not set; built the snap but did not upload it (see docs/snap.md)."
