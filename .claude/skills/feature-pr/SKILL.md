@@ -23,6 +23,9 @@ If the design changes, update `docs/architecture.md` in the same branch.
 - For a feature: unit tests with the code, integration/equivalence tests for
   anything that touches cutting (see `AGENTS.md`, golden rule).
 - `///` docs on every public item; inline comments for non-obvious logic.
+- A new command gets a menu item; its keyboard shortcut, if any, goes after
+  the label's `\t` there, never into a key handler (`AGENTS.md`, issue #99).
+  Mark new user-visible texts for translation (`tr`, `trf`, `tr_menu`, `n_`).
 
 ## 3. Check locally
 

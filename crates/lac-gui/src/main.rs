@@ -31,6 +31,8 @@
 //!
 //! Usage: `losslessaudiocut [FILE]`.
 
+#[cfg(test)]
+mod hotkeys;
 mod icons;
 mod lanes;
 mod log_pane;

@@ -98,6 +98,17 @@ lac-gui, lac-cli  ->  lac-app  ->  lac-analysis, lac-peaks, lac-playback
   gets a `// SAFETY:` comment.
 - Parsers take `&[u8]` or `Read + Seek` so they can be unit-tested on
   hand-crafted byte buffers.
+- **Keyboard shortcuts come from menus** (issue #99): give a command a
+  menu item and put its shortcut after the label's `\t` (`"&Open…\tCtrl+O"`),
+  so it is translated, shown next to the command and found without the
+  manual. A toolbar button or control with a shortcut names the menu
+  item's. No window catches keys itself (`on_key_down`, `on_char`,
+  accelerator tables); `crates/lac-gui/src/hotkeys.rs` tests this and that
+  no two menu items share a shortcut.
+- **User-visible texts are translatable**: mark them with `tr`, `trf`,
+  `tr_menu` or `n_` from `lac_app::i18n`. Don't edit `po/messages.pot` or
+  add a test that `de.po` is complete; a weekly workflow
+  (`translations.yml`) merges new texts into the `.po` files.
 
 ## Testing
 
