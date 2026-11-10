@@ -12,9 +12,10 @@
 //! one track; its sample table (`mdia/minf/stbl`) lists every sample
 //! (= packet): sizes (`stsz`), durations (`stts`), and where they lie in
 //! the file (`stco`/`co64` chunk offsets plus `stsc`, which maps chunks to
-//! samples). Only the first audio track is used; other tracks (video,
-//! chapters as text tracks, ...) are ignored with a warning and not
-//! written.
+//! samples). Only the first audio track is cut; other tracks (video,
+//! chapters as text tracks, ...) are not written, with a warning. The
+//! first video track is read into a [`lac_core::VideoIndex`] (see
+//! [`video`]) for display and, later, for cutting videos (issue #156).
 //!
 //! Fragmented files, as recorders and streaming tools write them so that
 //! an interrupted recording stays readable, add samples after `moov` in
@@ -80,6 +81,7 @@ pub mod aac;
 pub mod alac;
 pub mod boxes;
 pub mod ilst;
+pub mod video;
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -164,6 +166,7 @@ pub struct Mp4File {
     entry_raw: Vec<usize>,
     index: PacketIndex,
     other_tracks: usize,
+    video: Option<video::Mp4Video>,
     tags: Tags,
     /// `ilst` items [`Tags`] does not hold, as whole boxes.
     ilst_other: Vec<Vec<u8>>,
@@ -245,19 +248,32 @@ impl Mp4File {
             .ok_or_else(|| malformed(0, "missing or invalid mvhd box"))?;
 
         let mut track = None;
+        let mut video_track = None;
         let mut other_tracks = 0;
+        let frag = Fragments {
+            moofs: &fragments,
+            defaults: parse_trex(&moov),
+        };
         for trak in boxes::Boxes::new(&moov).filter(|b| &b.kind == b"trak") {
             let handler = boxes::path(trak.body, &[b"mdia", b"hdlr"])
                 .and_then(|h| h.body.get(8..12))
                 .unwrap_or_default();
+            if handler == b"vide" && video_track.is_none() {
+                // Not cut yet, so still one of the other tracks; a video
+                // track that cannot be read never keeps the audio from
+                // opening.
+                other_tracks += 1;
+                match video::parse_video_track(r, trak, movie_timescale, &frag, len, &mut warnings)
+                {
+                    Ok(v) => video_track = Some(v),
+                    Err(e) => warnings.push(format!("ignoring the video track: {e}")),
+                }
+                continue;
+            }
             if handler != b"soun" || track.is_some() {
                 other_tracks += 1;
                 continue;
             }
-            let frag = Fragments {
-                moofs: &fragments,
-                defaults: parse_trex(&moov),
-            };
             track = Some(parse_track(
                 trak,
                 movie_timescale,
@@ -320,10 +336,16 @@ impl Mp4File {
             entry_raw,
             index,
             other_tracks,
+            video: video_track,
             tags,
             ilst_other: other,
             warnings,
         })
+    }
+
+    /// The first video track, if the file has a readable one.
+    pub fn video(&self) -> Option<&video::Mp4Video> {
+        self.video.as_ref()
     }
 
     /// The audio codec.
@@ -903,118 +925,20 @@ fn parse_track(
     let at = |what: &str| malformed(0, &format!("audio track: {what}"));
     let mdia = boxes::find(trak.body, b"mdia").ok_or_else(|| at("no mdia box"))?;
     let mdhd = boxes::find(mdia.body, b"mdhd").ok_or_else(|| at("no mdhd box"))?;
-    let (timescale, language) = {
-        let mut r = Reader::new(mdhd.body);
-        let v = r.u8().ok_or_else(|| at("short mdhd"))?;
-        r.bytes(3);
-        r.bytes(if v == 1 { 16 } else { 8 });
-        let ts = r
-            .u32()
-            .filter(|&t| t > 0)
-            .ok_or_else(|| at("invalid timescale"))?;
-        r.bytes(if v == 1 { 8 } else { 4 });
-        (ts, r.u16().unwrap_or(0x55C4))
-    };
+    let (timescale, language) = parse_mdhd(mdhd.body).ok_or_else(|| at("invalid mdhd"))?;
     let stbl = boxes::path(mdia.body, &[b"minf", b"stbl"]).ok_or_else(|| at("no sample table"))?;
     let stsd = boxes::find(stbl.body, b"stsd").ok_or_else(|| at("no stsd box"))?;
     let (codec, channels) = parse_stsd(stsd.body)?;
     let mut stsd_box = Vec::new();
     boxes::put(&mut stsd_box, b"stsd", stsd.body);
 
-    let get = |k: &[u8; 4]| boxes::find(stbl.body, k).map(|b| b.body);
-    // Every sample takes at least one byte of the file, which bounds the
-    // tables a damaged count could otherwise blow up to gigabytes.
-    let max_samples = usize::try_from(file_len).unwrap_or(usize::MAX);
-    let durations = parse_stts(get(b"stts").ok_or_else(|| at("no stts box"))?, max_samples)
-        .ok_or_else(|| at("invalid stts box"))?;
-    let sizes = match (get(b"stsz"), get(b"stz2")) {
-        (Some(b), _) => parse_stsz(b, max_samples),
-        (None, Some(b)) => parse_stz2(b),
-        _ => None,
-    }
-    .ok_or_else(|| at("missing or invalid sample sizes"))?;
-    let chunk_offsets = match (get(b"stco"), get(b"co64")) {
-        (Some(b), _) => parse_offsets(b, false),
-        (None, Some(b)) => parse_offsets(b, true),
-        _ => None,
-    }
-    .ok_or_else(|| at("missing or invalid chunk offsets"))?;
-    let stsc = parse_stsc(get(b"stsc").ok_or_else(|| at("no stsc box"))?)
-        .ok_or_else(|| at("invalid stsc box"))?;
-    let several_descriptions =
-        || ContainerError::Unsupported("MP4 track with several sample descriptions".into());
-    if stsc.iter().any(|e| e.2 != 1) {
-        return Err(several_descriptions());
-    }
-
-    // Each sample's file offset: chunk offset plus the sizes before it.
-    let mut count = sizes.len();
-    if durations.len() != count {
-        warnings.push(format!(
-            "the sample table lists {} durations but {count} sizes; using {}",
-            durations.len(),
-            durations.len().min(count)
-        ));
-        count = count.min(durations.len());
-    }
-    let mut offsets = Vec::with_capacity(count);
-    'chunks: for (c, &chunk_off) in chunk_offsets.iter().enumerate() {
-        let chunk_no = c as u32 + 1;
-        // The last stsc entry whose first chunk is at most this one.
-        let per = stsc
-            .iter()
-            .take_while(|e| e.0 <= chunk_no)
-            .last()
-            .map_or(0, |e| e.1);
-        let mut off = chunk_off;
-        for _ in 0..per {
-            if offsets.len() == count {
-                break 'chunks;
-            }
-            offsets.push(off);
-            off = off.saturating_add(u64::from(sizes[offsets.len() - 1]));
-        }
-    }
-    if offsets.len() < count {
-        warnings.push(format!(
-            "the chunk table covers only {} of {count} samples",
-            offsets.len()
-        ));
-        count = offsets.len();
-    }
-    let (mut sizes, mut durations) = (sizes, durations);
-    sizes.truncate(count);
-    durations.truncate(count);
-    offsets.truncate(count);
-
-    // Samples in movie fragments follow those of the sample table.
-    if !frag.moofs.is_empty() {
-        let track_id = boxes::find(trak.body, b"tkhd")
-            .and_then(|b| parse_tkhd_track_id(b.body))
-            .ok_or_else(|| at("invalid tkhd box"))?;
-        let mut samples = Vec::new();
-        for (i, (moof_pos, moof)) in frag.moofs.iter().enumerate() {
-            let budget = max_samples.saturating_sub(count + samples.len());
-            match parse_moof(moof, *moof_pos, track_id, &frag.defaults, budget) {
-                Ok(s) => samples.extend(s),
-                Err(FragmentError::SeveralDescriptions) => return Err(several_descriptions()),
-                Err(FragmentError::Invalid) => {
-                    warnings.push(format!(
-                        "ignoring damaged movie fragments from byte {moof_pos} on ({} of {})",
-                        frag.moofs.len() - i,
-                        frag.moofs.len()
-                    ));
-                    break;
-                }
-            }
-        }
-        for s in samples {
-            offsets.push(s.offset);
-            sizes.push(s.size);
-            durations.push(s.duration);
-        }
-        count = offsets.len();
-    }
+    let Samples {
+        offsets,
+        sizes,
+        durations,
+        ..
+    } = read_samples(trak, stbl.body, frag, file_len, "audio", warnings)?;
+    let count = offsets.len();
 
     let fixed_out = match codec {
         // An AAC frame always decodes to the same length; the encoder
@@ -1094,6 +1018,162 @@ fn parse_track(
     })
 }
 
+/// The sample table of a track, in decode order, with the samples of
+/// movie fragments appended.
+#[derive(Debug, Default)]
+struct Samples {
+    /// File offset of each sample.
+    offsets: Vec<u64>,
+    /// Size of each sample in bytes.
+    sizes: Vec<u32>,
+    /// Duration of each sample (`stts`), in the media timescale.
+    durations: Vec<u32>,
+    /// Composition time offset of each sample (`ctts`), 0 without one.
+    ctts: Vec<i32>,
+    /// Whether each sample is a sync sample (`stss`; all are without one).
+    sync: Vec<bool>,
+}
+
+/// Reads the sample table `stbl` (the body of `trak`'s
+/// `mdia/minf/stbl`) plus the track's samples in movie fragments. `what`
+/// names the track in errors and warnings ("audio", "video").
+fn read_samples(
+    trak: BoxRef,
+    stbl: &[u8],
+    frag: &Fragments,
+    file_len: u64,
+    what: &str,
+    warnings: &mut Vec<String>,
+) -> Result<Samples> {
+    let at = |m: &str| malformed(0, &format!("{what} track: {m}"));
+    let get = |k: &[u8; 4]| boxes::find(stbl, k).map(|b| b.body);
+    // Every sample takes at least one byte of the file, which bounds the
+    // tables a damaged count could otherwise blow up to gigabytes.
+    let max_samples = usize::try_from(file_len).unwrap_or(usize::MAX);
+    let durations = parse_stts(get(b"stts").ok_or_else(|| at("no stts box"))?, max_samples)
+        .ok_or_else(|| at("invalid stts box"))?;
+    let sizes = match (get(b"stsz"), get(b"stz2")) {
+        (Some(b), _) => parse_stsz(b, max_samples),
+        (None, Some(b)) => parse_stz2(b),
+        _ => None,
+    }
+    .ok_or_else(|| at("missing or invalid sample sizes"))?;
+    let chunk_offsets = match (get(b"stco"), get(b"co64")) {
+        (Some(b), _) => parse_offsets(b, false),
+        (None, Some(b)) => parse_offsets(b, true),
+        _ => None,
+    }
+    .ok_or_else(|| at("missing or invalid chunk offsets"))?;
+    let stsc = parse_stsc(get(b"stsc").ok_or_else(|| at("no stsc box"))?)
+        .ok_or_else(|| at("invalid stsc box"))?;
+    let several_descriptions =
+        || ContainerError::Unsupported("MP4 track with several sample descriptions".into());
+    if stsc.iter().any(|e| e.2 != 1) {
+        return Err(several_descriptions());
+    }
+
+    // Each sample's file offset: chunk offset plus the sizes before it.
+    let mut count = sizes.len();
+    if durations.len() != count {
+        warnings.push(format!(
+            "{what} track: the sample table lists {} durations but {count} sizes; using {}",
+            durations.len(),
+            durations.len().min(count)
+        ));
+        count = count.min(durations.len());
+    }
+    let mut offsets = Vec::with_capacity(count);
+    'chunks: for (c, &chunk_off) in chunk_offsets.iter().enumerate() {
+        let chunk_no = c as u32 + 1;
+        // The last stsc entry whose first chunk is at most this one.
+        let per = stsc
+            .iter()
+            .take_while(|e| e.0 <= chunk_no)
+            .last()
+            .map_or(0, |e| e.1);
+        let mut off = chunk_off;
+        for _ in 0..per {
+            if offsets.len() == count {
+                break 'chunks;
+            }
+            offsets.push(off);
+            off = off.saturating_add(u64::from(sizes[offsets.len() - 1]));
+        }
+    }
+    if offsets.len() < count {
+        warnings.push(format!(
+            "{what} track: the chunk table covers only {} of {count} samples",
+            offsets.len()
+        ));
+        count = offsets.len();
+    }
+    let (mut sizes, mut durations) = (sizes, durations);
+    sizes.truncate(count);
+    durations.truncate(count);
+    offsets.truncate(count);
+    // ctts (8.6.1.3) and stss (8.6.2) of the sample table part; both are
+    // optional.
+    let mut ctts = match get(b"ctts") {
+        Some(b) => parse_ctts(b, count).ok_or_else(|| at("invalid ctts box"))?,
+        None => Vec::new(),
+    };
+    ctts.resize(count, 0);
+    let mut sync = match get(b"stss") {
+        Some(b) => parse_stss(b, count).ok_or_else(|| at("invalid stss box"))?,
+        None => vec![true; count],
+    };
+    sync.resize(count, false);
+
+    // Samples in movie fragments follow those of the sample table.
+    if !frag.moofs.is_empty() {
+        let track_id = boxes::find(trak.body, b"tkhd")
+            .and_then(|b| parse_tkhd_track_id(b.body))
+            .ok_or_else(|| at("invalid tkhd box"))?;
+        let mut samples = Vec::new();
+        for (i, (moof_pos, moof)) in frag.moofs.iter().enumerate() {
+            let budget = max_samples.saturating_sub(count + samples.len());
+            match parse_moof(moof, *moof_pos, track_id, &frag.defaults, budget) {
+                Ok(s) => samples.extend(s),
+                Err(FragmentError::SeveralDescriptions) => return Err(several_descriptions()),
+                Err(FragmentError::Invalid) => {
+                    warnings.push(format!(
+                        "ignoring damaged movie fragments from byte {moof_pos} on ({} of {})",
+                        frag.moofs.len() - i,
+                        frag.moofs.len()
+                    ));
+                    break;
+                }
+            }
+        }
+        for s in samples {
+            offsets.push(s.offset);
+            sizes.push(s.size);
+            durations.push(s.duration);
+            ctts.push(s.cto);
+            sync.push(s.sync);
+        }
+    }
+    Ok(Samples {
+        offsets,
+        sizes,
+        durations,
+        ctts,
+        sync,
+    })
+}
+
+/// The timescale (never 0) and packed ISO 639-2 language of an `mdhd`
+/// body (ISO/IEC 14496-12 8.4.2); the language defaults to "und".
+fn parse_mdhd(b: &[u8]) -> Option<(u32, u16)> {
+    let mut r = Reader::new(b);
+    let v = r.u8()?;
+    r.bytes(3);
+    r.bytes(if v == 1 { 16 } else { 8 });
+    let ts = r.u32().filter(|&t| t > 0)?;
+    r.bytes(if v == 1 { 8 } else { 4 });
+    Some((ts, r.u16().unwrap_or(0x55C4)))
+}
+
 /// The movie fragments of a file and the sample defaults they start from.
 struct Fragments<'a> {
     /// Each `moof` box: its file offset and payload.
@@ -1109,6 +1189,9 @@ struct SampleDefaults {
     description: u32,
     duration: u32,
     size: u32,
+    /// Sample flags (8.8.3.1): dependency bits and
+    /// `sample_is_non_sync_sample`.
+    flags: u32,
 }
 
 impl Default for SampleDefaults {
@@ -1119,6 +1202,7 @@ impl Default for SampleDefaults {
             description: 1,
             duration: 0,
             size: 0,
+            flags: 0,
         }
     }
 }
@@ -1129,7 +1213,14 @@ struct FragmentSample {
     offset: u64,
     size: u32,
     duration: u32,
+    /// Composition time offset (presentation minus decode time).
+    cto: i32,
+    /// A sync sample: decoding can start here.
+    sync: bool,
 }
+
+/// `sample_is_non_sync_sample` in sample flags (ISO/IEC 14496-12 8.8.3.1).
+const NON_SYNC_SAMPLE: u32 = 0x1_0000;
 
 /// Why a fragment's samples could not be listed.
 #[derive(Debug, PartialEq, Eq)]
@@ -1154,12 +1245,14 @@ fn parse_trex(moov: &[u8]) -> Vec<(u32, SampleDefaults)> {
             let description = r.u32()?;
             let duration = r.u32()?;
             let size = r.u32()?;
+            let flags = r.u32().unwrap_or(0);
             Some((
                 id,
                 SampleDefaults {
                     description,
                     duration,
                     size,
+                    flags,
                 },
             ))
         })
@@ -1218,8 +1311,11 @@ fn parse_moof(
         if flags & 0x10 != 0 {
             d.size = r.u32().ok_or(Invalid)?;
         }
-        // 0x20 (default sample flags) and 0x1_0000 (duration-is-empty,
-        // which comes without trun boxes) need no handling.
+        if flags & 0x20 != 0 {
+            d.flags = r.u32().ok_or(Invalid)?;
+        }
+        // 0x1_0000 (duration-is-empty, which comes without trun boxes)
+        // needs no handling.
 
         let mine = id == track_id;
         if mine && d.description != 1 {
@@ -1236,13 +1332,15 @@ fn parse_moof(
                 let rel = i64::from(r.u32().ok_or(Invalid)? as i32);
                 data = base.checked_add_signed(rel).ok_or(Invalid)?;
             }
-            if flags & 0x04 != 0 {
-                r.u32().ok_or(Invalid)?; // first sample flags
-            }
+            let first_flags = if flags & 0x04 != 0 {
+                Some(r.u32().ok_or(Invalid)?)
+            } else {
+                None
+            };
             if mine && out.len().saturating_add(n) > max {
                 return Err(Invalid);
             }
-            for _ in 0..n {
+            for k in 0..n {
                 let duration = if flags & 0x100 != 0 {
                     r.u32().ok_or(Invalid)?
                 } else {
@@ -1253,17 +1351,28 @@ fn parse_moof(
                 } else {
                     d.size
                 };
+                let mut sample_flags = d.flags;
                 if flags & 0x400 != 0 {
-                    r.u32().ok_or(Invalid)?; // sample flags
+                    sample_flags = r.u32().ok_or(Invalid)?;
+                } else if k == 0
+                    && let Some(f) = first_flags
+                {
+                    sample_flags = f;
                 }
-                if flags & 0x800 != 0 {
-                    r.u32().ok_or(Invalid)?; // composition time offset
-                }
+                // Unsigned in trun version 0 and signed in version 1;
+                // encoders only write values that fit both readings.
+                let cto = if flags & 0x800 != 0 {
+                    r.u32().ok_or(Invalid)? as i32
+                } else {
+                    0
+                };
                 if mine {
                     out.push(FragmentSample {
                         offset: data,
                         size,
                         duration,
+                        cto,
+                        sync: sample_flags & NON_SYNC_SAMPLE == 0,
                     });
                 }
                 data = data.checked_add(u64::from(size)).ok_or(Invalid)?;
@@ -1353,33 +1462,40 @@ fn descriptor(r: &mut Reader) -> Option<(u8, usize)> {
     Some((tag, len))
 }
 
-/// The AudioSpecificConfig from an `esds` payload (after version/flags):
-/// ES_Descriptor (tag 3) > DecoderConfigDescriptor (tag 4) >
-/// DecoderSpecificInfo (tag 5), ISO/IEC 14496-1 7.2.6.
-fn parse_esds(b: &[u8]) -> Result<Vec<u8>> {
-    let bad = || malformed(0, "invalid esds box");
+/// The DecoderConfigDescriptor's `objectTypeIndication` of an `esds`
+/// payload (after version/flags), and a reader positioned after it:
+/// ES_Descriptor (tag 3) > DecoderConfigDescriptor (tag 4), ISO/IEC
+/// 14496-1 7.2.6.5 and 7.2.6.6.
+fn esds_decoder_config(b: &[u8]) -> Option<(u8, Reader<'_>)> {
     let mut r = Reader::new(b);
-    let (tag, _) = descriptor(&mut r).ok_or_else(bad)?;
+    let (tag, _) = descriptor(&mut r)?;
     if tag != 3 {
-        return Err(bad());
+        return None;
     }
-    r.u16().ok_or_else(bad)?; // ES_ID
-    let flags = r.u8().ok_or_else(bad)?;
+    r.u16()?; // ES_ID
+    let flags = r.u8()?;
     if flags & 0x80 != 0 {
-        r.u16().ok_or_else(bad)?; // dependsOn_ES_ID
+        r.u16()?; // dependsOn_ES_ID
     }
     if flags & 0x40 != 0 {
-        let n = r.u8().ok_or_else(bad)?;
-        r.bytes(usize::from(n)).ok_or_else(bad)?; // URL
+        let n = r.u8()?;
+        r.bytes(usize::from(n))?; // URL
     }
     if flags & 0x20 != 0 {
-        r.u16().ok_or_else(bad)?; // OCR_ES_ID
+        r.u16()?; // OCR_ES_ID
     }
-    let (tag, _) = descriptor(&mut r).ok_or_else(bad)?;
+    let (tag, _) = descriptor(&mut r)?;
     if tag != 4 {
-        return Err(bad());
+        return None;
     }
-    let object_type = r.u8().ok_or_else(bad)?;
+    Some((r.u8()?, r))
+}
+
+/// The AudioSpecificConfig from an `esds` payload (after version/flags):
+/// the DecoderSpecificInfo (tag 5) of its DecoderConfigDescriptor.
+fn parse_esds(b: &[u8]) -> Result<Vec<u8>> {
+    let bad = || malformed(0, "invalid esds box");
+    let (object_type, mut r) = esds_decoder_config(b).ok_or_else(bad)?;
     // 0x40: MPEG-4 audio; 0x66-0x68: MPEG-2 AAC profiles.
     if !matches!(object_type, 0x40 | 0x66..=0x68) {
         return Err(ContainerError::Unsupported(format!(
@@ -1522,6 +1638,41 @@ fn parse_stsc(b: &[u8]) -> Option<Vec<(u32, u32, u32)>> {
     let mut out = Vec::with_capacity(n.min(b.len() / 12));
     for _ in 0..n {
         out.push((r.u32()?, r.u32()?, r.u32()?));
+    }
+    Some(out)
+}
+
+/// `ctts` (8.6.1.3): one composition offset per sample, at most `max`
+/// of them; version 0 offsets are unsigned and version 1 signed, but
+/// encoders only write values that fit both readings.
+fn parse_ctts(b: &[u8], max: usize) -> Option<Vec<i32>> {
+    let mut r = Reader::new(b);
+    r.u32()?;
+    let n = r.u32()?;
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let count = r.u32()? as usize;
+        let offset = r.u32()? as i32;
+        // More offsets than samples is damage; stop at the table's end.
+        let count = count.min(max - out.len().min(max));
+        out.extend(std::iter::repeat_n(offset, count));
+    }
+    Some(out)
+}
+
+/// `stss` (8.6.2): the sync samples among `count` samples (numbers start
+/// at 1); numbers beyond `count` are ignored.
+fn parse_stss(b: &[u8], count: usize) -> Option<Vec<bool>> {
+    let mut r = Reader::new(b);
+    r.u32()?;
+    let n = r.u32()? as usize;
+    let table = r.bytes(n.checked_mul(4)?)?;
+    let mut out = vec![false; count];
+    for c in table.as_chunks::<4>().0 {
+        let i = u32::from_be_bytes(*c) as usize;
+        if let Some(s) = i.checked_sub(1).and_then(|i| out.get_mut(i)) {
+            *s = true;
+        }
     }
     Some(out)
 }
@@ -1691,7 +1842,51 @@ mod tests {
             offset,
             size,
             duration,
+            cto: 0,
+            sync: true,
         }
+    }
+
+    /// Sample flags come from trex, then tfhd, then a trun's first sample
+    /// flags (for its first sample only) or per-sample flags; composition
+    /// offsets from the trun.
+    #[test]
+    fn fragment_sync_flags_and_composition_offsets() {
+        let trex = [(
+            1,
+            SampleDefaults {
+                description: 1,
+                duration: 512,
+                size: 10,
+                flags: 0,
+            },
+        )];
+        let moof = [
+            // tfhd default flags: non-sync; the first sample is sync via
+            // first_sample_flags; composition offsets per sample.
+            traf(&[
+                tfhd(0x20, 1, &[NON_SYNC_SAMPLE]),
+                trun(0x804, 3, &[0x0200_0000, 1024, 0, (-512i32) as u32]),
+            ]),
+            // Per-sample flags override everything.
+            traf(&[
+                tfhd(0x20, 1, &[NON_SYNC_SAMPLE]),
+                trun(0x400, 2, &[0, NON_SYNC_SAMPLE]),
+            ]),
+        ]
+        .concat();
+        let got = parse_moof(&moof, 0, 1, &trex, 100).expect("valid");
+        let flags: Vec<(bool, i32)> = got.iter().map(|s| (s.sync, s.cto)).collect();
+        assert_eq!(
+            flags,
+            [
+                (true, 1024),
+                (false, 0),
+                (false, -512),
+                (true, 0),
+                (false, 0)
+            ]
+        );
     }
 
     /// ISO/IEC 14496-12 8.8.7.1: without a base offset, the first traf's
@@ -1705,6 +1900,7 @@ mod tests {
                 description: 1,
                 duration: 1024,
                 size: 0,
+                flags: 0,
             },
         )];
         let moof = [

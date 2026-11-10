@@ -140,6 +140,11 @@ impl Source {
         self.container.details()
     }
 
+    /// The frames of the source's video track, if it has one.
+    pub fn video(&self) -> Option<&lac_core::VideoIndex> {
+        self.container.video()
+    }
+
     /// Problems found while parsing that did not prevent opening the file.
     pub fn warnings(&self) -> &[String] {
         self.container.warnings()

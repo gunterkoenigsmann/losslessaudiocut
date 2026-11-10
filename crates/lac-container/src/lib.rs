@@ -30,7 +30,7 @@ mod window;
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use lac_core::{CutCapabilities, CutPlan, PacketIndex, SamplePos, Tags};
+use lac_core::{CutCapabilities, CutPlan, PacketIndex, SamplePos, Tags, VideoIndex};
 
 pub use decode::{Codec, DecodeSection};
 
@@ -76,6 +76,12 @@ pub trait Container: Send {
     /// the case for every format except chained Ogg so far.
     fn chapters(&self) -> &[Chapter] {
         &[]
+    }
+    /// The frames of the file's video track, for files that have one (MP4,
+    /// QuickTime, 3GPP). Exports still contain the audio only (issue
+    /// #156).
+    fn video(&self) -> Option<&VideoIndex> {
+        None
     }
     /// Notes that apply to every cut of this file, for the export report:
     /// where a cut decodes differently in some players although every
@@ -399,6 +405,9 @@ impl Container for mp4::Mp4File {
     }
     fn tags(&self) -> &Tags {
         mp4::Mp4File::tags(self)
+    }
+    fn video(&self) -> Option<&VideoIndex> {
+        mp4::Mp4File::video(self).map(mp4::video::Mp4Video::index)
     }
     fn cut_notes(&self, r: &mut dyn ReadSeek) -> Result<Vec<String>> {
         Ok(if self.uses_noise_substitution(r)? {
