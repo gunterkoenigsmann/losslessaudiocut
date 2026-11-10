@@ -98,9 +98,18 @@ parts:
     # shadows libstdc++'s and breaks the build ("'isnan' was not declared"
     # in nanosvg). At run time the binary uses the GTK of the
     # gnome-46-2404 runtime, which is the same GTK 3 ABI, only newer.
+    #
+    # Linking must use Ubuntu's libraries throughout as well. The extension
+    # puts the SDK's binutils first on PATH and its libraries on
+    # LD_LIBRARY_PATH, where ld looks for the libraries that Ubuntu's
+    # libgtk-3 needs in turn. On arm64 it then mixed the SDK's
+    # libpangoft2 with Ubuntu's older libpango ("undefined reference to
+    # `pango_font_description_get_features'").
     build-environment:
       - CMAKE_PREFIX_PATH: ""
       - PKG_CONFIG_PATH: ""
+      - LD_LIBRARY_PATH: ""
+      - PATH: "/usr/bin:$PATH"
     rust-path:
       - crates/lac-gui
       - crates/lac-cli
