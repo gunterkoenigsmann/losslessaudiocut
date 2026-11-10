@@ -28,8 +28,12 @@ adopt-info: losslessaudiocut
 base: core24
 confinement: strict
 
+# Each platform is built on its own architecture (GitHub's ubuntu-24.04-arm
+# runners for arm64, see the workflows): snapcraft only builds the
+# platforms whose architecture matches the machine it runs on.
 platforms:
   amd64:
+  arm64:
 
 # cpal plays through ALSA. Inside the snap ALSA is pointed at the
 # PulseAudio protocol (snap/local/asound.conf); these layouts put the

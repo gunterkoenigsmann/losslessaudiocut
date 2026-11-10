@@ -23,8 +23,18 @@ permissions:
 
 jobs:
   build:
-    name: build snap
-    runs-on: ubuntu-latest
+    name: build snap (${{ matrix.arch }})
+    # One build per architecture, each on a native runner (snapcraft does
+    # not cross-build this recipe): Raspberry Pi and ARM laptops get arm64.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     # The build runs in a fresh LXD container without any cache: Rust
     # toolchain, all crates and wxWidgets from source. Generous on purpose,
     # so only a real hang hits it.
@@ -38,12 +48,12 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: snapcraft-log
+          name: snapcraft-log-${{ matrix.arch }}
           path: ~/.local/state/snapcraft/log/
       - name: Upload snap
         uses: actions/upload-artifact@v6
         with:
-          name: snap
+          name: snap-${{ matrix.arch }}
           path: ${{ steps.build.outputs.snap }}
           if-no-files-found: error
       # --dangerous: a local file, not signed by the store. The runtime

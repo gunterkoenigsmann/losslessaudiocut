@@ -36,14 +36,14 @@ looks for).
 
 The store needs one upload by the name's owner before CI may publish.
 
-1. Get a `.snap`: download the `snap` artifact of the latest
+1. Get a `.snap`: download the `snap-amd64` (or `snap-arm64`) artifact of the latest
    [Snap workflow run](https://github.com/gunterkoenigsmann/losslessaudiocut/actions/workflows/snap.yml)
    on `main` and unzip it, or build it yourself with
    `sudo snap install snapcraft --classic` and `snapcraft pack` in the
    repository (needs LXD: `sudo snap install lxd && sudo lxd init --auto`).
 2. Try it locally before uploading:
    ```sh
-   sudo snap install --dangerous ./losslessaudiocut_*_amd64.snap
+   sudo snap install --dangerous ./losslessaudiocut_*_amd64.snap   # or _arm64
    losslessaudiocut             # open a file, play it, export a cut
    losslessaudiocut.cli --help
    ```
@@ -55,6 +55,7 @@ The store needs one upload by the name's owner before CI may publish.
    sudo snap install snapcraft --classic   # if not done yet
    snapcraft login
    snapcraft upload --release=edge losslessaudiocut_*_amd64.snap
+   snapcraft upload --release=edge losslessaudiocut_*_arm64.snap
    ```
    The first upload of a new snap may wait for a manual store review; the
    upload command prints the status, and the same is shown on
