@@ -7,19 +7,26 @@ name: Snap
 on:
   push:
     branches: [main]
-  # Only the PRs that can break the package: the recipe itself, and new or
-  # updated crates, which may need system libraries the snap does not have
-  # yet. Every merge to main builds it anyway.
+  # Only the PRs that change the recipe or this workflow. A snap build
+  # takes 40 minutes on a good day and often stalls until the 90-minute
+  # timeout while it downloads from the Snap Store (issue #152), so PRs
+  # that only add or update crates do not wait for it: the build after
+  # their merge to main shows whether the snap still needs a library.
   pull_request:
     paths:
       - snap/**
       - .github/workflows/snap.yml
-      - Cargo.lock
-      - "**/Cargo.toml"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# One build per branch or PR: a newer push replaces the running build, so
+# several merges in a row no longer each hold a runner for up to 90 minutes.
+# Only the newest commit of main matters for the package anyway.
+concurrency:
+  group: snap-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:

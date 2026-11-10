@@ -10,7 +10,7 @@ losslessaudiocut is published on the Snap Store as
 
 | Workflow | When | What |
 |---|---|---|
-| [`snap.yml`](../.github/workflows/snap.yml) | every push to `main`; PRs that touch `snap/`, a `Cargo.toml` or `Cargo.lock`; by hand | builds the snap, installs it, runs the CLI on a fixture and starts the GUI under Xvfb. The `.snap` is kept as the run's `snap` artifact. Never uploads. |
+| [`snap.yml`](../.github/workflows/snap.yml) | every push to `main` (a newer push cancels the running build); PRs that touch `snap/` or the workflow; by hand | builds the snap, installs it, runs the CLI on a fixture and starts the GUI under Xvfb. The `.snap` is kept as the run's `snap` artifact. Never uploads. |
 | [`snap-publish.yml`](../.github/workflows/snap-publish.yml) | Mondays 03:17 UTC; by hand | builds the newest `main` and uploads it to **edge**, builds the newest GitHub release and uploads it to **stable** (skipped while there is no release). |
 
 The weekly rebuild is what brings security fixes to users: the snap bundles
