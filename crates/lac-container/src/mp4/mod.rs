@@ -1584,19 +1584,26 @@ fn esds_decoder_config(b: &[u8]) -> Option<(u8, Reader<'_>)> {
 /// the DecoderSpecificInfo (tag 5) of its DecoderConfigDescriptor.
 fn parse_esds(b: &[u8]) -> Result<Vec<u8>> {
     let bad = || malformed(0, "invalid esds box");
-    let (object_type, mut r) = esds_decoder_config(b).ok_or_else(bad)?;
+    let (object_type, r) = esds_decoder_config(b).ok_or_else(bad)?;
     // 0x40: MPEG-4 audio; 0x66-0x68: MPEG-2 AAC profiles.
     if !matches!(object_type, 0x40 | 0x66..=0x68) {
         return Err(ContainerError::Unsupported(format!(
             "MP4 audio object type {object_type:#04x} (only AAC is supported in mp4a)"
         )));
     }
-    r.bytes(12).ok_or_else(bad)?; // stream type, buffer size, bitrates
-    let (tag, len) = descriptor(&mut r).ok_or_else(bad)?;
+    Ok(decoder_specific_info(r).ok_or_else(bad)?.to_vec())
+}
+
+/// The DecoderSpecificInfo (tag 5, ISO/IEC 14496-1 7.2.6.7) that follows
+/// a DecoderConfigDescriptor's object type, read by
+/// [`esds_decoder_config`]; `None` when missing or empty.
+fn decoder_specific_info(mut r: Reader<'_>) -> Option<&[u8]> {
+    r.bytes(12)?; // stream type, buffer size, bitrates
+    let (tag, len) = descriptor(&mut r)?;
     if tag != 5 || len == 0 {
-        return Err(bad());
+        return None;
     }
-    Ok(r.bytes(len).ok_or_else(bad)?.to_vec())
+    r.bytes(len)
 }
 
 /// The channel configuration of an AudioSpecificConfig (ISO/IEC 14496-3

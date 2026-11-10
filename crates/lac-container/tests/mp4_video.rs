@@ -479,3 +479,26 @@ fn exports_keep_rotation_and_codec() {
     assert_eq!(info.codec, VideoCodec::H264);
     assert!(o.warnings().is_empty(), "{:?}", o.warnings());
 }
+
+/// The decoder configuration comes from the sample entry: `avcC`, `hvcC`
+/// and `av1C` bodies (which start with configuration version 1), the
+/// VOL headers of MPEG-4 Visual (a start code); VP9 and ProRes have none.
+#[test]
+fn codec_configs_are_read() {
+    for (name, start) in [
+        ("video_h264_aac.mp4", Some(&[1u8][..])),
+        ("video_hevc_opengop.mov", Some(&[1][..])),
+        // av1C: marker bit and version 1.
+        ("video_av1.mp4", Some(&[0x81][..])),
+        ("video_mpeg4.3gp", Some(&[0, 0, 1][..])),
+        ("video_vp9.mp4", None),
+        ("video_prores.mov", None),
+    ] {
+        let f = open(name);
+        let config = f.video().expect("video").codec_config();
+        match start {
+            Some(s) => assert!(config.starts_with(s), "{name}: {config:02x?}"),
+            None => assert!(config.is_empty(), "{name}: {config:02x?}"),
+        }
+    }
+}

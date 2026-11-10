@@ -11,9 +11,15 @@
 //! Output is interleaved `f32` in `-1.0..1.0` (integer PCM scaled by
 //! `2^-(bits-1)`), the native format of the lossy decoders.
 //!
+//! Video tracks are decoded picture by picture for the preview, see
+//! [`VideoDecoder`]; pictures are converted to RGB by our own code
+//! ([`picture`]).
+//!
 //! Requires FFmpeg 5.1 or newer (the `AVChannelLayout` API).
 
 mod ffi;
+pub mod picture;
+mod video;
 
 use lac_container::{Container, ContainerError, ReadSeek};
 use std::ops::Range;
@@ -21,6 +27,8 @@ use std::ops::Range;
 use lac_core::SamplePos;
 
 pub use ffi::FfmpegError;
+pub use picture::{Frame, Picture};
+pub use video::VideoDecoder;
 
 /// Errors of this crate.
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +45,22 @@ pub enum DecodeError {
         #[source]
         source: FfmpegError,
     },
+    /// FFmpeg could not set up a decoder for the video track.
+    #[error("cannot set up the {codec} video decoder: {source}")]
+    VideoSetup {
+        /// The codec, for the message.
+        codec: String,
+        /// What FFmpeg reported.
+        #[source]
+        source: FfmpegError,
+    },
+    /// A decoded picture could not be read.
+    #[error("cannot read a decoded picture: {0}")]
+    Video(#[source] FfmpegError),
+    /// The video track has no picture to show (no frames, or none
+    /// decoded).
+    #[error("the video track has no picture there")]
+    NoPicture,
     /// The sink returned an error; decoding stopped.
     #[error("decoding was stopped")]
     Stopped,

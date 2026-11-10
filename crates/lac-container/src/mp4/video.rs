@@ -66,9 +66,20 @@ pub struct Mp4Video {
     tkhd_matrix: [u8; 36],
     /// The `tkhd` width and height (16.16), as stored.
     tkhd_size: [u8; 8],
+    /// The decoder configuration, see [`Mp4Video::codec_config`].
+    codec_config: Vec<u8>,
 }
 
 impl Mp4Video {
+    /// The decoder configuration of the sample entry, as FFmpeg's decoders
+    /// take it as extradata: the body of `avcC` (H.264), `hvcC` (HEVC),
+    /// `av1C` (AV1) or `apvC` (APV), the DecoderSpecificInfo of `esds`
+    /// (MPEG-4 Visual: the VOL headers); empty for codecs whose frames
+    /// describe themselves (VP9, ProRes, Motion JPEG).
+    pub fn codec_config(&self) -> &[u8] {
+        &self.codec_config
+    }
+
     /// The frames of the track.
     pub fn index(&self) -> &VideoIndex {
         &self.index
@@ -125,7 +136,7 @@ impl Mp4Video {
 }
 
 /// The codec of a visual sample entry and how to look into its frames.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
     codec: VideoCodec,
     width: u32,
@@ -135,6 +146,8 @@ struct Entry {
     /// AV1 `reduced_still_picture_header` from the sequence header in
     /// `av1C`: every frame is then a key frame without a frame header.
     av1_reduced: bool,
+    /// See [`Mp4Video::codec_config`].
+    codec_config: Vec<u8>,
 }
 
 /// Parses the `trak` of a video track (handler `vide`).
@@ -280,6 +293,7 @@ pub(super) fn parse_video_track<R: Read + Seek + ?Sized>(
         demoted,
         tkhd_matrix,
         tkhd_size,
+        codec_config: entry.codec_config,
     })
 }
 
@@ -315,6 +329,7 @@ fn parse_visual_entry(b: &[u8]) -> Result<Entry> {
         height,
         nal_length: 4,
         av1_reduced: false,
+        codec_config: Vec::new(),
     };
     match &entry.kind {
         // Dolby Vision streams (dva1, dvav, dvh1, dvhe, dav1) carry a base
@@ -322,23 +337,32 @@ fn parse_visual_entry(b: &[u8]) -> Result<Entry> {
         b"avc1" | b"avc2" | b"avc3" | b"avc4" | b"dva1" | b"dvav" => {
             // AVCDecoderConfigurationRecord (ISO/IEC 14496-15 5.3.3.1):
             // lengthSizeMinusOne in the low 2 bits of byte 4.
-            let c = boxes::find(children, b"avcC")
-                .and_then(|c| c.body.get(4).copied())
-                .ok_or_else(|| bad("H.264 entry without avcC"))?;
+            let avcc =
+                boxes::find(children, b"avcC").ok_or_else(|| bad("H.264 entry without avcC"))?;
+            let c = avcc.body.get(4).copied().ok_or_else(|| bad("short avcC"))?;
             e.codec = VideoCodec::H264;
             e.nal_length = nal_length(c)?;
+            e.codec_config = avcc.body.to_vec();
         }
         b"hvc1" | b"hev1" | b"dvh1" | b"dvhe" => {
             // HEVCDecoderConfigurationRecord (ISO/IEC 14496-15 8.3.3.1):
             // lengthSizeMinusOne in the low 2 bits of byte 21.
-            let c = boxes::find(children, b"hvcC")
-                .and_then(|c| c.body.get(21).copied())
-                .ok_or_else(|| bad("HEVC entry without hvcC"))?;
+            let hvcc =
+                boxes::find(children, b"hvcC").ok_or_else(|| bad("HEVC entry without hvcC"))?;
+            let c = hvcc
+                .body
+                .get(21)
+                .copied()
+                .ok_or_else(|| bad("short hvcC"))?;
             e.codec = VideoCodec::Hevc;
             e.nal_length = nal_length(c)?;
+            e.codec_config = hvcc.body.to_vec();
         }
         b"av01" | b"dav1" => {
             e.codec = VideoCodec::Av1;
+            if let Some(c) = boxes::find(children, b"av1C") {
+                e.codec_config = c.body.to_vec();
+            }
             // AV1CodecConfigurationRecord: 4 bytes, then configOBUs, which
             // usually hold the sequence header.
             if let Some(obus) = boxes::find(children, b"av1C").and_then(|c| c.body.get(4..)) {
@@ -353,9 +377,13 @@ fn parse_visual_entry(b: &[u8]) -> Result<Entry> {
             // mp4v holds whatever its esds names (ISO/IEC 14496-1 Table 5):
             // 0x20 is MPEG-4 Visual; JPEG (0x6C) and MPEG-1/2 video use the
             // entry too.
-            let oti = boxes::find(children, b"esds")
-                .and_then(|b| super::esds_decoder_config(b.body.get(4..)?))
-                .map(|(oti, _)| oti);
+            let config = boxes::find(children, b"esds")
+                .and_then(|b| super::esds_decoder_config(b.body.get(4..)?));
+            let oti = config.as_ref().map(|(oti, _)| *oti);
+            // The DecoderSpecificInfo: for MPEG-4 Visual the VOL headers.
+            if let Some(info) = config.and_then(|(_, r)| super::decoder_specific_info(r)) {
+                e.codec_config = info.to_vec();
+            }
             e.codec = match oti {
                 Some(0x20) => VideoCodec::Mpeg4Visual,
                 Some(0x6C) => VideoCodec::Other(*b"jpeg"),
@@ -363,6 +391,11 @@ fn parse_visual_entry(b: &[u8]) -> Result<Entry> {
                 Some(0x6A) => VideoCodec::Other(*b"mp1v"),
                 _ => VideoCodec::Other(*b"mp4v"),
             };
+        }
+        b"apv1" => {
+            if let Some(c) = boxes::find(children, b"apvC") {
+                e.codec_config = c.body.to_vec();
+            }
         }
         b"encv" => {
             return Err(ContainerError::Unsupported("encrypted video".into()));

@@ -85,6 +85,12 @@ pub trait Container: Send {
     fn video(&self) -> Option<&VideoIndex> {
         None
     }
+    /// The video decoder's configuration (FFmpeg's extradata, e.g. the
+    /// body of an `avcC` box), empty without video or for codecs whose
+    /// frames describe themselves.
+    fn video_codec_config(&self) -> &[u8] {
+        &[]
+    }
     /// Plans the joined output of the kept `ranges` (sorted, not
     /// overlapping) for [`Container::write_cut`]. Audio-only formats plan
     /// with [`plan_cuts`]; files with video plan both tracks together
@@ -422,6 +428,9 @@ impl Container for mp4::Mp4File {
     }
     fn video(&self) -> Option<&VideoIndex> {
         mp4::Mp4File::video(self).map(mp4::video::Mp4Video::index)
+    }
+    fn video_codec_config(&self) -> &[u8] {
+        mp4::Mp4File::video(self).map_or(&[], mp4::video::Mp4Video::codec_config)
     }
     fn plan(&self, ranges: &[Range<SamplePos>]) -> std::result::Result<Vec<CutPlan>, PlanError> {
         mp4::Mp4File::plan(self, ranges)
