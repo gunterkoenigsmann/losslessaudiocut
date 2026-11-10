@@ -137,7 +137,7 @@ jobs:
           status=$?
           echo "exit status: $status"
           test "$status" -eq 124
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
           path: dist/*
@@ -197,7 +197,7 @@ jobs:
           kill "$pid"
           wait "$pid" || true
           hdiutil detach "$mnt"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: macos-${{ matrix.arch }}
           path: dist/*
@@ -329,7 +329,7 @@ jobs:
             if ($gui.HasExited) { throw "GUI exited with code $($gui.ExitCode)" }
             Stop-Process -Id $gui.Id
           }
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-${{ matrix.arch }}
           path: dist/*
@@ -354,7 +354,7 @@ jobs:
     steps:
       # For the hand-written notes in docs/release-notes/.
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
