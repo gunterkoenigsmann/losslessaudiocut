@@ -112,7 +112,7 @@ pub fn refresh(grid: &Grid, rows: &[Row], appearance: &Appearance, palette: &Lis
         for c in 0..FIXED_COLUMNS {
             grid.set_cell_text_colour(r, c, &text_colour(palette, row.deleted, false));
         }
-        let tint = tints::colour(palette.row(appearance, r as usize, rows.len()));
+        let tint = tints::colour(palette.row(appearance, rows[r as usize].index, rows.len()));
         for c in 0..grid.get_number_cols() {
             grid.set_cell_background_colour(r, c, &tint);
         }
@@ -152,6 +152,6 @@ fn rows_match(grid: &Grid, rows: &[Row], appearance: &Appearance, palette: &List
             })
             // Going from one track to two tints the first row too.
             && grid.get_cell_background_colour(r, 0)
-                == tints::colour(palette.row(appearance, r as usize, rows.len()))
+                == tints::colour(palette.row(appearance, rows[r as usize].index, rows.len()))
     })
 }

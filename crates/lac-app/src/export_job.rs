@@ -175,26 +175,28 @@ pub fn selection_task(
 }
 
 /// The track numbers that files will get: (number, total) of each track
-/// of `editor`, `None` for a track deleted entirely. Numbers count the
-/// files written; a number or total the user set wins.
+/// of `editor` (in the recording's order), `None` for a track deleted
+/// entirely. Numbers count the files written in the list's order; a
+/// number or total the user set wins.
 pub fn track_numbers(editor: &Editor) -> Vec<Option<(String, String)>> {
     let tracks = editor.tracks();
     let files = tracks.iter().filter(|t| !t.kept.is_empty()).count();
+    let mut numbers = vec![None; tracks.len()];
+    // Counted in the list's order, which the user may have changed.
     let mut n = 0;
-    tracks
-        .iter()
-        .map(|t| {
-            if t.kept.is_empty() {
-                return None;
-            }
-            n += 1;
-            let get = |f, auto: usize| t.tags.get(f).map_or_else(|| auto.to_string(), String::from);
-            Some((
-                get(TagField::TrackNumber, n),
-                get(TagField::TrackTotal, files),
-            ))
-        })
-        .collect()
+    for i in editor.order() {
+        let t = &tracks[i];
+        if t.kept.is_empty() {
+            continue;
+        }
+        n += 1;
+        let get = |f, auto: usize| t.tags.get(f).map_or_else(|| auto.to_string(), String::from);
+        numbers[i] = Some((
+            get(TagField::TrackNumber, n),
+            get(TagField::TrackTotal, files),
+        ));
+    }
+    numbers
 }
 
 /// One task per track of `editor` that keeps anything, writing into `dir`
@@ -613,6 +615,63 @@ mod tests {
         let report = describe_outcomes(&outcomes, 44_100);
         assert!(report.starts_with("2 files: exported 2 parts"), "{report}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Moved tracks (issue #85) are numbered and named by their place in
+    /// the list, also when another track before them gets no file.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)] // one kept range per track
+    fn moved_tracks_get_the_numbers_of_their_places() {
+        let dir = Path::new("/out");
+        let src = Path::new("/rec/talk.flac");
+        let mut e = Editor::new(9000);
+        e.split_at_all([3000, 6000]);
+        assert!(e.move_track(2, 0)); // the last track comes first
+        let (tasks, skipped) = track_tasks(&e, src, dir);
+        assert!(skipped.is_empty());
+        let mut files: Vec<_> = tasks
+            .iter()
+            .map(|t| {
+                let tags = t.tags.as_ref().expect("tags");
+                (
+                    t.output.clone(),
+                    tags.get(TagField::TrackNumber).map(String::from),
+                    t.request.clone(),
+                )
+            })
+            .collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            files,
+            [
+                (
+                    dir.join("talk-01.flac"),
+                    Some("1".into()),
+                    CutRequest::Keep(vec![6000..9000])
+                ),
+                (
+                    dir.join("talk-02.flac"),
+                    Some("2".into()),
+                    CutRequest::Keep(vec![0..3000])
+                ),
+                (
+                    dir.join("talk-03.flac"),
+                    Some("3".into()),
+                    CutRequest::Keep(vec![3000..6000])
+                ),
+            ]
+        );
+        // A first track deleted entirely gives no file and no number.
+        e.select(6000, 9000);
+        e.delete_selection();
+        assert_eq!(
+            track_numbers(&e),
+            [
+                Some(("1".into(), "2".into())),
+                Some(("2".into(), "2".into())),
+                None
+            ]
+        );
     }
 
     /// Track files start from the source's tags: the fields nobody

@@ -45,12 +45,17 @@ pub struct Edits {
     /// Tag changes per track, keyed by where the track starts (0 for the
     /// first); they win over [`Edits::all_tags`].
     pub track_tags: BTreeMap<SamplePos, TagEdits>,
+    /// The tracks' order in the track list and the export (issue #85), as
+    /// their starts; empty for the recording's own order. Every track
+    /// start appears once (see [`normalize_order`]).
+    pub order: Vec<SamplePos>,
 }
 
 /// One track: a stretch of the source between split points.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Track {
-    /// 1-based position among all tracks.
+    /// 1-based position in the track list's (and the export's) order,
+    /// which the user may have changed (issue #85).
     pub number: usize,
     /// The source span from its split point to the next one.
     pub span: Range<SamplePos>,
@@ -153,12 +158,58 @@ impl Editor {
                 (*start == 0 || splits.binary_search(start).is_ok()) && !t.is_empty()
             })
             .collect();
-        Edits {
+        let mut edits = Edits {
             deleted,
             splits,
             all_tags: edits.all_tags,
             track_tags,
+            order: edits.order,
+        };
+        normalize_order(&mut edits);
+        edits
+    }
+
+    /// The track indices (as in [`Editor::tracks`]) in the track list's
+    /// order: `0, 1, 2, …` unless the user moved tracks.
+    pub fn order(&self) -> Vec<usize> {
+        let n = self.edits.splits.len() + 1;
+        if self.edits.order.is_empty() {
+            return (0..n).collect();
         }
+        self.edits
+            .order
+            .iter()
+            .map(|&start| self.track_at(start))
+            .collect()
+    }
+
+    /// The number (1-based place in the list's order) of track `index`.
+    pub fn track_number(&self, index: usize) -> usize {
+        self.order()
+            .iter()
+            .position(|&i| i == index)
+            .unwrap_or(index)
+            + 1
+    }
+
+    /// Moves the track at position `from` of the list's order to position
+    /// `to` (both 0-based, `to` counted after taking it out), as one undo
+    /// step: it gets that number and that place in a whole-file export,
+    /// but stays where it is in the recording. Returns false for positions
+    /// out of range or no change.
+    pub fn move_track(&mut self, from: usize, to: usize) -> bool {
+        let starts: Vec<SamplePos> = std::iter::once(0)
+            .chain(self.edits.splits.iter().copied())
+            .collect();
+        let mut order: Vec<SamplePos> = self.order().into_iter().map(|i| starts[i]).collect();
+        if from >= order.len() || to >= order.len() {
+            return false;
+        }
+        let start = order.remove(from);
+        order.insert(to, start);
+        let mut next = self.edits.clone();
+        next.order = order;
+        self.commit(next)
     }
 
     /// Length of the recording.
@@ -269,13 +320,18 @@ impl Editor {
     /// stay stable while editing.
     pub fn tracks(&self) -> Vec<Track> {
         let kept = self.kept();
+        // The position of each track (by index) in the list's order.
+        let mut position = vec![0; self.edits.splits.len() + 1];
+        for (pos, &index) in self.order().iter().enumerate() {
+            position[index] = pos;
+        }
         let starts = std::iter::once(0).chain(self.edits.splits.iter().copied());
         let ends = self.edits.splits.iter().copied().chain([self.total]);
         starts
             .zip(ends)
             .enumerate()
             .map(|(i, (a, b))| Track {
-                number: i + 1,
+                number: position[i] + 1,
                 span: a..b,
                 kept: kept
                     .iter()
@@ -401,6 +457,7 @@ impl Editor {
         if let Some(tags) = next.track_tags.remove(&from) {
             next.track_tags.insert(to, tags);
         }
+        rename_starts(&mut next.order, &[(from, to)]);
         self.commit(next)
     }
 
@@ -488,6 +545,7 @@ impl Editor {
                 next.track_tags.insert(to, t);
             }
         }
+        rename_starts(&mut next.order, &moved);
         Some(next)
     }
 
@@ -537,6 +595,7 @@ impl Editor {
         if let Some(tags) = self.edits.track_tags.remove(&from) {
             self.edits.track_tags.insert(to, tags);
         }
+        rename_starts(&mut self.edits.order, &[(from, to)]);
     }
 
     /// Ends dragging a track start. Returns whether it moved; if so, the
@@ -806,17 +865,71 @@ impl Editor {
     /// What to hand to [`crate::Source::export`] for a single output file
     /// (all tracks joined).
     pub fn cut_request(&self) -> CutRequest {
-        CutRequest::Delete(self.edits.deleted.clone())
+        if self.edits.order.is_empty() {
+            return CutRequest::Delete(self.edits.deleted.clone());
+        }
+        // Tracks moved in the list: their kept parts in the list's order,
+        // joined like after a deletion (lossless; see the containers'
+        // `ranges_out_of_order` tests).
+        let mut tracks = self.tracks();
+        tracks.sort_by_key(|t| t.number);
+        CutRequest::Keep(tracks.into_iter().flat_map(|t| t.kept).collect())
     }
 
     /// Makes `next` the edits if they differ, with an undo step.
-    fn commit(&mut self, next: Edits) -> bool {
+    fn commit(&mut self, mut next: Edits) -> bool {
+        normalize_order(&mut next);
         if next == self.edits {
             return false;
         }
         self.undo.push(std::mem::replace(&mut self.edits, next));
         self.redo.clear();
         true
+    }
+}
+
+/// Brings `edits.order` in line with the track starts (0 and the splits):
+/// starts that are gone are dropped, and a new one (a split) follows the
+/// track it was split from. An order that is the recording's own becomes
+/// empty, so that moving a track back counts as no edit.
+pub fn normalize_order(edits: &mut Edits) {
+    if edits.order.is_empty() {
+        return;
+    }
+    let starts: Vec<SamplePos> = std::iter::once(0)
+        .chain(edits.splits.iter().copied())
+        .collect();
+    let mut order: Vec<SamplePos> = Vec::with_capacity(starts.len());
+    for &s in &edits.order {
+        if starts.binary_search(&s).is_ok() && !order.contains(&s) {
+            order.push(s);
+        }
+    }
+    for (i, &s) in starts.iter().enumerate() {
+        if order.contains(&s) {
+            continue;
+        }
+        // After its predecessor in the recording, which is placed already
+        // (starts are visited in ascending order); the first at the front.
+        let at = match i.checked_sub(1) {
+            Some(p) => order
+                .iter()
+                .position(|&o| o == starts[p])
+                .map_or(0, |q| q + 1),
+            None => 0,
+        };
+        order.insert(at, s);
+    }
+    edits.order = if order == starts { Vec::new() } else { order };
+}
+
+/// Renames moved track starts (`(from, to)` pairs, applied at once) in a
+/// track order, so that the moved tracks keep their place in it.
+fn rename_starts(order: &mut [SamplePos], moved: &[(SamplePos, SamplePos)]) {
+    for start in order.iter_mut() {
+        if let Some(&(_, to)) = moved.iter().find(|&&(from, _)| from == *start) {
+            *start = to;
+        }
     }
 }
 
@@ -833,7 +946,7 @@ impl Editor {
             parts.push(trf(
                 "track {n} of {count}",
                 &[
-                    ("n", &(self.track_at(self.play_from()) + 1)),
+                    ("n", &self.track_number(self.track_at(self.play_from()))),
                     ("count", &(self.edits.splits.len() + 1)),
                 ],
             ));
@@ -935,10 +1048,12 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            order: vec![150, 50, 30, 60, 50, 0],
         };
         let e = Editor::with_edits(100, edits);
         assert_eq!(e.deleted(), [10..30, 80..100]);
         assert_eq!(e.splits(), [30, 50]);
+        assert_eq!(e.edits().order, [50, 30, 0], "gone starts dropped once");
         assert_eq!(
             e.edits().track_tags.keys().copied().collect::<Vec<_>>(),
             [50],
@@ -973,6 +1088,65 @@ mod tests {
         // The same edits again change nothing.
         let same = e.edits().clone();
         assert!(!e.replace_edits(same));
+    }
+
+    /// Tracks moved in the list (issue #85) get the numbers of their new
+    /// places and come in that order in a whole-file export; moving them
+    /// back is no edit.
+    #[test]
+    fn moved_tracks_are_numbered_and_exported_in_list_order() {
+        let mut e = Editor::new(9000);
+        e.split_at_all([3000, 6000]);
+        assert_eq!(e.order(), [0, 1, 2]);
+        assert!(!e.move_track(1, 1), "no change");
+        assert!(!e.move_track(3, 0), "out of range");
+        assert!(e.move_track(2, 0));
+        assert_eq!(e.order(), [2, 0, 1]);
+        let numbers: Vec<_> = e.tracks().iter().map(|t| t.number).collect();
+        assert_eq!(numbers, [2, 3, 1], "tracks stay in recording order");
+        e.set_cursor(7000);
+        assert!(
+            e.describe(1000).starts_with("track 1 of 3"),
+            "{}",
+            e.describe(1000)
+        );
+        e.select(1000, 2000);
+        e.delete_selection();
+        assert_eq!(
+            e.cut_request(),
+            CutRequest::Keep(vec![6000..9000, 0..1000, 2000..3000, 3000..6000])
+        );
+        assert!(e.undo());
+        assert!(e.undo());
+        assert_eq!(e.order(), [0, 1, 2]);
+        assert!(e.move_track(0, 2));
+        assert!(e.move_track(2, 0));
+        assert!(e.edits().order.is_empty(), "the recording's order again");
+        assert_eq!(e.cut_request(), CutRequest::Delete(Vec::new()));
+    }
+
+    /// Splitting a moved track puts the new part right after it; joining
+    /// or moving a start keeps the others' places.
+    #[test]
+    fn the_order_follows_splits_joins_and_moved_starts() {
+        let mut e = Editor::new(9000);
+        e.split_at_all([3000, 6000]);
+        assert!(e.move_track(2, 0)); // 6000, 0, 3000
+        assert!(e.split_at(7000));
+        assert_eq!(e.edits().order, [6000, 7000, 0, 3000]);
+        assert!(e.split_at(1000));
+        assert_eq!(e.edits().order, [6000, 7000, 0, 1000, 3000]);
+        assert!(e.join_with_previous(e.track_at(7000)));
+        assert_eq!(e.edits().order, [6000, 0, 1000, 3000]);
+        let index = e.track_at(6000);
+        assert!(e.move_track_start(index, 6500));
+        assert_eq!(e.edits().order, [6500, 0, 1000, 3000]);
+        assert!(e.set_track_span(e.track_at(1000), 2000..4000));
+        assert_eq!(e.edits().order, [6500, 0, 2000, 4000]);
+        assert!(e.begin_moving_track_start(e.track_at(4000)));
+        e.move_track_start_to(5000);
+        assert!(e.end_moving_track_start());
+        assert_eq!(e.edits().order, [6500, 0, 2000, 5000]);
     }
 
     #[test]

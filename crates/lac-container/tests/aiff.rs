@@ -382,3 +382,26 @@ fn ffmpeg_agrees_with_our_output() {
         );
     }
 }
+
+/// Tracks in another order than the source's (issue #85): ranges written
+/// out of order join like deletes, with the same window at each join.
+#[test]
+fn ranges_out_of_order_keep_their_samples() {
+    let data = noise(4 * 10_000, 12);
+    let src = build_aiff(S16_STEREO, &data, None, 0, &[]);
+    let a = open(&src).expect("valid source");
+    let plans: Vec<_> = [7_000..9_000, 1_000..3_000]
+        .into_iter()
+        .map(|r| plan_cut(a.index(), a.capabilities(), r).expect("plan"))
+        .collect();
+    let mut out = Vec::new();
+    a.write_cut(&mut Cursor::new(&src), &plans, None, &mut out)
+        .expect("write");
+    let o = open(&out).expect("output is valid AIFF");
+    let got = o
+        .read_frames(&mut Cursor::new(&out), 0..4_000)
+        .expect("read");
+    let mut want = data[28_000..36_000].to_vec();
+    want.extend(&data[4_000..12_000]);
+    assert_eq!(got, want);
+}

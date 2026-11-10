@@ -101,6 +101,9 @@ const ID_EXPORT_SELECTION: Id = ID_HIGHEST + 36;
 /// File > Save project and Save project as (issue #97).
 const ID_SAVE_PROJECT: Id = ID_HIGHEST + 37;
 const ID_SAVE_PROJECT_AS: Id = ID_HIGHEST + 38;
+/// Edit > Move track up and down in the list's order (issue #85).
+const ID_MOVE_UP: Id = ID_HIGHEST + 39;
+const ID_MOVE_DOWN: Id = ID_HIGHEST + 40;
 const ID_UNDO: Id = ID_HIGHEST + 7;
 const ID_REDO: Id = ID_HIGHEST + 8;
 const ID_DELETE: Id = ID_HIGHEST + 9;
@@ -1472,6 +1475,16 @@ fn menu_bar(options: Options) -> MenuBar {
             &tr("Name the track under the cursor"),
         )
         .append_item(
+            ID_MOVE_UP,
+            &tr_menu("Move track &up\tCtrl+Shift+Up"),
+            &tr("Give the track under the cursor the place before it in the track list and the export"),
+        )
+        .append_item(
+            ID_MOVE_DOWN,
+            &tr_menu("Move track do&wn\tCtrl+Shift+Down"),
+            &tr("Give the track under the cursor the place after it in the track list and the export"),
+        )
+        .append_item(
             ID_ALL_TRACKS,
             &tr_menu("Use for all trac&ks\tCtrl+Shift+A"),
             &tr("Give every track the value of the selected cell of the track list"),
@@ -1813,6 +1826,8 @@ fn is_edit(id: Id) -> bool {
             | ID_SELECT_NONE
             | ID_SPLIT
             | ID_JOIN
+            | ID_MOVE_UP
+            | ID_MOVE_DOWN
     )
 }
 
@@ -1846,6 +1861,22 @@ fn edit(st: &mut State, id: Id) -> Option<&'static str> {
         ID_SPLIT if !e.split_at(e.play_from()) => n_("click where the new track should start"),
         ID_JOIN if !e.join_with_previous(e.track_at(e.play_from())) => {
             n_("the first track has no track before it")
+        }
+        // The track under the cursor swaps places with its neighbour in
+        // the list (issue #85); it stays where it is in the recording.
+        ID_MOVE_UP | ID_MOVE_DOWN => {
+            let track = e.track_at(e.play_from());
+            let place = e.order().iter().position(|&t| t == track).unwrap_or(0);
+            let to = if id == ID_MOVE_UP {
+                place.checked_sub(1)
+            } else {
+                Some(place + 1)
+            };
+            match to {
+                Some(to) if e.move_track(place, to) => "",
+                _ if id == ID_MOVE_UP => n_("the track is first in the list already"),
+                _ => n_("the track is last in the list already"),
+            }
         }
         _ => "",
     })
@@ -2407,10 +2438,10 @@ fn start_export(
 
 /// Edit > Rename track: asks for the name of the track under the cursor.
 fn rename_track(frame: &Frame, state: &Rc<RefCell<State>>) {
-    let Some((index, current)) = state.borrow().editor.as_ref().map(|e| {
+    let Some((index, number, current)) = state.borrow().editor.as_ref().map(|e| {
         let i = e.track_at(e.play_from());
         let name = e.tracks().get(i).and_then(|t| t.name.clone());
-        (i, name.unwrap_or_default())
+        (i, e.track_number(i), name.unwrap_or_default())
     }) else {
         report(frame, &tr("open a file first"));
         return;
@@ -2420,7 +2451,7 @@ fn rename_track(frame: &Frame, state: &Rc<RefCell<State>>) {
         frame,
         &trf(
             "Name of track {n} (also used in its file name):",
-            &[("n", &(index + 1))],
+            &[("n", &number)],
         ),
         &tr("Rename track"),
     )
@@ -2470,7 +2501,7 @@ fn bind_track_list(grid: &Grid, frame: &Frame, panel: &Panel, state: &Rc<RefCell
                 };
                 let tags = st.tags.clone().unwrap_or_default();
                 let rate = st.rate.unwrap_or(1);
-                let Ok(index) = usize::try_from(row) else {
+                let Some(index) = row_track(&st, row) else {
                     return;
                 };
                 if let (Some(ed), Some(bound)) = (&mut st.editor, track_list::bound(col)) {
@@ -2508,7 +2539,7 @@ fn bind_track_list(grid: &Grid, frame: &Frame, panel: &Panel, state: &Rc<RefCell
             let Ok(mut st) = state.try_borrow_mut() else {
                 return;
             };
-            if let (Ok(index), Some(ed)) = (usize::try_from(e.get_row()), &st.editor) {
+            if let (Some(index), Some(ed)) = (row_track(&st, e.get_row()), &st.editor) {
                 // The end cell goes to the track's end; any other cell to
                 // its start, unless the cursor is in that track already
                 // (moving between its tag cells keeps the cursor).
@@ -2531,6 +2562,14 @@ fn bind_track_list(grid: &Grid, frame: &Frame, panel: &Panel, state: &Rc<RefCell
     }
 }
 
+/// The track shown in row `row` of the track list (rows follow the list's
+/// order, which the user may change, issue #85); `None` for a label row
+/// (-1) or no track.
+fn row_track(st: &State, row: i32) -> Option<usize> {
+    let row = usize::try_from(row).ok()?;
+    lac_app::track_list::track_of_row(st.editor.as_ref()?, row)
+}
+
 /// Clears the selection and puts the cursor (and the playback position)
 /// at `pos`, scrolling the waveform there if it is out of view.
 fn jump_to(st: &mut State, pos: SamplePos) {
@@ -2550,11 +2589,11 @@ fn jump_to(st: &mut State, pos: SamplePos) {
 /// -1 for a column label, is ignored), puts the cursor at its start and
 /// zooms the waveform to it.
 fn show_track(row: i32, frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
-    let Ok(index) = usize::try_from(row) else {
-        return;
-    };
     // Busy elsewhere (e.g. a refresh in progress): the click is dropped.
     let Ok(mut st) = state.try_borrow_mut() else {
+        return;
+    };
+    let Some(index) = row_track(&st, row) else {
         return;
     };
     let Some(span) = st
@@ -2586,9 +2625,10 @@ fn use_for_all_tracks(frame: &Frame, state: &Rc<RefCell<State>>) {
         let Some(g) = st.grid else { return };
         let (row, col) = (g.get_grid_cursor_row(), g.get_grid_cursor_col());
         let tags = st.tags.clone().unwrap_or_default();
-        match (&mut st.editor, track_list::field(col), usize::try_from(row)) {
+        let index = row_track(&st, row);
+        match (&mut st.editor, track_list::field(col), index) {
             (None, _, _) => Some(tr("open a file first").into_owned()),
-            (Some(ed), Some(field), Ok(index)) => {
+            (Some(ed), Some(field), Some(index)) => {
                 let text = g.get_cell_value(row, col);
                 match lac_app::track_list::edit(ed, &tags, index, field, &text, true) {
                     Ok(_) => Some(trf(
@@ -2999,16 +3039,17 @@ fn show_context_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, x
 /// [`context_menu::track_list`]); anything but a track's row (such as -1
 /// for a column label) is ignored.
 fn show_track_menu(grid: &Grid, state: &Rc<RefCell<State>>, row: i32) {
-    let Ok(index) = usize::try_from(row) else {
+    let Some(index) = row_track(&state.borrow(), row) else {
         return;
     };
-    // Rows the user selected (by dragging, or Shift- or Ctrl-clicking
-    // cells or row labels), so the menu can offer to merge them.
+    // Tracks of the rows the user selected (by dragging, or Shift- or
+    // Ctrl-clicking cells or row labels), so the menu can offer to merge
+    // them.
     let selected: Vec<usize> = grid
         .get_selected_blocks()
         .iter()
         .flat_map(|b| b.top_row..=b.bottom_row)
-        .filter_map(|r| usize::try_from(r).ok())
+        .filter_map(|r| row_track(&state.borrow(), r))
         .collect();
     let track_count = |st: &State| st.editor.as_ref().map(|e| e.splits().len());
     let (entries, before) = match &state.borrow().editor {
@@ -3788,6 +3829,22 @@ mod tests {
         );
         assert_eq!(edit(&mut st, ID_JOIN), Some(""));
         assert_eq!(st.editor.as_ref().map(|e| e.splits().len()), Some(0));
+        // Moving the track under the cursor in the list (issue #85).
+        if let Some(e) = &mut st.editor {
+            e.split_at_all([300, 600]);
+            e.set_cursor(700);
+        }
+        assert_eq!(
+            edit(&mut st, ID_MOVE_DOWN),
+            Some("the track is last in the list already")
+        );
+        assert_eq!(edit(&mut st, ID_MOVE_UP), Some(""));
+        assert_eq!(edit(&mut st, ID_MOVE_UP), Some(""));
+        assert_eq!(st.editor.as_ref().map(Editor::order), Some(vec![2, 0, 1]));
+        assert_eq!(
+            edit(&mut st, ID_MOVE_UP),
+            Some("the track is first in the list already")
+        );
     }
 
     #[test]
@@ -3818,6 +3875,8 @@ mod tests {
             ID_EXPORT_SELECTION,
             ID_SAVE_PROJECT,
             ID_SAVE_PROJECT_AS,
+            ID_MOVE_UP,
+            ID_MOVE_DOWN,
             ID_UNDO,
             ID_REDO,
             ID_DELETE,
