@@ -168,6 +168,10 @@ jobs:
         shell: bash
         run: echo "LAC_REQUIRE_TOOLS=1" >> "$GITHUB_ENV"
       - run: cargo clippy --workspace --all-targets
+      # Builds the test binaries first: clippy does not, and linking the
+      # GUI's against wxWidgets alone can take minutes on a slow Windows
+      # runner (issue #140).
+      - run: cargo test --workspace --no-run
       # Tests take under 30 s; a hung test (e.g. a demuxer loop that never
       # advances) fails here with its log instead of eating the job limit.
       - run: cargo test --workspace
