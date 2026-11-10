@@ -43,12 +43,12 @@ jobs:
       # Snapcraft's own log has the details its console output leaves out.
       - name: Upload snapcraft log
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: snapcraft-log
           path: ~/.local/state/snapcraft/log/
       - name: Upload snap
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: snap
           path: ${{ steps.build.outputs.snap }}
