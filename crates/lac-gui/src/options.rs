@@ -39,6 +39,8 @@ const KEY: &str = "/Detection/Key";
 const LANGUAGE: &str = "/Interface/Language";
 /// Key of [`Options::theme`] ([`Theme::key`]).
 const THEME: &str = "/Interface/Theme";
+/// Key of [`Options::control_surface`].
+const CONTROL_SURFACE: &str = "/Play/ControlSurface";
 
 /// The remembered options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +68,10 @@ pub struct Options {
     /// Settings > Interface: light or dark windows, or like the system
     /// (issue #104). Takes effect at the next start.
     pub theme: Theme,
+    /// Play > Control surface: listen to MIDI controllers in Mackie
+    /// Control mode (issue #95). Off by default: any MIDI keyboard would
+    /// otherwise reach the transport through its notes.
+    pub control_surface: bool,
 }
 
 impl Default for Options {
@@ -79,6 +85,7 @@ impl Default for Options {
             detector: DetectorSettings::default(),
             language: None,
             theme: Theme::System,
+            control_surface: false,
         }
     }
 }
@@ -108,6 +115,7 @@ impl Options {
             .normalized(),
             language: lac_app::i18n::language_code(&c.read_string(LANGUAGE, "")),
             theme: Theme::from_key(&c.read_string(THEME, d.theme.key())),
+            control_surface: c.read_bool(CONTROL_SURFACE, d.control_surface),
         }
     }
 
@@ -128,6 +136,7 @@ impl Options {
         c.write_bool(KEY, self.detector.key);
         c.write_string(LANGUAGE, self.language.unwrap_or(""));
         c.write_string(THEME, self.theme.key());
+        c.write_bool(CONTROL_SURFACE, self.control_surface);
         c.flush(false);
     }
 }
@@ -161,9 +170,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_options_are_on_by_default() {
+    fn options_default() {
         // Decided with the user: hearing the dragged edge is what the tool
         // is for, and speech should stay intelligible at other speeds.
+        // Control surfaces are off: a MIDI keyboard's notes would reach
+        // the transport.
         assert_eq!(
             Options::default(),
             Options {
@@ -175,6 +186,7 @@ mod tests {
                 detector: DetectorSettings::default(),
                 language: None,
                 theme: Theme::System,
+                control_surface: false,
             }
         );
     }

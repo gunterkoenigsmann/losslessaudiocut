@@ -43,6 +43,7 @@ mod panes;
 mod position_bar;
 mod recent;
 mod settings;
+mod surface;
 mod tints;
 mod toolbar;
 mod track_list;
@@ -60,6 +61,7 @@ use lac_app::analysis_job::{AnalysisJob, AnalysisStatus};
 use lac_app::autosave::{Autosaver, Found, Recovery, Step};
 use lac_app::chapters::{Chapter, SuggestedStart, suggested_starts};
 use lac_app::context_menu::{self, Effect, Entry, RightPress};
+use lac_app::control_surface::{self, Command as SurfaceCommand};
 use lac_app::detail::{Detail, DetailLoader};
 use lac_app::editor::{Editor, Edits};
 use lac_app::export_job::{ExportJob, default_output, describe_outcomes, track_tasks};
@@ -104,6 +106,8 @@ const ID_SAVE_PROJECT_AS: Id = ID_HIGHEST + 38;
 /// Edit > Move track up and down in the list's order (issue #85).
 const ID_MOVE_UP: Id = ID_HIGHEST + 39;
 const ID_MOVE_DOWN: Id = ID_HIGHEST + 40;
+/// Play > Control surface (issue #95).
+const ID_CONTROL_SURFACE: Id = ID_HIGHEST + 41;
 const ID_UNDO: Id = ID_HIGHEST + 7;
 const ID_REDO: Id = ID_HIGHEST + 8;
 const ID_DELETE: Id = ID_HIGHEST + 9;
@@ -374,6 +378,9 @@ struct State {
     restore_silently: bool,
     /// An autosave failed and was reported; not again for this file.
     autosave_failed: bool,
+    /// MIDI control surfaces, connected while Play > Control surface is
+    /// on (issue #95).
+    surfaces: surface::Surfaces,
     /// The track list under the waveform.
     grid: Option<Grid>,
     /// The dockable panes around the waveform.
@@ -1317,6 +1324,17 @@ fn main() {
                         open_file(&frame, &state, first.clone());
                     }
                 }
+                let surfaces = {
+                    let mut st = state.borrow_mut();
+                    let on = st.options.control_surface;
+                    st.surfaces.poll(on)
+                };
+                for msg in &surfaces.messages {
+                    report(&frame, msg);
+                }
+                for cmd in surfaces.commands {
+                    surface_command(&frame, &panel, &state, cmd);
+                }
                 let held = state.borrow_mut().poll_right_press();
                 if let Some(msg) = held {
                     if panel.has_capture() {
@@ -1564,6 +1582,11 @@ fn menu_bar(options: Options) -> MenuBar {
             &tr_menu("S&crub while selecting"),
             &tr("Play the edge of the selection while dragging it"),
         )
+        .append_check_item(
+            ID_CONTROL_SURFACE,
+            &tr_menu("Control s&urface (Mackie Control)"),
+            &tr("Let a MIDI controller in Mackie Control mode play, stop, move the cursor and split"),
+        )
         .build();
     let view = Menu::builder()
         .append_item(
@@ -1611,6 +1634,7 @@ fn menu_bar(options: Options) -> MenuBar {
         .build();
     bar.check_item(ID_KEEP_PITCH, options.keep_pitch);
     bar.check_item(ID_SCRUB_SELECTING, options.scrub_while_selecting);
+    bar.check_item(ID_CONTROL_SURFACE, options.control_surface);
     bar.check_item(ID_RULER, options.ruler);
     bar
 }
@@ -1759,6 +1783,13 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
         let mut st = state.borrow_mut();
         let on = checked.unwrap_or(!st.options.scrub_while_selecting);
         st.options.scrub_while_selecting = on;
+        st.options.save();
+        return;
+    } else if id == ID_CONTROL_SURFACE {
+        // The timer connects or disconnects at its next tick.
+        let mut st = state.borrow_mut();
+        let on = checked.unwrap_or(!st.options.control_surface);
+        st.options.control_surface = on;
         st.options.save();
         return;
     } else if id == ID_RULER {
@@ -2583,6 +2614,53 @@ fn jump_to(st: &mut State, pos: SamplePos) {
     {
         v.scroll_to(pos);
     }
+}
+
+/// Runs what a control surface asked for (issue #95): the menu command of
+/// the same name where there is one, else a cursor move like a click.
+fn surface_command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, cmd: SurfaceCommand) {
+    let playing = state
+        .borrow()
+        .player
+        .as_ref()
+        .is_some_and(|p| p.engine().is_playing());
+    let id = match cmd {
+        // Play/Stop toggles; the surface has a button for each.
+        SurfaceCommand::Play if !playing => Some(ID_PLAY),
+        SurfaceCommand::Stop if playing => Some(ID_PLAY),
+        SurfaceCommand::Play | SurfaceCommand::Stop => return,
+        SurfaceCommand::ZoomIn => Some(ID_ZOOM_IN),
+        SurfaceCommand::ZoomOut => Some(ID_ZOOM_OUT),
+        SurfaceCommand::Split => Some(ID_SPLIT),
+        SurfaceCommand::Undo => Some(ID_UNDO),
+        _ => None,
+    };
+    if let Some(id) = id {
+        command(f, panel, state, id, None);
+        return;
+    }
+    {
+        let mut st = state.borrow_mut();
+        let target = match (&st.editor, &st.view, st.rate) {
+            (Some(e), Some(v), Some(rate)) => {
+                let starts = control_surface::track_starts(e.tracks().into_iter().map(|t| t.span));
+                control_surface::cursor_target(
+                    cmd,
+                    e.cursor(),
+                    e.total(),
+                    rate,
+                    v.samples_per_pixel(),
+                    &starts,
+                )
+            }
+            _ => None,
+        };
+        let Some(to) = target else { return };
+        jump_to(&mut st, to);
+        update_chrome(f, &st);
+        st.show_positions();
+    }
+    panel.refresh(false, None);
 }
 
 /// Selects track `row` of the track list (0-based; anything else, such as
