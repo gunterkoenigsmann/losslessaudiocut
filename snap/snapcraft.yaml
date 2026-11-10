@@ -100,16 +100,16 @@ parts:
     # gnome-46-2404 runtime, which is the same GTK 3 ABI, only newer.
     #
     # Linking must use Ubuntu's libraries throughout as well. The extension
-    # puts the SDK's binutils first on PATH and its libraries on
-    # LD_LIBRARY_PATH, where ld looks for the libraries that Ubuntu's
-    # libgtk-3 needs in turn. On arm64 it then mixed the SDK's
+    # puts the SDK's libraries on LD_LIBRARY_PATH (its tools on PATH, such
+    # as msgfmt, need them), and ld looks there for the libraries that
+    # Ubuntu's libgtk-3 needs in turn. On arm64 it then mixed the SDK's
     # libpangoft2 with Ubuntu's older libpango ("undefined reference to
-    # `pango_font_description_get_features'").
+    # `pango_font_description_get_features'"). ld searches -rpath-link
+    # directories before LD_LIBRARY_PATH, so this one points it at Ubuntu's.
     build-environment:
       - CMAKE_PREFIX_PATH: ""
       - PKG_CONFIG_PATH: ""
-      - LD_LIBRARY_PATH: ""
-      - PATH: "/usr/bin:$PATH"
+      - RUSTFLAGS: "-C link-arg=-Wl,-rpath-link=/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR"
     rust-path:
       - crates/lac-gui
       - crates/lac-cli
