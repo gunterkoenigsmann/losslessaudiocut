@@ -7,7 +7,8 @@
 //!   looks for (issue #92).
 //! - **Waveform**: how strongly tracks and the selection are coloured
 //!   (issue #132).
-//! - **Language**: the language of the user interface (`lac_app::i18n`).
+//! - **Interface**: the language of the user interface (`lac_app::i18n`)
+//!   and light or dark windows (`lac_app::theme`).
 //!
 //! Changes show at once (the caller's `preview`), so the user sees what a
 //! slider does; Cancel goes back to what was there before. The rules
@@ -24,6 +25,7 @@ use lac_app::detector_settings::{
     DetectorSettings, MIN_PAUSE_RANGE, MIN_TRACK_RANGE, TRACK_GAP_RANGE,
 };
 use lac_app::i18n::{LANGUAGES, n_, tr};
+use lac_app::theme::Theme;
 use wxdragon::prelude::*;
 
 use crate::icons::Icon;
@@ -65,8 +67,8 @@ pub fn show(
     book.add_page(&detection, &tr("Detection"), true, Some(0));
     let waveform = waveform_page(&book, &chosen, &preview);
     book.add_page(&waveform, &tr("Waveform"), false, Some(1));
-    let language = language_page(&book, &chosen);
-    book.add_page(&language, &tr("Language"), false, Some(2));
+    let interface = interface_page(&book, &chosen);
+    book.add_page(&interface, &tr("Interface"), false, Some(2));
 
     let buttons = StdDialogButtonSizerBuilder::new().build();
     // wxDialog closes itself for these two ids, with them as the result.
@@ -236,11 +238,14 @@ fn detector_controls(
     sizer.add(&defaults, 0, SizerFlag::All, GAP);
 }
 
-/// The "Language" page: the system's language or one of the built-in
-/// translations. Menus and windows are built once, so the choice takes
-/// effect at the next start; nothing to preview.
-fn language_page(book: &Notebook, chosen: &Rc<Cell<Options>>) -> Panel {
+/// The "Interface" page: the system's language or one of the built-in
+/// translations, and light, dark or the system's windows (issue #104).
+/// Menus and windows are built once, so both take effect at the next
+/// start; nothing to preview.
+fn interface_page(book: &Notebook, chosen: &Rc<Cell<Options>>) -> Panel {
     let page = Panel::builder(book).build();
+    let label = |text: &str| StaticText::builder(&page).with_label(text).build();
+    let language_label = label(&tr("Language"));
     let mut names = vec![tr("The system's language").into_owned()];
     names.extend(LANGUAGES.iter().map(|(_, name)| name.to_string()));
     let current = chosen
@@ -264,14 +269,44 @@ fn language_page(book: &Notebook, chosen: &Rc<Cell<Options>>) -> Panel {
             chosen.set(o);
         });
     }
+    let theme_label = label(&tr("Windows"));
+    let themes: Vec<String> = Theme::ALL
+        .iter()
+        .map(|t| tr(t.label()).into_owned())
+        .collect();
+    let current = Theme::ALL.iter().position(|t| *t == chosen.get().theme);
+    let theme = Choice::builder(&page)
+        .with_choices(themes)
+        .with_selection(current.and_then(|i| u32::try_from(i).ok()))
+        .build();
+    {
+        let chosen = Rc::clone(chosen);
+        theme.on_selection_changed(move |_| {
+            let mut o = chosen.get();
+            if let Some(&t) = theme
+                .get_selection()
+                .and_then(|i| Theme::ALL.get(i as usize))
+            {
+                o.theme = t;
+            }
+            chosen.set(o);
+        });
+    }
     let note = StaticText::builder(&page)
         .with_label(&tr(
-            "The new language is used when the program starts the next time.",
+            "A new language or look is used when the program starts the next time.",
         ))
         .build();
     note.wrap(TEXT_WIDTH);
+    let grid = FlexGridSizer::builder(2, 2)
+        .with_gap(Size::new(GAP, GAP))
+        .build();
+    for (l, c) in [(&language_label, &choice), (&theme_label, &theme)] {
+        grid.add(l, 0, SizerFlag::AlignCenterVertical, 0);
+        grid.add(c, 0, SizerFlag::Expand, 0);
+    }
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
-    sizer.add(&choice, 0, SizerFlag::All, GAP);
+    sizer.add_sizer(&grid, 0, SizerFlag::All, GAP);
     sizer.add(
         &note,
         0,

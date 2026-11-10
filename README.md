@@ -67,8 +67,9 @@ offered as tracks (off for recorded web radio that changes its title
 every few seconds); the suggestions in the waveform follow at once,
 without analysing the file again. *Waveform* sets how
 strongly tracks and the selection are coloured. Changes show at once;
-Cancel takes them back. *Language* chooses between English, German and
-the system's language, used from the next start.
+Cancel takes them back. *Interface* chooses the language (English, German
+or the system's) and light or dark windows (or like the system, the
+default); both apply from the next start.
 
 Ctrl+K starts a new track at the cursor (or the selection start), Ctrl+J
 joins the track under the cursor with the one before it, and F2 names it.
