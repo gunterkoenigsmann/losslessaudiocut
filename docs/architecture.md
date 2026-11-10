@@ -726,6 +726,7 @@ packets in the same state. This gives:
 | Exactness | packet granularity first; sample-exact trimming metadata is a later, optional feature (the `CutPlan` fields exist from the start, set to 0) |
 | Scrubbing | grain restart while dragging (~40 ms grains, 5 ms crossfade) first; varispeed and pitch-preserving scrub later as further render modes |
 | Playback speed | adjustable (e.g. 0.5x-3x), pitch-preserving (WSOLA) by default, varispeed as option; listening only |
+| Translations | gettext `.po` files built into the binary, read by our own small parser (`lac_app::i18n`); the template is extracted from the code and merged into the `.po` files by a weekly workflow, not by hand |
 | Video | future extension, see section 13; the core model must not rule it out |
 
 ## 12. Open questions

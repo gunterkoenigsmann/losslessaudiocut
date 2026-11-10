@@ -67,7 +67,8 @@ offered as tracks (off for recorded web radio that changes its title
 every few seconds); the suggestions in the waveform follow at once,
 without analysing the file again. *Waveform* sets how
 strongly tracks and the selection are coloured. Changes show at once;
-Cancel takes them back.
+Cancel takes them back. *Language* chooses between English, German and
+the system's language, used from the next start.
 
 Ctrl+K starts a new track at the cursor (or the selection start), Ctrl+J
 joins the track under the cursor with the one before it, and F2 names it.
@@ -226,6 +227,15 @@ Some tests cross-check results with `ffmpeg`, `flac`, `oggdec`
 (vorbis-tools) and `mpg123` if they are installed; set `LAC_REQUIRE_TOOLS=1` to make missing tools an error.
 Test fixtures are regenerated with `crates/lac-container/tests/fixtures/generate.sh`. See
 [`AGENTS.md`](AGENTS.md) for conventions.
+
+Texts shown to the user are marked with `tr`, `trf`, `tr_menu` or `n_`
+from `lac_app::i18n`; the translations are gettext files in
+`crates/lac-app/po/`, built into the program. A weekly workflow
+(`.github/workflows/translations.yml`) writes the template
+`messages.pot` from the code (`cargo run -p lac-app --example update_pot`),
+merges it into each `.po` file with `msgmerge` and opens a pull request,
+so changed texts never cause conflicts in the `.po` files. Untranslated
+texts show in English.
 
 Release packages (Windows zip and installer, macOS DMG, Linux AppImage) are
 built by CI when a version tag is pushed; see

@@ -1,0 +1,104 @@
+# Weekly update of the translation files (issue #103), as wxMaxima does it.
+#
+# The texts to translate are marked in the code (`tr`, `trf`, `tr_menu`,
+# `n_` from `lac_app::i18n`). Nobody updates `crates/lac-app/po/` by hand
+# when changing such a text, and no test asks for it, so code changes never
+# conflict in the .po files. Instead this workflow
+#
+# 1. writes the template `po/messages.pot` from the code
+#    (`cargo run -p lac-app --example update_pot`),
+# 2. merges it into every `po/*.po` with gettext's `msgmerge`, which keeps
+#    the translations, marks texts that changed a little as fuzzy (the
+#    program shows those in English until a translator checks them) and
+#    keeps removed ones at the end as obsolete,
+# 3. offers the result as the pull request `i18n/update-po`, rebuilt from
+#    main every week, and starts CI on it (see cargo-update.yml for why a PR
+#    made with GITHUB_TOKEN needs that).
+#
+# The PR is not merged automatically: it is the translators' to-do list.
+# Merging it untranslated is fine too; new texts then show in English.
+name: Translations
+
+on:
+  schedule:
+    # Sundays 05:23 UTC: after the Saturday cargo update.
+    - cron: "23 5 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BRANCH: i18n/update-po
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install gettext
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gettext
+      # The example only needs lac-app and what it depends on, not FFmpeg
+      # or wxWidgets.
+      - name: Extract the texts
+        run: cargo run -p lac-app --example update_pot
+      - name: Merge into the translations
+        id: merge
+        run: |
+          for po in crates/lac-app/po/*.po; do
+            msgmerge --quiet --update --backup=none "$po" crates/lac-app/po/messages.pot
+            msgfmt --check --output-file=/dev/null "$po"
+          done
+          if [ -z "$(git status --porcelain crates/lac-app/po)" ]; then
+            echo "The translation files are up to date."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          # What is left to translate, for the PR description.
+          for po in crates/lac-app/po/*.po; do
+            echo "- \`$(basename "$po")\`: $(msgfmt --statistics --output-file=/dev/null "$po" 2>&1)"
+          done > "$RUNNER_TEMP/stats.md"
+      - name: Push branch
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$BRANCH"
+          git add crates/lac-app/po
+          git commit -m "Update the translation files from the code"
+          # The branch is ours alone and rebuilt from main every week.
+          git push --force origin "$BRANCH"
+      - name: Open or update the pull request
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          {
+            echo "Weekly update of the translation files from the code (workflow \`translations.yml\`)."
+            echo
+            echo "New and changed texts need a translation; fuzzy ones are guesses by"
+            echo "\`msgmerge\` and show in English until the \`#, fuzzy\` line is removed."
+            echo
+            cat "$RUNNER_TEMP/stats.md"
+          } > "$RUNNER_TEMP/body.md"
+          if number="$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number')" && [ -n "$number" ]; then
+            gh pr edit "$number" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create --head "$BRANCH" --base main \
+              --title "Update the translation files" --body-file "$RUNNER_TEMP/body.md" || {
+              echo "::error::Could not open the PR. Enable Settings -> Actions -> General -> 'Allow GitHub Actions to create and approve pull requests'."
+              exit 1
+            }
+          fi
+      - name: Start CI on the branch
+        if: steps.merge.outputs.changed == 'true'
+        run: gh workflow run ci.yml --ref "$BRANCH"

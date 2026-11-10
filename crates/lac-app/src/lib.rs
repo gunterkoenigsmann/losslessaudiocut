@@ -42,6 +42,7 @@
 //! - [`context_menu`]: the waveform's right-click menu.
 //! - [`perspective`]: views of the waveform around the selection's edges.
 //! - [`detector_settings`]: the pause and track detector's user settings.
+//! - [`i18n`]: translations of the user interface.
 //! - [`appearance`]: how strongly track tints and the selection colour.
 //!
 //! See `docs/architecture.md` in the repository for how this crate fits in.
@@ -56,6 +57,7 @@ pub mod editor;
 pub mod export_job;
 pub mod file_types;
 pub mod hover;
+pub mod i18n;
 pub mod launch;
 pub mod layout;
 pub mod log;

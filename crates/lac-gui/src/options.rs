@@ -34,6 +34,8 @@ const MIN_TRACK: &str = "/Detection/MinTrackSecs";
 const TIMBRE: &str = "/Detection/Timbre";
 /// Key of [`DetectorSettings::key`].
 const KEY: &str = "/Detection/Key";
+/// Key of [`Options::language`]; empty for the system's language.
+const LANGUAGE: &str = "/Interface/Language";
 
 /// The remembered options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +57,9 @@ pub struct Options {
     /// Settings > Detection: what counts as a pause and a track start
     /// (issue #92).
     pub detector: DetectorSettings,
+    /// Settings > Language: a code of `lac_app::i18n::LANGUAGES`, `None`
+    /// for the system's language. Takes effect at the next start.
+    pub language: Option<&'static str>,
 }
 
 impl Default for Options {
@@ -66,6 +71,7 @@ impl Default for Options {
             chained_links: true,
             appearance: Appearance::default(),
             detector: DetectorSettings::default(),
+            language: None,
         }
     }
 }
@@ -93,6 +99,7 @@ impl Options {
                 key: c.read_bool(KEY, d.detector.key),
             }
             .normalized(),
+            language: lac_app::i18n::language_code(&c.read_string(LANGUAGE, "")),
         }
     }
 
@@ -111,6 +118,7 @@ impl Options {
         c.write_long(MIN_TRACK, self.detector.min_track_secs.into());
         c.write_bool(TIMBRE, self.detector.timbre);
         c.write_bool(KEY, self.detector.key);
+        c.write_string(LANGUAGE, self.language.unwrap_or(""));
         c.flush(false);
     }
 }
@@ -156,6 +164,7 @@ mod tests {
                 chained_links: true,
                 appearance: Appearance::default(),
                 detector: DetectorSettings::default(),
+                language: None,
             }
         );
     }

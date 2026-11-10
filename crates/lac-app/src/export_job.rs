@@ -27,6 +27,7 @@ use std::thread::JoinHandle;
 use lac_core::{SamplePos, TagField};
 
 use crate::editor::{Editor, Track, describe_export};
+use crate::i18n::trf;
 use crate::{CutRequest, KeptRange, Source, TagEdits};
 
 /// What an export produced: per kept range what it became, or a message
@@ -246,14 +247,17 @@ pub fn describe_outcomes(outcomes: &[ExportOutcome], rate: u32) -> String {
             o.result
                 .as_ref()
                 .err()
-                .map(|e| format!("{} failed: {e}", file(o)))
+                .map(|e| trf("{file} failed: {e}", &[("file", &file(o)), ("e", e)]))
         })
         .collect();
     let ok = outcomes.len() - failed.len();
     let mut out = match (outcomes, ok) {
         ([one], 1) => format!("{}: {}", file(one), describe_export(&kept, rate)),
         (_, 0) => String::new(),
-        (_, n) => format!("{n} files: {}", describe_export(&kept, rate)),
+        (_, n) => trf(
+            "{n} files: {report}",
+            &[("n", &n), ("report", &describe_export(&kept, rate))],
+        ),
     };
     for f in failed {
         if !out.is_empty() {
@@ -266,7 +270,7 @@ pub fn describe_outcomes(outcomes: &[ExportOutcome], rate: u32) -> String {
     notes.sort();
     notes.dedup();
     for n in notes {
-        out += &format!(". Note: {n}");
+        out += &trf(". Note: {note}", &[("note", n)]);
     }
     out
 }

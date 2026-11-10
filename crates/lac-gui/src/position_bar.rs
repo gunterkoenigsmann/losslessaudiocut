@@ -4,6 +4,7 @@
 //! What it shows and what typing into it does is decided in
 //! [`lac_app::positions`]; this module only makes and fills the widgets.
 
+use lac_app::i18n::tr;
 use lac_app::positions::{CLOCK_WIDEST, Field, Positions};
 use wxdragon::prelude::*;
 
@@ -49,18 +50,18 @@ impl PositionBar {
         };
         // The tooltips say what Enter does (see `lac_app::positions::apply`).
         let start = field(
-            "Start",
-            "Selection start; type a time (s, m:ss, h:mm:ss or @frames) and press Enter",
+            &tr("Start"),
+            &tr("Selection start; type a time (s, m:ss, h:mm:ss or @frames) and press Enter"),
             Field::Start,
         );
         let end = field(
-            "End",
-            "Selection end; type a time and press Enter to select up to there",
+            &tr("End"),
+            &tr("Selection end; type a time and press Enter to select up to there"),
             Field::End,
         );
         let length = field(
-            "Length",
-            "Selection length; type a time and press Enter to change the end",
+            &tr("Length"),
+            &tr("Selection length; type a time and press Enter to change the end"),
             Field::Length,
         );
         sizer.add_spacer(panel.from_dip_int(16));
@@ -80,7 +81,7 @@ impl PositionBar {
         // label, and a later layout of the bar must not shrink the clock to
         // a short label and crop the next, longer one (issue #94).
         clock.set_min_size(clock.get_best_size());
-        clock.set_tooltip("Where playback is, or where it starts (source time)");
+        clock.set_tooltip(&tr("Where playback is, or where it starts (source time)"));
         sizer.add(
             &clock,
             0,
