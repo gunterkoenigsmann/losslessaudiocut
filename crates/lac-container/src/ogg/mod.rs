@@ -1335,6 +1335,7 @@ mod tests {
                 trim_end: 0,
                 padding_before: 0,
                 padding_after: 0,
+                video: None,
             })
             .collect();
         let mut out = Cursor::new(Vec::new());

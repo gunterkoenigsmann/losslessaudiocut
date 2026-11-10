@@ -171,6 +171,39 @@ fn flac_is_detected_and_cut() {
     assert!(!text.contains("warning"), "{text}");
 }
 
+/// Cutting a phone-style video keeps its video track: the part after
+/// the deleted one starts at the keyframe at 1 s.
+#[test]
+fn videos_are_cut_with_their_pictures() {
+    let d = temp_dir("video");
+    let input = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../lac-container/tests/fixtures/video_h264_aac.mp4");
+    let output = d.join("out.mp4");
+    let out = lac()
+        .arg("cut")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .args(["--delete", "0.6..1.2"])
+        .output()
+        .expect("run lac");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let info = lac().arg("info").arg(&output).output().expect("run lac");
+    let text = String::from_utf8_lossy(&info.stdout);
+    // 0.6 s (18 frames), then from the keyframe at 1 s to the end at 2 s
+    // (30 frames); the audio within half an AAC frame of that.
+    assert!(
+        text.contains("video:       H.264, 64x64, 48 frames"),
+        "{text}"
+    );
+    assert!(text.contains("length:      0:01.59"), "{text}");
+    assert!(!text.contains("warning"), "{text}");
+}
+
 #[test]
 fn tags_are_set_and_shown() {
     let d = temp_dir("tags");

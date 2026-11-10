@@ -62,6 +62,10 @@ pub struct Mp4Video {
     delay: MediaTime,
     /// Frames marked as sync samples that are no keyframes.
     demoted: usize,
+    /// The `tkhd` display matrix, as stored.
+    tkhd_matrix: [u8; 36],
+    /// The `tkhd` width and height (16.16), as stored.
+    tkhd_size: [u8; 8],
 }
 
 impl Mp4Video {
@@ -93,6 +97,24 @@ impl Mp4Video {
     /// first shown frame (a leading empty edit), usually 0.
     pub fn delay(&self) -> MediaTime {
         self.delay
+    }
+
+    /// The video media time that belongs to the movie's start (audio
+    /// sample 0): the first shown media time minus the delay. Negative
+    /// when the video starts later than the movie.
+    pub fn video_offset(&self) -> MediaTime {
+        self.shown.start - self.delay
+    }
+
+    /// The track's display matrix (`tkhd`), as stored, for exports.
+    pub fn tkhd_matrix(&self) -> [u8; 36] {
+        self.tkhd_matrix
+    }
+
+    /// The track's display width and height (`tkhd`, 16.16 fixed point),
+    /// as stored, for exports.
+    pub fn tkhd_size(&self) -> [u8; 8] {
+        self.tkhd_size
     }
 
     /// Number of frames the file marks as keyframes although decoding
@@ -133,12 +155,22 @@ pub(super) fn parse_video_track<R: Read + Seek + ?Sized>(
     let entry = parse_visual_entry(stsd.body)?;
     let mut stsd_box = Vec::new();
     boxes::put(&mut stsd_box, b"stsd", stsd.body);
-    let rotation = boxes::find(trak.body, b"tkhd")
-        .and_then(|b| tkhd_rotation(b.body))
-        .unwrap_or_else(|| {
-            warnings.push("the video's display matrix is no plain rotation; ignoring it".into());
-            0
-        });
+    let tkhd = boxes::find(trak.body, b"tkhd").map(|b| b.body);
+    let (tkhd_matrix, tkhd_size) = tkhd.and_then(tkhd_layout).unwrap_or_else(|| {
+        // Identity matrix and the coded size.
+        let mut m = [0u8; 36];
+        m[0..4].copy_from_slice(&0x1_0000u32.to_be_bytes());
+        m[16..20].copy_from_slice(&0x1_0000u32.to_be_bytes());
+        m[32..36].copy_from_slice(&0x4000_0000u32.to_be_bytes());
+        let mut size = [0u8; 8];
+        size[0..4].copy_from_slice(&(entry.width << 16).to_be_bytes());
+        size[4..8].copy_from_slice(&(entry.height << 16).to_be_bytes());
+        (m, size)
+    });
+    let rotation = tkhd.and_then(tkhd_rotation).unwrap_or_else(|| {
+        warnings.push("the video's display matrix is no plain rotation; ignoring it".into());
+        0
+    });
 
     let Samples {
         offsets,
@@ -246,7 +278,18 @@ pub(super) fn parse_video_track<R: Read + Seek + ?Sized>(
         shown,
         delay,
         demoted,
+        tkhd_matrix,
+        tkhd_size,
     })
+}
+
+/// The display matrix and the width and height of a `tkhd` body, as
+/// stored (ISO/IEC 14496-12 8.3.2).
+fn tkhd_layout(b: &[u8]) -> Option<([u8; 36], [u8; 8])> {
+    let at = if *b.first()? == 1 { 52 } else { 40 };
+    let matrix = b.get(at..at + 36)?.try_into().ok()?;
+    let size = b.get(at + 36..at + 44)?.try_into().ok()?;
+    Some((matrix, size))
 }
 
 /// Parses the first entry of a video `stsd` body (ISO/IEC 14496-12

@@ -267,9 +267,10 @@ fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPl
 fn fixtures_open_cleanly() {
     for (name, rate, channels, len) in FIXTURES {
         let f = open(&fixture(name));
-        let others = usize::from(name.contains("video"));
-        assert_eq!(f.warnings().len(), others, "{name}: {:?}", f.warnings());
-        assert_eq!(f.other_tracks(), others, "{name}");
+        // The video track of the phone fixture is read, not ignored.
+        assert!(f.warnings().is_empty(), "{name}: {:?}", f.warnings());
+        assert_eq!(f.other_tracks(), 0, "{name}");
+        assert_eq!(f.video().is_some(), name.contains("video"), "{name}");
         let alac = matches!(f.codec(), Mp4Codec::Alac { .. });
         assert_eq!(alac, name.contains("alac"), "{name}");
         assert_eq!(f.index().info().sample_rate, rate, "{name}");

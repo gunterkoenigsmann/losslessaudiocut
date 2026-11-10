@@ -13,14 +13,26 @@
 //!    order: sizes, decode and presentation times (ffmpeg shifts both by
 //!    the edit list's media time) and keyframe flags, except for the
 //!    keyframes we demote because decoding cannot start there.
+//! 3. Cuts copy frames verbatim: re-opening an export yields exactly the
+//!    planned source frames, byte for byte.
+//! 4. The golden rule for video, checked with ffmpeg (an independent
+//!    demuxer and decoder): the pictures of an export, decoded, are the
+//!    source's pictures of the planned ranges, bit for bit (frame MD5s).
+//!    H.264, HEVC and the other codecs are decoded bit-exactly by any
+//!    conforming decoder, so there is no window at joins.
+//! 5. Audio and video of an export are equally long, to within half an
+//!    audio packet.
 
 mod common;
 
 use std::io::Cursor;
 
-use common::{fixture, fixture_path, run_tool};
+use std::ops::Range;
+use std::path::Path;
+
+use common::{fixture, fixture_path, run_tool, temp_file};
 use lac_container::mp4::Mp4File;
-use lac_core::{MediaTime, VideoCodec};
+use lac_core::{MediaTime, SamplePos, VideoCodec, VideoIndex};
 
 /// Expected properties of a video fixture.
 struct Expected {
@@ -230,6 +242,19 @@ fn packets_match_ffprobe() {
     }
 }
 
+/// ffmpeg's fragmented files without an edit list stretch the first AAC
+/// sample's duration over the B-frame delay (3200 instead of 1024 ticks
+/// here). Each AAC frame still decodes to 1024 samples, and the audio
+/// plays that much later than the movie's start (the video's alignment).
+#[test]
+fn a_stretched_first_aac_sample_is_one_frame() {
+    let f = open("video_h264_fragmented.mp4");
+    // 95 AAC frames, as ffprobe lists them.
+    assert_eq!(f.index().packets().len(), 95);
+    assert!(f.index().packets().iter().all(|p| p.n_samples == 1024));
+    assert_eq!(f.index().total_samples(), 95 * 1024);
+}
+
 /// A video track that cannot be read is skipped with a warning; the audio
 /// still opens.
 #[test]
@@ -259,4 +284,198 @@ fn mp4v_entries_name_their_object_type() {
     let f = open("mp4_aac_with_video.mp4");
     let v = f.video().expect("video");
     assert_eq!(v.index().info().codec, VideoCodec::Other(*b"jpeg"));
+}
+
+// ------------------------------------------------------------ cutting
+
+/// One 30 fps frame at 48 kHz, in audio samples.
+const FRAME: SamplePos = 1600;
+
+/// Cuts `name` to `keep` (audio sample ranges) and returns the output.
+fn cut(name: &str, keep: &[Range<SamplePos>]) -> (Mp4File, Vec<lac_core::CutPlan>, Vec<u8>) {
+    let data = fixture(name);
+    let f = open(name);
+    let plans = f.plan(keep).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let mut out = Cursor::new(Vec::new());
+    f.write_cut(&mut Cursor::new(&data), &plans, None, &mut out)
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+    (f, plans, out.into_inner())
+}
+
+/// The source frames (decode indexes, in display order) whose display
+/// starts inside `range`.
+fn shown_frames(index: &VideoIndex, range: &Range<MediaTime>) -> Vec<usize> {
+    index
+        .display_order()
+        .iter()
+        .copied()
+        .filter(|&k| range.contains(&index.presentation_time(k)))
+        .collect()
+}
+
+/// MD5 of each picture ffmpeg decodes from `file`, in display order, or
+/// `None` without ffmpeg (or without the decoder `decoder`).
+fn frame_md5s(file: &Path, decoder: Option<&str>) -> Option<Vec<String>> {
+    use std::ffi::OsStr;
+    let mut args: Vec<&OsStr> = vec![OsStr::new("-v"), OsStr::new("error")];
+    if let Some(d) = decoder {
+        args.extend([OsStr::new("-c:v"), OsStr::new(d)]);
+    }
+    args.push(OsStr::new("-i"));
+    args.push(file.as_os_str());
+    for a in ["-map", "0:v:0", "-f", "framemd5", "-"] {
+        args.push(OsStr::new(a));
+    }
+    let o = run_tool("ffmpeg", &args)?;
+    if !o.status.success() {
+        let err = String::from_utf8_lossy(&o.stderr);
+        if decoder.is_some() && err.contains("Unknown decoder") {
+            eprintln!("ffmpeg lacks the decoder {decoder:?}, skipping");
+            return None;
+        }
+        panic!("ffmpeg failed on {}: {err}", file.display());
+    }
+    let text = String::from_utf8(o.stdout).expect("utf-8");
+    Some(
+        text.lines()
+            .filter(|l| !l.starts_with('#'))
+            .filter_map(|l| l.rsplit(',').next().map(|m| m.trim().to_owned()))
+            .collect(),
+    )
+}
+
+/// The decoder to compare `codec` with. ffmpeg 6.1 with libdav1d shows
+/// the frames an edit list hides in front of a cut and drops as many
+/// after them (it counts discarded frames without the decoder's delay);
+/// libaom, like every other decoder here, honours the edit list.
+fn decoder_for(codec: VideoCodec) -> Option<&'static str> {
+    (codec == VideoCodec::Av1).then_some("libaom-av1")
+}
+
+/// Checks oracles 3 to 5 for one cut.
+fn check_cut(name: &str, keep: &[Range<SamplePos>]) {
+    let (f, plans, out) = cut(name, keep);
+    let v = f.video().expect("video");
+    let index = v.index();
+    let o = Mp4File::open(&mut Cursor::new(&out)).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let ov = o
+        .video()
+        .unwrap_or_else(|| panic!("{name}: export without video"));
+
+    // 3. Verbatim frames, in the planned order.
+    let planned: Vec<usize> = plans
+        .iter()
+        .filter_map(|p| p.video.as_ref())
+        .flat_map(|p| p.frames.clone())
+        .collect();
+    assert_eq!(ov.index().frames().len(), planned.len(), "{name}");
+    let data = fixture(name);
+    for (k, (src, dst)) in planned.iter().zip(ov.index().frames()).enumerate() {
+        let s = &index.frames()[*src];
+        let a = &data[s.byte_offset as usize..][..s.byte_len as usize];
+        let b = &out[dst.byte_offset as usize..][..dst.byte_len as usize];
+        assert!(a == b, "{name}: frame {k} differs from source frame {src}");
+        assert_eq!(s.sync, dst.sync, "{name}: keyframe flag of frame {k}");
+    }
+
+    // 5. Audio and video end together (in seconds, within half a packet
+    // of 1024 samples at 48 kHz); a delayed video counts from 0.
+    let audio_s = o.index().total_samples() as f64 / 48_000.0;
+    let shown = ov.shown();
+    let video_s =
+        (ov.delay() + shown.end - shown.start) as f64 / f64::from(ov.index().info().timescale);
+    assert!(
+        (audio_s - video_s).abs() <= 512.0 / 48_000.0 + 1e-3,
+        "{name}: audio {audio_s} s, video {video_s} s"
+    );
+
+    // 4. The decoded pictures (ffmpeg).
+    let decoder = decoder_for(index.info().codec);
+    let src_path = fixture_path(name);
+    let Some(src) = frame_md5s(&src_path, decoder) else {
+        return;
+    };
+    let ext = name.rsplit('.').next().unwrap_or("mp4");
+    let out_path = temp_file(&format!("video-cut.{ext}"), &out);
+    let Some(got) = frame_md5s(&out_path, decoder) else {
+        return;
+    };
+    let _ = std::fs::remove_file(&out_path);
+    // ffmpeg lists the source's frames from the first one shown.
+    let first_shown = shown_frames(index, &v.shown());
+    assert_eq!(src.len(), first_shown.len(), "{name}: source frames");
+    let rank = |k: usize| first_shown.iter().position(|&x| x == k).expect("shown");
+    let want: Vec<&String> = plans
+        .iter()
+        .filter_map(|p| p.video.as_ref())
+        .flat_map(|p| shown_frames(index, &p.actual))
+        .map(|k| &src[rank(k)])
+        .collect();
+    let got: Vec<&String> = got.iter().collect();
+    assert_eq!(got, want, "{name}: decoded pictures of {keep:?}");
+}
+
+/// Trimming both ends: frame-exact (the edit list hides the frames
+/// before the start back to the keyframe).
+#[test]
+fn trimmed_videos_show_exactly_the_kept_frames() {
+    for x in FIXTURES {
+        check_cut(x.name, std::slice::from_ref(&(9 * FRAME..51 * FRAME)));
+    }
+}
+
+/// Deleting a part: the part after the join starts at a keyframe (all
+/// frames are keyframes in ProRes), or the parts merge where the keyframe
+/// lies before the deleted part (the H.264 open GOP has only one).
+#[test]
+fn joins_start_at_keyframes() {
+    for x in FIXTURES {
+        check_cut(x.name, &[0..20 * FRAME, 36 * FRAME..60 * FRAME]);
+        check_cut(
+            x.name,
+            &[
+                3 * FRAME..10 * FRAME,
+                17 * FRAME..40 * FRAME,
+                47 * FRAME..58 * FRAME,
+            ],
+        );
+    }
+}
+
+#[test]
+fn join_points_are_where_the_keyframes_are() {
+    let (f, plans, _) = cut(
+        "video_h264_aac.mp4",
+        &[0..20 * FRAME, 36 * FRAME..60 * FRAME],
+    );
+    let index = f.video().expect("video").index();
+    let starts: Vec<MediaTime> = plans
+        .iter()
+        .map(|p| p.video.as_ref().expect("video").actual.start)
+        .collect();
+    // 512 ticks per frame; the second part starts at the keyframe 30.
+    assert_eq!(starts, [0, 30 * 512]);
+    assert!(index.frames()[30].sync);
+    // The audio follows: its second part starts at about 1 s.
+    assert!(plans[1].actual.start.abs_diff(30 * FRAME) <= 512);
+
+    let (_, plans, _) = cut(
+        "video_h264_opengop_rot90.mp4",
+        &[0..20 * FRAME, 36 * FRAME..60 * FRAME],
+    );
+    assert_eq!(plans.len(), 1, "one keyframe only: the parts merge");
+}
+
+/// The rotation and the edit list survive a cut.
+#[test]
+fn exports_keep_rotation_and_codec() {
+    let (_, _, out) = cut(
+        "video_h264_opengop_rot90.mp4",
+        std::slice::from_ref(&(9 * FRAME..51 * FRAME)),
+    );
+    let o = Mp4File::open(&mut Cursor::new(&out)).expect("open");
+    let info = o.video().expect("video").index().info();
+    assert_eq!(info.rotation, 270);
+    assert_eq!(info.codec, VideoCodec::H264);
+    assert!(o.warnings().is_empty(), "{:?}", o.warnings());
 }

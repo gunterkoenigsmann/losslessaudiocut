@@ -14,16 +14,19 @@
 //!   ([`CutCapabilities`], [`CutPlan`], [`plan_cut`]),
 //! - video streams and keyframe-aware cut planning ([`VideoIndex`],
 //!   [`VideoCutPlan`], [`plan_video_cut`]), with times in each stream's own
-//!   timescale ([`MediaTime`], [`rescale`]).
+//!   timescale ([`MediaTime`], [`rescale`]), and keeping audio and video
+//!   in sync when cutting both ([`plan_av_cuts`]).
 //!
 //! See `docs/architecture.md` in the repository for the overall design.
 
+mod av;
 mod edit;
 mod packet;
 mod plan;
 mod tags;
 mod video;
 
+pub use av::plan_av_cuts;
 pub use edit::{EditError, EditList, Segment, SourceId, Track};
 pub use packet::{AudioStreamInfo, IndexError, PacketFlags, PacketIndex, PacketInfo};
 pub use plan::{CutCapabilities, CutPlan, PlanError, plan_cut, plan_cuts};

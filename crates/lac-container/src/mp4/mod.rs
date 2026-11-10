@@ -12,10 +12,10 @@
 //! one track; its sample table (`mdia/minf/stbl`) lists every sample
 //! (= packet): sizes (`stsz`), durations (`stts`), and where they lie in
 //! the file (`stco`/`co64` chunk offsets plus `stsc`, which maps chunks to
-//! samples). Only the first audio track is cut; other tracks (video,
-//! chapters as text tracks, ...) are not written, with a warning. The
-//! first video track is read into a [`lac_core::VideoIndex`] (see
-//! [`video`]) for display and, later, for cutting videos (issue #156).
+//! samples). The first audio track and the first video track are cut
+//! (the video is read into a [`lac_core::VideoIndex`], see [`video`]);
+//! other tracks (chapters as text tracks, a second audio track, ...) are
+//! not written, with a warning.
 //!
 //! Fragmented files, as recorders and streaming tools write them so that
 //! an interrupted recording stays readable, add samples after `moov` in
@@ -28,8 +28,11 @@
 //! ## Timeline
 //!
 //! Each sample's decoder output is known without decoding: an AAC frame
-//! always yields the same number of samples (1024 for AAC-LC, the largest
-//! `stts` duration of the track), an ALAC frame its own `stts` duration.
+//! always yields the same number of samples (1024 for AAC-LC, the most
+//! common `stts` duration of the track), an ALAC frame its own `stts`
+//! duration. ffmpeg's fragmented files without an edit list lengthen the
+//! first AAC sample's duration to fill the time before it; that gap is
+//! left out of the audio timeline and only shifts the video's alignment.
 //! The decoder output that belongs to the timeline is given by the edit
 //! list (`edts/elst`, ISO/IEC 14496-12 8.6.6): its first non-empty entry's
 //! `media_time` hides the encoder delay (AAC priming, 1024 or 2112
@@ -44,10 +47,26 @@
 //!
 //! ## Writing
 //!
-//! A cut is a fresh file: the source's `ftyp`, a `moov` with one track
-//! (the source's sample description `stsd` verbatim, new sample tables, an
-//! edit list), and one `mdat` with the kept samples. `moov`
-//! comes first, so players can start before the whole file is read.
+//! A cut is a fresh file: the source's `ftyp`, a `moov` with one or two
+//! tracks (the source's sample descriptions `stsd` verbatim, new sample
+//! tables, edit lists; see `mux.rs`), and one `mdat` with the kept samples.
+//! `moov` comes first, so players can start before the whole file is
+//! read.
+//!
+//! Video (with audio, `lac_core::plan_av_cuts` plans both): kept frames
+//! are copied verbatim in decode order, from a keyframe on. The edit list
+//! hides what the first part shows before the cut's start and what the
+//! last part shows after its end, so both file ends are frame-exact; each
+//! further part starts at a clean keyframe and follows the previous one
+//! without a gap (the previous part's last decoded frame lasts as long as
+//! that needs). When the kept range starts before the first picture
+//! (B-frame delay without an edit list), a leading empty edit delays the
+//! video as in the source. The audio's join points follow the video's,
+//! within half an AAC frame.
+//!
+//! Decoders differ in honouring a video edit list: ffmpeg 6.1 with
+//! libdav1d shows AV1 frames the edit list hides and drops as many at the
+//! end; libaom and the other codecs' decoders honour it.
 //!
 //! For AAC:
 //!
@@ -81,13 +100,15 @@ pub mod aac;
 pub mod alac;
 pub mod boxes;
 pub mod ilst;
+mod mux;
 pub mod video;
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
 use lac_core::{
-    AudioStreamInfo, CutCapabilities, CutPlan, PacketFlags, PacketIndex, PacketInfo, Tags,
+    AudioStreamInfo, CutCapabilities, CutPlan, MediaTime, PacketFlags, PacketIndex, PacketInfo,
+    PlanError, Rounding, Tags, VideoCutPlan, plan_av_cuts, plan_cuts, rescale,
 };
 
 use crate::{ContainerError, Result};
@@ -102,10 +123,6 @@ const MAX_MOOV: u64 = 256 << 20;
 /// the second leaves room for decoders whose state reaches further
 /// (HE-AAC's SBR filter bank).
 pub const AAC_PREROLL_FRAMES: usize = 2;
-
-/// Samples per chunk in written files (ffmpeg writes about one second's
-/// worth; any count is valid).
-const CHUNK_SAMPLES: usize = 64;
 
 /// The codec of the audio track.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +179,12 @@ pub struct Mp4File {
     raw: Vec<RawPacket>,
     /// Decoder output samples that belong to the timeline.
     audible: Range<u64>,
+    /// How much later than the movie's start (in samples) the index's
+    /// sample 1024 plays when the first AAC sample lasts longer than it
+    /// decodes and no edit list says otherwise: ffmpeg's fragmented files
+    /// fill the time before the first packet so. Only the video's
+    /// alignment needs it; the index leaves the gap out.
+    lead: u64,
     /// Raw packet of each index entry.
     entry_raw: Vec<usize>,
     index: PacketIndex,
@@ -259,14 +282,15 @@ impl Mp4File {
                 .and_then(|h| h.body.get(8..12))
                 .unwrap_or_default();
             if handler == b"vide" && video_track.is_none() {
-                // Not cut yet, so still one of the other tracks; a video
-                // track that cannot be read never keeps the audio from
-                // opening.
-                other_tracks += 1;
+                // A video track that cannot be read never keeps the audio
+                // from opening; it is then left out like other tracks.
                 match video::parse_video_track(r, trak, movie_timescale, &frag, len, &mut warnings)
                 {
                     Ok(v) => video_track = Some(v),
-                    Err(e) => warnings.push(format!("ignoring the video track: {e}")),
+                    Err(e) => {
+                        warnings.push(format!("ignoring the video track: {e}"));
+                        other_tracks += 1;
+                    }
                 }
                 continue;
             }
@@ -287,7 +311,7 @@ impl Mp4File {
         })?;
         if other_tracks > 0 {
             warnings.push(format!(
-                "ignoring {other_tracks} other track(s); only the first audio track is cut"
+                "ignoring {other_tracks} other track(s); only the first audio and video track are cut"
             ));
         }
         let meta = boxes::path(&moov, &[b"udta", b"meta"]);
@@ -333,6 +357,7 @@ impl Mp4File {
             language: t.language,
             raw: t.raw,
             audible: t.audible,
+            lead: t.lead,
             entry_raw,
             index,
             other_tracks,
@@ -353,7 +378,8 @@ impl Mp4File {
         &self.codec
     }
 
-    /// Number of tracks besides the audio track, which are ignored.
+    /// Number of tracks besides the first audio and the first video track,
+    /// which are ignored.
     pub fn other_tracks(&self) -> usize {
         self.other_tracks
     }
@@ -408,6 +434,35 @@ impl Mp4File {
             }
         }
         Ok(false)
+    }
+
+    /// The video media time that plays with the index's audio sample 0.
+    fn video_offset(&self, v: &video::Mp4Video) -> MediaTime {
+        let lead = rescale(
+            MediaTime::try_from(self.lead).unwrap_or(0),
+            self.rate,
+            v.index().info().timescale,
+            Rounding::Nearest,
+        );
+        v.video_offset() + lead
+    }
+
+    /// Plans the joined output of the kept `ranges`: with a video track,
+    /// both tracks together ([`lac_core::plan_av_cuts`]: joins move to
+    /// keyframes, parts may merge), else the audio alone.
+    pub fn plan(&self, ranges: &[Range<u64>]) -> std::result::Result<Vec<CutPlan>, PlanError> {
+        match &self.video {
+            // The video media time shown at audio sample 0: the source's
+            // video edit list (the audio's is already in the index).
+            Some(v) => plan_av_cuts(
+                &self.index,
+                self.capabilities(),
+                v.index(),
+                self.video_offset(v),
+                ranges,
+            ),
+            None => plan_cuts(&self.index, self.capabilities(), ranges),
+        }
     }
 
     /// AAC: sample-exact at the start and end of the output file (edit
@@ -508,13 +563,17 @@ impl Mp4File {
             }
         }
         let tags = tags.unwrap_or(&self.tags);
+        let video_out = self.video_track(plans)?;
+        let video = video_out
+            .as_ref()
+            .map(|(t, frames)| (t.clone(), frames.as_slice()));
         if let Mp4Codec::Alac { cookie } = &self.codec {
             let samples = self.alac_samples(r, cookie, &kept)?;
-            return self.write_file(r, &samples, 0, 0, tags, w);
+            return self.write_file(r, &samples, (0, 0), video, tags, w);
         }
         let (Some(first), Some(last)) = (kept.first(), kept.last()) else {
             // Nothing kept: a valid file with an empty track.
-            return self.write_file(r, &[], 0, 0, tags, w);
+            return self.write_file(r, &[], (0, 0), video, tags, w);
         };
 
         // Raw packets to write: pre-roll, then the kept entries in order.
@@ -538,7 +597,134 @@ impl Mp4File {
         let lp = &self.raw[self.entry_raw[last.packets.end - 1]];
         let lp_end = lp.start + u64::from(lp.out);
         let discard = lp_end - (lp_end.min(self.audible.end) - last.trim_end);
-        self.write_file(r, &order, media_time, discard, tags, w)
+        self.write_file(r, &order, (media_time, discard), video, tags, w)
+    }
+
+    /// The video track of a cut and the source frames (decode indexes) of
+    /// its samples, from the plans' video parts; `None` when the plans
+    /// have none (audio-only planning, or a file without video).
+    ///
+    /// Frames are copied verbatim with their durations, composition
+    /// offsets and (checked) keyframe flags. Each part's decode and
+    /// presentation times are shifted so its first shown frame follows the
+    /// last shown frame of the part before; the last decoded frame of a
+    /// part gets whatever duration that needs. The edit list hides what the
+    /// first part shows before its actual start and the last part after
+    /// its actual end.
+    fn video_track(&self, plans: &[CutPlan]) -> Result<Option<(mux::TrakOut, Vec<usize>)>> {
+        let Some(v) = &self.video else {
+            return Ok(None);
+        };
+        let parts: Vec<&VideoCutPlan> = plans
+            .iter()
+            .filter_map(|p| p.video.as_ref())
+            .filter(|p| !p.frames.is_empty())
+            .collect();
+        if parts.is_empty() {
+            return Ok(None);
+        }
+        let index = v.index();
+        let n = index.frames().len();
+        let mut frames = Vec::new();
+        let mut durations: Vec<u32> = Vec::new();
+        let mut ctts = Vec::new();
+        let mut sync = Vec::new();
+        // Output time = source time + shift of the part.
+        let mut first_shift = 0;
+        // End of the decode times and of the shown span so far (output).
+        let mut dts_end: MediaTime = 0;
+        let mut shown_end: MediaTime = 0;
+        for (i, p) in parts.iter().enumerate() {
+            if p.frames.end > n || !index.frames()[p.frames.start].sync {
+                return Err(ContainerError::InvalidPlan(format!(
+                    "video frames {:?} do not start at a keyframe inside the track ({n} frames)",
+                    p.frames
+                )));
+            }
+            let first_dts = index.decode_time(p.frames.start);
+            let shift = if i == 0 {
+                first_shift = -first_dts;
+                first_shift
+            } else {
+                // Shown right after the previous part, unless the decode
+                // times would run backwards (a deeper frame reordering than
+                // before): then the previous picture stays a little longer.
+                let shift = (shown_end - p.actual.start).max(dts_end - first_dts);
+                let gap = first_dts + shift - dts_end;
+                if let Some(d) = durations.last_mut() {
+                    *d = u32::try_from(MediaTime::from(*d) + gap).map_err(|_| {
+                        ContainerError::InvalidPlan("video join gap too large".into())
+                    })?;
+                }
+                shift
+            };
+            for k in p.frames.clone() {
+                let f = &index.frames()[k];
+                frames.push(k);
+                durations.push(f.duration);
+                ctts.push(f.composition_offset);
+                sync.push(f.sync);
+            }
+            let last = p.frames.end - 1;
+            dts_end =
+                index.decode_time(last) + MediaTime::from(index.frames()[last].duration) + shift;
+            shown_end = p.actual.end + shift;
+        }
+        if durations.contains(&0) {
+            return Err(ContainerError::InvalidPlan(
+                "video frame without duration after a join".into(),
+            ));
+        }
+        let media_time = parts[0].actual.start + first_shift;
+        let shown = (shown_end - media_time).max(0);
+        let rate = self.rate;
+        let timescale = index.info().timescale;
+        let edit_duration = rescale(shown, timescale, rate, Rounding::Nearest).max(0) as u64;
+        // Where the first picture belongs on the output's (audio) timeline:
+        // the audio of the parts before it plus, inside its part, how far
+        // the picture comes after the part's audio start. It comes later
+        // when the kept range starts before the source's first picture
+        // (B-frame delay without an edit list, or a late video track); an
+        // empty edit then delays the video as in the source. A picture
+        // that would come earlier is the frame-exact start itself.
+        let first = plans
+            .iter()
+            .position(|p| p.video.as_ref().is_some_and(|v| !v.frames.is_empty()))
+            .unwrap_or(0);
+        let before: u64 = plans[..first]
+            .iter()
+            .map(|p| p.actual.end - p.actual.start)
+            .sum();
+        let picture = rescale(
+            parts[0].actual.start - self.video_offset(v),
+            timescale,
+            rate,
+            Rounding::Nearest,
+        );
+        let into_part = u64::try_from(picture)
+            .unwrap_or(0)
+            .saturating_sub(plans[first].actual.start);
+        let empty_edit = before + into_part;
+        let all_sync = sync.iter().all(|&s| s);
+        let trak = mux::TrakOut {
+            id: 2,
+            handler: mux::Handler::Video {
+                matrix: v.tkhd_matrix(),
+                size: v.tkhd_size(),
+            },
+            timescale,
+            language: v.language(),
+            stsd: v.stsd().to_vec(),
+            sizes: frames.iter().map(|&k| index.frames()[k].byte_len).collect(),
+            durations,
+            ctts,
+            sync: (!all_sync).then_some(sync),
+            roll: false,
+            empty_edit,
+            media_time,
+            edit_duration,
+        };
+        Ok(Some((trak, frames)))
     }
 
     /// The samples of an ALAC cut: kept frames verbatim, and each frame
@@ -602,14 +788,15 @@ impl Mp4File {
     }
 
     /// Writes `ftyp`, `moov` and `mdat` for `samples`, of whose decoder
-    /// output the first `media_time` and the last `discard` samples are
-    /// hidden.
+    /// output `trims` hides the first and the last samples (the edit
+    /// list's media time and the discarded tail), plus `video`: a video
+    /// track and the source frames (decode indexes) of its samples.
     fn write_file<R, W>(
         &self,
         r: &mut R,
         samples: &[OutSample],
-        media_time: u64,
-        discard: u64,
+        (media_time, discard): (u64, u64),
+        video: Option<(mux::TrakOut, &[usize])>,
         tags: &Tags,
         w: &mut W,
     ) -> Result<()>
@@ -643,24 +830,68 @@ impl Mp4File {
         }
         let media_duration: u64 = durations.iter().map(|&d| u64::from(d)).sum();
         let duration = decoded - media_time - discard;
-        let data_len: u64 = sizes.iter().map(|&s| u64::from(s)).sum();
         let udta = ilst::udta(&ilst::write(tags, &self.ilst_other));
         let stsd = self.stsd_for(sizes.iter().copied().max().unwrap_or(0));
 
-        let table = SampleTable {
+        let audio = mux::TrakOut {
+            id: 1,
+            handler: mux::Handler::Sound,
+            timescale: self.rate,
+            language: self.language,
             stsd,
-            durations: &durations,
+            durations,
             sizes,
-            media_time,
-            duration,
-            media_duration,
+            ctts: Vec::new(),
+            sync: None,
+            roll: matches!(self.codec, Mp4Codec::Aac { .. }),
+            empty_edit: 0,
+            media_time: i64::try_from(media_time).unwrap_or(i64::MAX),
+            edit_duration: duration,
         };
+        debug_assert_eq!(
+            audio.durations.iter().map(|&d| u64::from(d)).sum::<u64>(),
+            media_duration
+        );
+        let mut tracks = vec![audio];
+        let mut video_frames: &[usize] = &[];
+        if let Some((trak, frames)) = video {
+            tracks.push(trak);
+            video_frames = frames;
+        }
+        let chunks = mux::layout(&tracks);
+        let data_len: u64 = tracks
+            .iter()
+            .flat_map(|t| t.sizes.iter())
+            .map(|&s| u64::from(s))
+            .sum();
+        let n_samples: u64 = tracks.iter().map(|t| t.sizes.len() as u64).sum();
         // co64 and a 64-bit mdat header once the file may pass 4 GiB.
-        let large = data_len + (1 << 24) + table.sizes.len() as u64 * 16 > u64::from(u32::MAX);
+        let large = data_len + (1 << 24) + n_samples * 16 > u64::from(u32::MAX);
         let mdat_header = if large { 16 } else { 8 };
-        let probe = self.moov(&table, 0, large, &udta);
+        // Chunk offsets per track, in each track's chunk order, for media
+        // data starting at `data_start`.
+        let offsets = |data_start: u64| {
+            let mut out = vec![Vec::new(); tracks.len()];
+            let mut off = data_start;
+            for c in &chunks {
+                out[c.track].push(off);
+                off += tracks[c.track].sizes[c.samples.clone()]
+                    .iter()
+                    .map(|&s| u64::from(s))
+                    .sum::<u64>();
+            }
+            out
+        };
+        let probe = mux::moov(self.rate, &tracks, &chunks, &offsets(0), large, &udta);
         let data_start = (self.ftyp.len() + probe.len() + mdat_header) as u64;
-        let moov = self.moov(&table, data_start, large, &udta);
+        let moov = mux::moov(
+            self.rate,
+            &tracks,
+            &chunks,
+            &offsets(data_start),
+            large,
+            &udta,
+        );
         debug_assert_eq!(moov.len(), probe.len());
 
         let mut head = self.ftyp.clone();
@@ -674,10 +905,19 @@ impl Mp4File {
             head.extend(b"mdat");
         }
         w.write_all(&head)?;
-        for s in samples {
-            match s {
-                OutSample::Source(i) => w.write_all(&read_raw(r, &self.raw[*i])?)?,
-                OutSample::Rewritten { data, .. } => w.write_all(data)?,
+        let frames = self.video.as_ref().map(|v| v.index().frames());
+        for c in &chunks {
+            for i in c.samples.clone() {
+                if c.track == 0 {
+                    match &samples[i] {
+                        OutSample::Source(i) => w.write_all(&read_raw(r, &self.raw[*i])?)?,
+                        OutSample::Rewritten { data, .. } => w.write_all(data)?,
+                    }
+                } else if let Some(f) = frames.and_then(|f| f.get(video_frames[i])) {
+                    let mut buf = vec![0u8; f.byte_len as usize];
+                    read_exact_at(r, f.byte_offset, &mut buf)?;
+                    w.write_all(&buf)?;
+                }
             }
         }
         Ok(())
@@ -705,163 +945,6 @@ impl Mp4File {
         }
         stsd
     }
-
-    /// The `moov` box for `t`, with the media data starting at file offset
-    /// `data_start`.
-    fn moov(&self, t: &SampleTable, data_start: u64, large: bool, udta: &[u8]) -> Vec<u8> {
-        let fits = |v: u64| u32::try_from(v).is_ok();
-        let v1 = !fits(t.media_duration) || !fits(t.duration);
-        let time_fields = |out: &mut Vec<u8>, duration: u64| {
-            if v1 {
-                out.extend([0; 16]); // creation and modification time
-                return duration.to_be_bytes().to_vec();
-            }
-            out.extend([0; 8]);
-            (duration as u32).to_be_bytes().to_vec()
-        };
-        let version = u8::from(v1);
-        let matrix: [u32; 9] = [0x1_0000, 0, 0, 0, 0x1_0000, 0, 0, 0, 0x4000_0000];
-
-        // mvhd: the movie timescale is the sample rate, so the edit list
-        // is sample-exact.
-        let mut mvhd = Vec::new();
-        let d = time_fields(&mut mvhd, t.duration);
-        mvhd.extend(self.rate.to_be_bytes());
-        mvhd.extend(d);
-        mvhd.extend(0x1_0000u32.to_be_bytes()); // rate 1.0
-        mvhd.extend(0x0100u16.to_be_bytes()); // volume 1.0
-        mvhd.extend([0; 10]);
-        matrix.iter().for_each(|m| mvhd.extend(m.to_be_bytes()));
-        mvhd.extend([0; 24]); // pre_defined
-        mvhd.extend(2u32.to_be_bytes()); // next_track_ID
-
-        // tkhd (enabled, in movie): track 1.
-        let mut tkhd = Vec::new();
-        let d = time_fields(&mut tkhd, t.duration);
-        tkhd.extend(1u32.to_be_bytes());
-        tkhd.extend([0; 4]);
-        tkhd.extend(d);
-        tkhd.extend([0; 8]);
-        tkhd.extend(0u16.to_be_bytes()); // layer
-        tkhd.extend(1u16.to_be_bytes()); // alternate group
-        tkhd.extend(0x0100u16.to_be_bytes()); // volume
-        tkhd.extend([0; 2]);
-        matrix.iter().for_each(|m| tkhd.extend(m.to_be_bytes()));
-        tkhd.extend([0; 8]); // width, height
-
-        // elst: one edit with the trims.
-        let mut elst = 1u32.to_be_bytes().to_vec();
-        if v1 {
-            elst.extend(t.duration.to_be_bytes());
-            elst.extend(t.media_time.to_be_bytes());
-        } else {
-            elst.extend((t.duration as u32).to_be_bytes());
-            elst.extend((t.media_time as u32).to_be_bytes());
-        }
-        elst.extend(0x1_0000u32.to_be_bytes()); // media rate 1.0
-        let mut edts = Vec::new();
-        boxes::put_full(&mut edts, b"elst", version, 0, &elst);
-
-        let mut mdhd = Vec::new();
-        let d = time_fields(&mut mdhd, t.media_duration);
-        mdhd.extend(self.rate.to_be_bytes());
-        mdhd.extend(d);
-        mdhd.extend(self.language.to_be_bytes());
-        mdhd.extend([0; 2]);
-        let mut hdlr = 0u32.to_be_bytes().to_vec();
-        hdlr.extend(b"soun");
-        hdlr.extend([0; 12]);
-        hdlr.extend(b"SoundHandler\0");
-
-        let mut smhd = Vec::new();
-        boxes::put_full(&mut smhd, b"smhd", 0, 0, &[0; 4]);
-        let mut url = Vec::new();
-        boxes::put_full(&mut url, b"url ", 0, 1, &[]);
-        let mut dref = 1u32.to_be_bytes().to_vec();
-        dref.extend(url);
-        let mut dinf = Vec::new();
-        boxes::put_full(&mut dinf, b"dref", 0, 0, &dref);
-
-        let mut stbl = t.stsd.clone();
-        // stts: runs of equal durations.
-        let mut runs: Vec<(u32, u32)> = Vec::new();
-        for &d in t.durations {
-            match runs.last_mut() {
-                Some((n, v)) if *v == d => *n += 1,
-                _ => runs.push((1, d)),
-            }
-        }
-        let mut stts = (runs.len() as u32).to_be_bytes().to_vec();
-        runs.iter()
-            .for_each(|(n, d)| stts.extend([n.to_be_bytes(), d.to_be_bytes()].concat()));
-        boxes::put_full(&mut stbl, b"stts", 0, 0, &stts);
-        // stsc: full chunks of CHUNK_SAMPLES, then the remainder.
-        let n = t.sizes.len();
-        let chunks = n.div_ceil(CHUNK_SAMPLES);
-        let mut stsc_entries = Vec::new();
-        if n >= CHUNK_SAMPLES {
-            stsc_entries.push((1u32, CHUNK_SAMPLES as u32));
-        }
-        if !n.is_multiple_of(CHUNK_SAMPLES) {
-            stsc_entries.push((chunks as u32, (n % CHUNK_SAMPLES) as u32));
-        }
-        let mut stsc = (stsc_entries.len() as u32).to_be_bytes().to_vec();
-        for (c, s) in stsc_entries {
-            stsc.extend(c.to_be_bytes());
-            stsc.extend(s.to_be_bytes());
-            stsc.extend(1u32.to_be_bytes()); // sample description 1
-        }
-        boxes::put_full(&mut stbl, b"stsc", 0, 0, &stsc);
-        let mut stsz = 0u32.to_be_bytes().to_vec();
-        stsz.extend((n as u32).to_be_bytes());
-        t.sizes.iter().for_each(|s| stsz.extend(s.to_be_bytes()));
-        boxes::put_full(&mut stbl, b"stsz", 0, 0, &stsz);
-        let mut co = (chunks as u32).to_be_bytes().to_vec();
-        let mut off = data_start;
-        for c in t.sizes.chunks(CHUNK_SAMPLES) {
-            if large {
-                co.extend(off.to_be_bytes());
-            } else {
-                co.extend((off as u32).to_be_bytes());
-            }
-            off += c.iter().map(|&s| u64::from(s)).sum::<u64>();
-        }
-        boxes::put_full(&mut stbl, if large { b"co64" } else { b"stco" }, 0, 0, &co);
-        if matches!(self.codec, Mp4Codec::Aac { .. }) && n > 0 {
-            // ISO/IEC 14496-12 10.1: every AAC sample needs its
-            // predecessor (roll distance -1), as ffmpeg writes it, so
-            // seeking players decode one sample ahead.
-            let mut sgpd = b"roll".to_vec();
-            sgpd.extend(2u32.to_be_bytes()); // default_length
-            sgpd.extend(1u32.to_be_bytes());
-            sgpd.extend((-1i16).to_be_bytes());
-            boxes::put_full(&mut stbl, b"sgpd", 1, 0, &sgpd);
-            let mut sbgp = b"roll".to_vec();
-            sbgp.extend(1u32.to_be_bytes());
-            sbgp.extend((n as u32).to_be_bytes());
-            sbgp.extend(1u32.to_be_bytes());
-            boxes::put_full(&mut stbl, b"sbgp", 0, 0, &sbgp);
-        }
-
-        let mut minf = smhd;
-        boxes::put(&mut minf, b"dinf", &dinf);
-        boxes::put(&mut minf, b"stbl", &stbl);
-        let mut mdia = Vec::new();
-        boxes::put_full(&mut mdia, b"mdhd", version, 0, &mdhd);
-        boxes::put_full(&mut mdia, b"hdlr", 0, 0, &hdlr);
-        boxes::put(&mut mdia, b"minf", &minf);
-        let mut trak = Vec::new();
-        boxes::put_full(&mut trak, b"tkhd", version, 3, &tkhd);
-        boxes::put(&mut trak, b"edts", &edts);
-        boxes::put(&mut trak, b"mdia", &mdia);
-        let mut moov = Vec::new();
-        boxes::put_full(&mut moov, b"mvhd", version, 0, &mvhd);
-        boxes::put(&mut moov, b"trak", &trak);
-        moov.extend_from_slice(udta);
-        let mut out = Vec::new();
-        boxes::put(&mut out, b"moov", &moov);
-        out
-    }
 }
 
 /// A sample of an output file.
@@ -870,20 +953,6 @@ enum OutSample {
     Source(usize),
     /// A rewritten ALAC frame and its decoder output in samples.
     Rewritten { data: Vec<u8>, out: u32 },
-}
-
-/// What the sample table of an output file holds.
-struct SampleTable<'a> {
-    /// The `stsd` box, header included.
-    stsd: Vec<u8>,
-    durations: &'a [u32],
-    sizes: Vec<u32>,
-    /// Edit list start, in samples.
-    media_time: u64,
-    /// Edit list duration, in samples.
-    duration: u64,
-    /// Sum of the sample durations.
-    media_duration: u64,
 }
 
 /// The audio track as parsed from its `trak` box.
@@ -895,6 +964,8 @@ struct Track {
     language: u16,
     raw: Vec<RawPacket>,
     audible: Range<u64>,
+    /// See [`Mp4File`]'s field of the same name.
+    lead: u64,
 }
 
 /// `ftyp` for files without one: M4A, compatible with MP4 and ISO.
@@ -941,9 +1012,11 @@ fn parse_track(
     let count = offsets.len();
 
     let fixed_out = match codec {
-        // An AAC frame always decodes to the same length; the encoder
-        // may shorten the last sample's duration to state its padding.
-        Mp4Codec::Aac { .. } => durations[..count].iter().copied().max(),
+        // An AAC frame always decodes to the same length: the most common
+        // duration. The encoder may shorten the last sample's to state its
+        // padding, and a muxer may lengthen the first one's to fill a gap
+        // before it (ffmpeg's fragmented files without an edit list).
+        Mp4Codec::Aac { .. } => most_common(&durations[..count]),
         Mp4Codec::Alac { .. } => None,
     };
     let mut raw = Vec::with_capacity(count);
@@ -1007,6 +1080,10 @@ fn parse_track(
             a..b
         }
     };
+    let lead = match (edits.is_empty(), raw.first()) {
+        (true, Some(p)) => u64::from(durations[0].saturating_sub(p.out)),
+        _ => 0,
+    };
     Ok(Track {
         codec,
         channels,
@@ -1015,6 +1092,7 @@ fn parse_track(
         language,
         raw,
         audible,
+        lead,
     })
 }
 
@@ -1160,6 +1238,17 @@ fn read_samples(
         ctts,
         sync,
     })
+}
+
+/// The value that occurs most often in `values` (the largest of equally
+/// frequent ones), `None` when empty.
+fn most_common(values: &[u32]) -> Option<u32> {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    sorted
+        .chunk_by(|a, b| a == b)
+        .max_by_key(|run| (run.len(), run[0]))
+        .map(|run| run[0])
 }
 
 /// The timescale (never 0) and packed ISO 639-2 language of an `mdhd`
