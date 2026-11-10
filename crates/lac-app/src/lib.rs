@@ -45,6 +45,8 @@
 //! - [`i18n`]: translations of the user interface.
 //! - [`appearance`]: how strongly track tints and the selection colour.
 //! - [`theme`]: light or dark windows, and the track list's colours in each.
+//! - [`metrics`]: sizes of the waveform window's marks, scaled to the
+//!   screen.
 //!
 //! See `docs/architecture.md` in the repository for how this crate fits in.
 
@@ -62,6 +64,7 @@ pub mod i18n;
 pub mod launch;
 pub mod layout;
 pub mod log;
+pub mod metrics;
 pub mod minimap;
 pub mod peak_cache;
 pub mod peak_job;

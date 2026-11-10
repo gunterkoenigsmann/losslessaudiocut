@@ -61,10 +61,11 @@ use lac_app::detail::{Detail, DetailLoader};
 use lac_app::editor::{Editor, Edits};
 use lac_app::export_job::{ExportJob, default_output, describe_outcomes, track_tasks};
 use lac_app::format_samples;
-use lac_app::hover::{self, Zone};
+use lac_app::hover;
 use lac_app::i18n::{n_, tr, tr_menu, trf};
 use lac_app::launch::GuiArgs;
 use lac_app::layout::Pane;
+use lac_app::metrics::Metrics;
 use lac_app::minimap::Minimap;
 use lac_app::peak_cache::PeakCache;
 use lac_app::peak_job::{JobStatus, PeakJob};
@@ -250,11 +251,6 @@ const RULER_BACKGROUND: Colour = Colour::rgb(0x2a, 0x2f, 0x36);
 const RULER_TICK: Colour = Colour::rgb(0x8a, 0x94, 0x9e);
 /// Labels of the time ruler.
 const RULER_TEXT: Colour = Colour::rgb(0xc0, 0xc6, 0xcc);
-/// Length of the ruler's labelled (major) and other (minor) ticks.
-const RULER_MAJOR: i32 = 7;
-const RULER_MINOR: i32 = 3;
-/// Height of the ruler beyond its text.
-const RULER_PADDING: i32 = 7;
 /// The position being played.
 const PLAYHEAD: Colour = Colour::rgb(0x6c, 0xe0, 0x7c);
 /// Strip under a suggested pause that is silent.
@@ -263,8 +259,6 @@ const SUGGESTED_SILENCE: Colour = Colour::rgb(0x5c, 0x9c, 0x8c);
 const SUGGESTED_NOISE: Colour = Colour::rgb(0xc0, 0x90, 0x50);
 /// Tick at a suggested track start (a dimmer [`TRACK`]).
 const SUGGESTED_SPLIT: Colour = Colour::rgb(0x90, 0x60, 0xa8);
-/// Height of the suggestion strip and ticks, in pixels.
-const SUGGESTION_MARK: i32 = 6;
 
 /// An export in progress.
 struct RunningExport {
@@ -2309,9 +2303,6 @@ fn e_y(e: &WindowEventData) -> i32 {
         .map_or(0, |pt| pt.y)
 }
 
-/// How close (in pixels) a mark must be to the pointer for its tooltip.
-const TOOLTIP_REACH: f64 = 3.0;
-
 /// Sets the waveform's tooltip to what is at pixel (`x`, `y`) (issue #93;
 /// the texts come from [`lac_app::hover`]). Only changes are passed on,
 /// so the tooltip does not flicker while the pointer moves over one mark.
@@ -2319,16 +2310,9 @@ fn update_tooltip(st: &mut State, panel: &Panel, x: f64, y: i32) {
     let tip = with_scene(st, |scene, view| {
         let height = panel.get_client_size().height;
         let ruler = st.ruler_height.get();
-        let zone = if y >= height - ruler {
-            Zone::Ruler
-        } else if y >= height - ruler - SUGGESTION_MARK {
-            Zone::Bottom
-        } else if y < 2 * SUGGESTION_MARK {
-            Zone::Top
-        } else {
-            Zone::Lanes
-        };
-        let (pos, near) = pointer_at(view, x);
+        let metrics = metrics(panel);
+        let zone = metrics.zone(y, height, ruler);
+        let (pos, near) = pointer_at(view, x, &metrics);
         hover::tooltip(scene, pos, zone, near)
     })
     .flatten()
@@ -2344,7 +2328,7 @@ fn update_tooltip(st: &mut State, panel: &Panel, x: f64, y: i32) {
 fn update_pointer_shape(st: &mut State, panel: &Panel, x: f64) {
     let on_boundary = match (&st.view, &st.editor) {
         (Some(v), Some(ed)) => {
-            let (pos, near) = pointer_at(v, x);
+            let (pos, near) = pointer_at(v, x, &metrics(panel));
             ed.track_start_near(pos, near).is_some()
         }
         _ => false,
@@ -2381,10 +2365,11 @@ fn with_scene<R>(st: &State, f: impl FnOnce(&hover::Scene, &WaveformView) -> R) 
 }
 
 /// The source position under the pointer at `x`, and how far from it
-/// (in samples) a mark still counts as under the pointer.
-fn pointer_at(view: &WaveformView, x: f64) -> (SamplePos, SamplePos) {
+/// (in samples) a mark still counts as under the pointer
+/// ([`Metrics::tooltip_reach`] pixels).
+fn pointer_at(view: &WaveformView, x: f64, metrics: &Metrics) -> (SamplePos, SamplePos) {
     let pos = view.x_to_sample(x.clamp(0.0, f64::from(view.width())));
-    let near = (TOOLTIP_REACH * view.samples_per_pixel()).ceil() as SamplePos;
+    let near = (metrics.tooltip_reach() * view.samples_per_pixel()).ceil() as SamplePos;
     (pos, near)
 }
 
@@ -2416,7 +2401,7 @@ fn bind_select(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
                 };
                 let pos = v.x_to_sample(x);
                 st.drag_scrub_tried = false;
-                let (_, near) = pointer_at(v, x);
+                let (_, near) = pointer_at(v, x, &metrics(&p));
                 let boundary = ed.track_start_near(pos, near);
                 if ev.shift_down() {
                     ed.begin_extend(pos);
@@ -2588,7 +2573,8 @@ fn bind_scrub(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
                     return;
                 }
                 let y = f64::from(e_y(&e));
-                st.right_press = Some(RightPress::new(x, y, Instant::now()));
+                let slop = metrics(&p).click_slop();
+                st.right_press = Some(RightPress::new(x, y, Instant::now(), slop));
             }
             p.capture_mouse();
         });
@@ -2645,7 +2631,7 @@ fn bind_scrub(panel: &Panel, frame: &Frame, state: &Rc<RefCell<State>>) {
 /// ([`context_command`]).
 fn show_context_menu(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, x: f64) {
     let entries = with_scene(&state.borrow(), |scene, view| {
-        let (pos, near) = pointer_at(view, x);
+        let (pos, near) = pointer_at(view, x, &metrics(panel));
         context_menu::waveform(scene, pos, near)
     });
     match entries {
@@ -2785,6 +2771,7 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
         let dc = AutoBufferedPaintDC::new(&p);
         let size = p.get_client_size();
         let line = marker_width(&p);
+        let metrics = metrics(&p);
         dc.set_background(BACKGROUND);
         dc.clear();
         let st = state.borrow();
@@ -2798,7 +2785,7 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
         };
         // The ruler takes a strip at the bottom; the lanes get the rest.
         let ruler_height = if st.options.ruler {
-            dc.get_text_extent("0:00").1 + RULER_PADDING
+            metrics.ruler_height(dc.get_text_extent("0:00").1)
         } else {
             0
         };
@@ -2895,9 +2882,9 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
                 dc.set_brush(colour, BrushStyle::Solid);
                 dc.draw_rectangle(
                     px(span.start),
-                    size.height - ruler_height - SUGGESTION_MARK,
+                    size.height - ruler_height - metrics.suggestion_strip(),
                     px(span.end - span.start),
-                    SUGGESTION_MARK,
+                    metrics.suggestion_strip(),
                 );
             }
         }
@@ -2911,7 +2898,7 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
         {
             let x = view.sample_to_x(s.pos).round();
             if (0.0..f64::from(view.width())).contains(&x) {
-                dc.draw_line(x as i32, 0, x as i32, 2 * SUGGESTION_MARK);
+                dc.draw_line(x as i32, 0, x as i32, metrics.suggestion_tick());
             }
         }
         // Track boundaries (dashed) and labels at the top of each track.
@@ -2920,6 +2907,7 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
             dc.set_pen(TRACK, line, PenStyle::ShortDash);
             dc.set_text_foreground(TRACK);
             dc.set_background_mode(BackgroundMode::Transparent);
+            let (dx, dy) = metrics.track_label_offset();
             for t in e.tracks() {
                 let x0 = view.sample_to_x(t.span.start).round();
                 let x1 = view.sample_to_x(t.span.end).round();
@@ -2935,11 +2923,11 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
                 };
                 // Keep the label of a track that starts left of the window
                 // visible at the left edge.
-                dc.draw_text(&label, x0.max(0.0) as i32 + 4, 2);
+                dc.draw_text(&label, x0.max(0.0) as i32 + dx, dy);
             }
         }
         if let Some(rate) = st.rate.filter(|_| ruler_height > 0) {
-            draw_ruler(&dc, view, rate, size, ruler_height);
+            draw_ruler(&dc, view, rate, size, ruler_height, &metrics);
         }
         // Vertical markers on top: selection edges (or the cursor), then
         // the playhead.
@@ -3052,8 +3040,16 @@ fn bind_minimap(map: &Panel, waveform: &Panel, state: &Rc<RefCell<State>>) {
 }
 
 /// Draws the time ruler into the bottom `height` rows of the waveform
-/// window (`size`): ticks and labels from [`lac_app::ruler::ticks`].
-fn draw_ruler(dc: &impl DeviceContext, view: &WaveformView, rate: u32, size: Size, height: i32) {
+/// window (`size`): ticks and labels from [`lac_app::ruler::ticks`], sized
+/// by `metrics`.
+fn draw_ruler(
+    dc: &impl DeviceContext,
+    view: &WaveformView,
+    rate: u32,
+    size: Size,
+    height: i32,
+    metrics: &Metrics,
+) {
     let top = size.height - height;
     dc.set_pen(RULER_BACKGROUND, 1, PenStyle::Solid);
     dc.set_brush(RULER_BACKGROUND, BrushStyle::Solid);
@@ -3063,18 +3059,19 @@ fn draw_ruler(dc: &impl DeviceContext, view: &WaveformView, rate: u32, size: Siz
     dc.set_text_foreground(RULER_TEXT);
     dc.set_background_mode(BackgroundMode::Transparent);
     // Room for the widest usual label and a gap.
-    let min_gap = f64::from(dc.get_text_extent("0:00:00.000").0 + 16);
+    let min_gap = metrics.ruler_label_spacing(dc.get_text_extent("0:00:00.000").0);
+    let (dx, dy) = metrics.ruler_label_offset();
     for t in lac_app::ruler::ticks(view, rate, min_gap) {
         let x = t.x.round() as i32;
         let len = if t.label.is_some() {
-            RULER_MAJOR
+            metrics.ruler_major()
         } else {
-            RULER_MINOR
+            metrics.ruler_minor()
         };
         // draw_line leaves out the end point, so go one past.
         dc.draw_line(x, top, x, top + len + 1);
         if let Some(label) = &t.label {
-            dc.draw_text(label, x + 3, top + RULER_MINOR + 1);
+            dc.draw_text(label, x + dx, top + dy);
         }
     }
 }
@@ -3092,6 +3089,14 @@ fn draw_ruler(dc: &impl DeviceContext, view: &WaveformView, rate: u32, size: Siz
 /// 1 wide: they are one per device pixel by design.
 fn marker_width(window: &impl WxWidget) -> i32 {
     window.from_dip_int(1).max(1)
+}
+
+/// The sizes of the waveform window's marks on `window`'s screen (issue
+/// #128). `FromDIP` of a large number keeps fractional scales (125 %,
+/// 150 %) exact; it is 1:1 where the toolkit scales by itself (macOS, GTK).
+fn metrics(window: &impl WxWidget) -> Metrics {
+    const DIPS: i32 = 1000;
+    Metrics::from_dip(DIPS, window.from_dip_int(DIPS))
 }
 
 /// A pixel coordinate for the device context.

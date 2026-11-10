@@ -24,10 +24,6 @@ use crate::playback::{self, EXCERPT_SECONDS, End};
 use crate::time::format_samples;
 use crate::track_list::Bound;
 
-/// How far (in pixels) the pointer may move while the right button is
-/// down for it to still be a click rather than a scrub.
-pub const CLICK_SLOP: f64 = 4.0;
-
 /// How long the right button may be held for a click: holding it longer
 /// listens at the pointer (a scrub without moving).
 pub const CLICK_TIME: Duration = Duration::from_millis(250);
@@ -43,12 +39,16 @@ pub struct RightPress {
     x: f64,
     y: f64,
     at: Instant,
+    /// How far (in pixels) the pointer may move for a click.
+    slop: f64,
 }
 
 impl RightPress {
-    /// The button went down at window position (`x`, `y`) at time `at`.
-    pub fn new(x: f64, y: f64, at: Instant) -> Self {
-        RightPress { x, y, at }
+    /// The button went down at window position (`x`, `y`) at time `at`;
+    /// the pointer may move `slop` pixels for a click
+    /// ([`crate::metrics::Metrics::click_slop`]).
+    pub fn new(x: f64, y: f64, at: Instant, slop: f64) -> Self {
+        RightPress { x, y, at, slop }
     }
 
     /// Where the button went down.
@@ -59,7 +59,7 @@ impl RightPress {
     /// Whether the pointer at (`x`, `y`) has left the click's reach, which
     /// makes the press a scrub.
     pub fn moved(&self, x: f64, y: f64) -> bool {
-        (x - self.x).abs() > CLICK_SLOP || (y - self.y).abs() > CLICK_SLOP
+        (x - self.x).abs() > self.slop || (y - self.y).abs() > self.slop
     }
 
     /// Whether the button has been held too long for a click at `now`,
@@ -608,10 +608,15 @@ mod tests {
     #[test]
     fn a_click_stays_a_click_until_the_pointer_moves_or_is_held() {
         let t0 = Instant::now();
-        let p = RightPress::new(100.0, 50.0, t0);
+        let p = RightPress::new(100.0, 50.0, t0, 4.0);
         assert!(!p.moved(103.0, 47.0));
+        assert!(!p.moved(104.0, 54.0));
         assert!(p.moved(105.0, 50.0));
         assert!(p.moved(100.0, 55.0));
+        // On a screen at 200 % the same move is half as far.
+        let p = RightPress::new(100.0, 50.0, t0, 8.0);
+        assert!(!p.moved(105.0, 55.0));
+        assert!(p.moved(109.0, 50.0));
         assert!(!p.held(t0 + Duration::from_millis(100)));
         assert!(p.held(t0 + CLICK_TIME));
         assert_eq!(p.x(), 100.0);
