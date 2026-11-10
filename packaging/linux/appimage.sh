@@ -7,9 +7,9 @@
 # Expects `cargo build --release -p lac-gui -p lac-cli` to have run. Writes
 # OUTDIR/losslessaudiocut-VERSION-linux-ARCH.AppImage.
 #
-# The AppImage starts the GUI. The command line tool `lac` is inside as well;
-# `./losslessaudiocut-*.AppImage --appimage-extract` unpacks it to
-# squashfs-root/usr/bin/lac, which finds the bundled libraries by its rpath.
+# The AppImage starts the GUI, or the command line tool `lac` with `--cli`
+# as the first argument or when started through a symlink named `lac`
+# (packaging/linux/AppRun).
 #
 # Tools: linuxdeploy (copies every library the binaries need into the
 # AppDir, except the ones its excludelist says must come from the host, such
@@ -69,6 +69,7 @@ linuxdeploy \
     --executable "$target_dir/release/lac" \
     --desktop-file "$root/packaging/linux/losslessaudiocut.desktop" \
     --icon-file "$icons/256x256/apps/losslessaudiocut.png" \
+    --custom-apprun "$root/packaging/linux/AppRun" \
     --plugin gtk \
     --output appimage
 

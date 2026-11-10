@@ -121,11 +121,19 @@ jobs:
           squashfs-root/usr/bin/lac info cut.mp3
           squashfs-root/usr/bin/lac detect "$fixture"
           squashfs-root/usr/bin/lac detect "$speex"
+          # The command line tool through the AppImage itself: with --cli,
+          # and through a symlink named lac (packaging/linux/AppRun).
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          "$image" --cli --version
+          "$image" --cli info "$fixture"
+          ln -s "$image" lac
+          ./lac cut "$fixture" -o cut2.mp3 --delete 0.5..1
+          cmp cut.mp3 cut2.mp3
           test -s squashfs-root/usr/share/man/man1/losslessaudiocut.1
           test -s squashfs-root/usr/share/bash-completion/completions/lac
           grep -q '^MimeType=audio/mpeg;' squashfs-root/losslessaudiocut.desktop
           set +e
-          APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a timeout 20 "$image"
+          xvfb-run -a timeout 20 "$image"
           status=$?
           echo "exit status: $status"
           test "$status" -eq 124
