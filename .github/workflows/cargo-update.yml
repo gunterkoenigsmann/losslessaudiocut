@@ -14,17 +14,23 @@
 #
 # How the PR gets tested and merged without a personal token:
 #
-# 1. The `update` job pushes the branch `deps/cargo-update` (always rebuilt
-#    from the current main, force-pushed) and opens or updates the PR.
+# 1. The job pushes the branch `deps/cargo-update` (always rebuilt from the
+#    current main, force-pushed) and opens or updates the PR.
 #    A PR or push made with GITHUB_TOKEN triggers no `pull_request` or `push`
 #    workflows (GitHub's guard against recursive runs), but it may start
 #    workflows by `workflow_dispatch`. So the job dispatches CI (and the
-#    snap build, once that workflow exists) on the branch; their checks
-#    attach to the branch's head commit and show up on the PR.
-# 2. The `merge` job (on `workflow_run`) runs whenever one of those runs
-#    finishes. Once every run on the head commit has finished green, it
+#    snap build) on the branch; their checks attach to the branch's head
+#    commit and show up on the PR.
+# 2. The same job then waits for those runs (`gh run watch`). When every
+#    one finished green and the branch still contains the current main, it
 #    merges the PR, following the project's early-phase rule of merging
 #    green PRs. A red run leaves the PR open for a human.
+#
+#    An earlier version merged from a second job triggered by
+#    `workflow_run`. That never fired (issue #114): runs started with
+#    GITHUB_TOKEN, here by `gh workflow run`, raise no `workflow_run`
+#    events either. Waiting in the job costs runner minutes, but needs no
+#    secret and no branch protection.
 #
 # Repository setting needed once: Settings -> Actions -> General ->
 # Workflow permissions -> "Allow GitHub Actions to create and approve pull
@@ -37,9 +43,6 @@ on:
     - cron: "41 4 * * 6"
   # Run it by hand, e.g. right after a RustSec advisory.
   workflow_dispatch:
-  workflow_run:
-    workflows: [CI, Snap]
-    types: [completed]
 
 permissions:
   contents: read
@@ -49,13 +52,17 @@ env:
 
 jobs:
   update:
-    if: github.event_name != 'workflow_run'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Mostly waiting: CI takes about 15 minutes, the snap build longer.
+    timeout-minutes: 150
+    # A second update (by hand) must not merge while this one waits.
+    concurrency:
+      group: cargo-update
     permissions:
       contents: write
       pull-requests: write
-      # gh workflow run (workflow_dispatch) needs write access to Actions.
+      # gh workflow run (workflow_dispatch) needs write access to Actions,
+      # gh run list / watch read access.
       actions: write
     env:
       GH_TOKEN: ${{ github.token }}
@@ -111,60 +118,55 @@ jobs:
       # Runs started by workflow_dispatch attach their checks to the head
       # commit of the given ref, so they show on the PR.
       - name: Start CI on the branch
+        id: dispatch
         if: steps.update.outputs.changed == 'true'
         run: |
-          gh workflow run ci.yml --ref "$BRANCH"
+          workflows="ci.yml"
           # The snap build (snap.yml) normally runs for PRs that touch
           # Cargo.lock, because a new crate may need a system library the
           # snap lacks. Start it too where it exists.
           if gh workflow view snap.yml > /dev/null 2>&1; then
-            gh workflow run snap.yml --ref "$BRANCH"
+            workflows="$workflows snap.yml"
           fi
-
-  merge:
-    # Only runs on our own branch in this repository (a fork can have a
-    # branch of the same name), and only when the finished run was green.
-    if: >-
-      github.event_name == 'workflow_run' &&
-      github.event.workflow_run.head_branch == 'deps/cargo-update' &&
-      github.event.workflow_run.head_repository.full_name == github.repository &&
-      github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    # Two runs finishing at once must not both try to merge.
-    concurrency:
-      group: cargo-update-merge
-    permissions:
-      contents: write
-      pull-requests: write
-      actions: read
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-      SHA: ${{ github.event.workflow_run.head_sha }}
-    steps:
-      - name: Merge when every run is green
+          for w in $workflows; do
+            gh workflow run "$w" --ref "$BRANCH"
+          done
+          echo "workflows=$workflows" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Wait for the runs and merge when all are green
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ steps.dispatch.outputs.sha }}
+          WORKFLOWS: ${{ steps.dispatch.outputs.workflows }}
         run: |
+          # A dispatched run takes a few seconds to show up.
+          ids=""
+          for w in $WORKFLOWS; do
+            id=""
+            for _ in $(seq 30); do
+              id="$(gh run list --workflow "$w" --commit "$SHA" --event workflow_dispatch \
+                --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+              [ -n "$id" ] && break
+              sleep 10
+            done
+            if [ -z "$id" ]; then
+              echo "::warning::No $w run on $SHA showed up; leaving the PR open."
+              exit 0
+            fi
+            ids="$ids $id"
+          done
+          for id in $ids; do
+            if ! gh run watch "$id" --exit-status --interval 60 > /dev/null; then
+              echo "::warning::Run $id failed; leaving the PR open for a human."
+              exit 0
+            fi
+            echo "Run $id passed."
+          done
           number="$(gh pr list --head "$BRANCH" --base main --state open --json number,headRefOid \
             --jq ".[] | select(.headRefOid == \"$SHA\") | .number")"
           if [ -z "$number" ]; then
             echo "No open PR with head $SHA (superseded or already merged)."
-            exit 0
-          fi
-          # Every workflow run on the head commit; this workflow's own runs
-          # belong to main's commit and do not show up here.
-          runs="$(gh run list --commit "$SHA" --limit 50 --json workflowName,status,conclusion)"
-          echo "$runs" | jq -r '.[] | "\(.workflowName): \(.status) \(.conclusion)"'
-          if ! echo "$runs" | jq -e 'any(.workflowName == "CI")' > /dev/null; then
-            echo "CI has not run on $SHA; not merging."
-            exit 0
-          fi
-          if ! echo "$runs" | jq -e 'all(.status == "completed")' > /dev/null; then
-            echo "Other runs are still going; the last one to finish merges."
-            exit 0
-          fi
-          if ! echo "$runs" | jq -e 'all(.conclusion == "success")' > /dev/null; then
-            echo "::warning::A run on $SHA failed; leaving PR #$number open."
             exit 0
           fi
           # Only merge what was tested: the branch must still contain the
@@ -176,6 +178,6 @@ jobs:
             exit 0
           fi
           gh pr merge "$number" --squash
-          # No checkout here, so delete the branch through the API rather
-          # than with --delete-branch (which also wants a local repository).
+          # Through the API rather than --delete-branch, which would also
+          # try to delete the checked-out local branch.
           gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$BRANCH" || true
