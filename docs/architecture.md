@@ -730,7 +730,7 @@ packets in the same state. This gives:
 | Scrubbing | grain restart while dragging (~40 ms grains, 5 ms crossfade) first; varispeed and pitch-preserving scrub later as further render modes |
 | Playback speed | adjustable (e.g. 0.5x-3x), pitch-preserving (WSOLA) by default, varispeed as option; listening only |
 | Translations | gettext `.po` files built into the binary, read by our own small parser (`lac_app::i18n`); the template is extracted from the code and merged into the `.po` files by a weekly workflow, not by hand |
-| Video | future extension, see section 13; the core model must not rule it out |
+| Video | keyframes plus edit list, never re-encoding (Gunter, 2026-11-10), see section 13 |
 
 ## 12. Open questions
 
@@ -740,36 +740,43 @@ packets in the same state. This gives:
 2. **Matroska/WebM** (`.mka`, `.webm`): also used by some recorders. Add to
    the format list later?
 
-## 13. Future: lossless video cutting
+## 13. Lossless video cutting *(decided, in progress)*
 
-Cutting camera and phone videos follows the same principle, with one
-difference: in video the independent unit is not a packet but a **keyframe**
-(an I/IDR frame), and phones often put only one keyframe every 1-2 seconds.
-Lossless video cuts therefore work like this:
+Target: videos recorded on phones (Android: MP4 with H.264 or HEVC video and
+AAC audio, a keyframe about every second). The design proposal is the
+Claude doc "Lossless cutting of phone videos"; Gunter decided on 2026-11-10:
+**keyframes plus edit list, never re-encoding** (no "smart cut").
 
-- A cut keeps whole **GOPs** (keyframe plus following frames). The start of a
-  cut is snapped back to the previous keyframe.
-- For frame-exact starts the container's **edit list** (`elst` in MP4/MOV,
-  which is what phones and most cameras write) hides the extra frames in
-  front of the cut point, exactly like audio pre-roll. Players that ignore
-  edit lists show up to one GOP extra, which is the same trade-off as for
-  audio trimming metadata.
+- In video the independent unit is not a packet but a **keyframe**. A kept
+  part starts at a keyframe and copies a contiguous run of frames *in decode
+  order*. Since every frame is stored after the frames it refers to, that
+  run contains every reference, B-frames included.
+- At the file's start and end the container's **edit list** (`elst`,
+  ISO/IEC 14496-12 8.6.6) hides the copied frames that are not wanted, so
+  both ends are frame-exact (in fact tick-exact), exactly like audio
+  pre-roll. Players that ignore edit lists show up to one GOP extra.
+- At a **join** inside a file nothing can hide frames, so the part after the
+  join starts at a keyframe and the part before it ends where every copied
+  frame is shown (`plan_video_cuts`). Multi-entry edit lists could make joins
+  frame-exact too, but many players mishandle them. Splitting into separate
+  files (tracks) creates no joins and stays frame-exact.
+- A keyframe of an *open* GOP (HEVC CRA with RASL pictures, H.264 I-frame
+  with leading B-frames) is not a clean start: frames decoded after it are
+  shown before it and refer to the previous GOP. The planner then starts at
+  the previous clean keyframe (`VideoIndex::is_clean_start`).
 - Audio in the same file is cut with the existing audio planner and aligned
-  to the video cut.
+  to the video cut; at joins the audio cut is chosen so that the
+  accumulated A/V offset stays within half an audio packet.
 
-To keep this possible without building it now, the core model follows three
-rules from the start:
+Data model (`lac-core`, module `video`): `VideoIndex` holds the frames in
+decode order (`VideoFrame`: offset, length, duration, composition offset,
+keyframe flag) and derives display order and clean starts.
+`plan_video_cut` returns the copied decode range, the time span it shows
+and the actual span after trimming. Video times are integer ticks of the
+stream's own timescale (`MediaTime`, e.g. 1/90000 s); the editor's timeline
+stays in audio sample positions, converted with `rescale` and an explicit
+rounding direction.
 
-1. `PacketInfo` carries a `flags` field with an `independent` bit (keyframe /
-   decodable without predecessors). For audio, the planner derives pre-roll
-   from codec rules; for video it would search backwards for the previous
-   independent packet.
-2. Positions are stored per stream in that stream's own **time base**
-   (a rational, e.g. 1/48000 for audio, 1/90000 for video). For audio-only
-   files this is the sample rate, so the "integer sample count" rule above
-   still holds.
-3. The MP4 and (later) Matroska demuxers and muxers are written for
-   **multiple tracks** from day one, even while only one audio track is used.
-
-The waveform, playback and analysis stay audio-only; a video extension would
-add a thumbnail strip lane and a preview window in `lac-gui`.
+The waveform, playback and analysis stay audio-only; the GUI adds a video
+preview pane driven by the audio clock and a keyframe thumbnail lane. Video
+is decoded with libavcodec from our own packet index, like audio.

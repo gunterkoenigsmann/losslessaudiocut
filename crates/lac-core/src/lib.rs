@@ -11,7 +11,10 @@
 //! - the non-destructive edit model ([`EditList`], [`Track`], [`Segment`],
 //!   [`Tags`]),
 //! - and cut planning, which maps a wanted sample range onto whole packets
-//!   ([`CutCapabilities`], [`CutPlan`], [`plan_cut`]).
+//!   ([`CutCapabilities`], [`CutPlan`], [`plan_cut`]),
+//! - video streams and keyframe-aware cut planning ([`VideoIndex`],
+//!   [`VideoCutPlan`], [`plan_video_cut`]), with times in each stream's own
+//!   timescale ([`MediaTime`], [`rescale`]).
 //!
 //! See `docs/architecture.md` in the repository for the overall design.
 
@@ -19,11 +22,16 @@ mod edit;
 mod packet;
 mod plan;
 mod tags;
+mod video;
 
 pub use edit::{EditError, EditList, Segment, SourceId, Track};
 pub use packet::{AudioStreamInfo, IndexError, PacketFlags, PacketIndex, PacketInfo};
 pub use plan::{CutCapabilities, CutPlan, PlanError, plan_cut, plan_cuts};
 pub use tags::{TagField, TagValueError, Tags, parse_track_number};
+pub use video::{
+    MediaTime, Rounding, VideoCodec, VideoCutPlan, VideoFrame, VideoIndex, VideoIndexError,
+    VideoPlanError, VideoStreamInfo, plan_video_cut, plan_video_cuts, rescale,
+};
 
 /// A position or a duration, counted in sample frames at the stream's own
 /// sample rate.
