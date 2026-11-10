@@ -19,6 +19,7 @@
 //! file. Dropping the job only stops listening; the files are still
 //! written.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -128,6 +129,48 @@ pub fn single_task(editor: &Editor, output: impl Into<PathBuf>) -> ExportTask {
         output: output.into(),
         tags,
     }
+}
+
+/// Where an export of the selection of `source` goes by default: next to
+/// it, as `<stem>-selection.<ext>`.
+pub fn selection_output(source: &Path) -> PathBuf {
+    let mut name = format!("{}-selection", stem(source));
+    if let Some(ext) = source.extension() {
+        name += ".";
+        name += &ext.to_string_lossy();
+    }
+    source.with_file_name(name)
+}
+
+/// The task for exporting what is kept of `range` (the selection) as one
+/// file (issue #101): deleted parts inside it stay out, as in a full
+/// export. The file gets the tags of the track the range starts in, as
+/// an export of that track would. `None` if nothing in `range` is kept.
+pub fn selection_task(
+    editor: &Editor,
+    range: Range<SamplePos>,
+    output: impl Into<PathBuf>,
+) -> Option<ExportTask> {
+    let keep: Vec<Range<SamplePos>> = editor
+        .kept()
+        .into_iter()
+        .map(|k| k.start.max(range.start)..k.end.min(range.end))
+        .filter(|k| k.start < k.end)
+        .collect();
+    if keep.is_empty() {
+        return None;
+    }
+    let tags = editor
+        .tracks()
+        .into_iter()
+        .nth(editor.track_at(range.start))
+        .map(|t| t.tags)
+        .filter(|t| !t.is_empty());
+    Some(ExportTask {
+        request: CutRequest::Keep(keep),
+        output: output.into(),
+        tags,
+    })
 }
 
 /// The track numbers that files will get: (number, total) of each track
@@ -393,6 +436,65 @@ mod tests {
             Path::new("/out/show-01.mp3"),
             "a name that is nothing after cleaning is left out"
         );
+    }
+
+    #[test]
+    fn the_selection_keeps_only_its_kept_parts_and_its_tracks_tags() {
+        assert_eq!(
+            selection_output(Path::new("/rec/talk.opus")),
+            Path::new("/rec/talk-selection.opus")
+        );
+        let mut e = Editor::new(100_000);
+        e.select(20_000, 30_000);
+        e.delete_selection();
+        e.split_at(50_000);
+        assert!(e.set_track_tag(1, TagField::Title, "Second").expect("text"));
+        // 10..60 k: the deleted 20..30 k stays out.
+        let task = selection_task(&e, 10_000..60_000, "out.flac").expect("kept");
+        assert_eq!(
+            task.request,
+            CutRequest::Keep(vec![10_000..20_000, 30_000..60_000])
+        );
+        assert_eq!(task.output, Path::new("out.flac"));
+        assert_eq!(task.tags, None, "track 1 has no changed tags");
+        // Starting in track 2: its title.
+        let task = selection_task(&e, 55_000..60_000, "x").expect("kept");
+        assert_eq!(
+            task.tags
+                .and_then(|t| t.get(TagField::Title).map(String::from)),
+            Some("Second".into())
+        );
+        // Nothing kept in it.
+        assert_eq!(selection_task(&e, 21_000..29_000, "x"), None);
+    }
+
+    /// The exported selection decodes to exactly the selected samples.
+    #[test]
+    fn an_exported_selection_is_the_selected_audio() {
+        let dir = temp_dir("selection");
+        let src = fixture("flac_stereo16_44k.flac");
+        let total = Source::open(&src).expect("open").total_samples();
+        let e = Editor::new(total);
+        let task = selection_task(&e, 5000..25_000, dir.join("sel.flac")).expect("kept");
+        let outcomes = ExportJob::start_all(&src, vec![task]).wait();
+        let Ok(kept) = &outcomes[0].result else {
+            panic!("{outcomes:?}");
+        };
+        // FLAC cuts exactly.
+        assert_eq!(
+            kept.iter().map(|k| k.actual.clone()).collect::<Vec<_>>(),
+            std::slice::from_ref(&(5000..25_000))
+        );
+        // Golden rule: bit for bit the selected samples.
+        let mut out = Source::open(dir.join("sel.flac")).expect("open export");
+        assert_eq!(out.total_samples(), 20_000);
+        let want = Source::open(&src)
+            .expect("open")
+            .decode_range(5000..25_000)
+            .expect("decode source");
+        let got = out.decode_range(0..20_000).expect("decode export");
+        assert!(got == want, "the export differs from the selection");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

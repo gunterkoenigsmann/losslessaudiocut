@@ -88,6 +88,8 @@ const ID_ZOOM_OUT: Id = ID_HIGHEST + 3;
 const ID_ZOOM_FIT: Id = ID_HIGHEST + 4;
 const ID_CLEAR_CACHE: Id = ID_HIGHEST + 5;
 const ID_EXPORT: Id = ID_HIGHEST + 6;
+/// File > Export selection (issue #101); after the perspectives.
+const ID_EXPORT_SELECTION: Id = ID_HIGHEST + 36;
 const ID_UNDO: Id = ID_HIGHEST + 7;
 const ID_REDO: Id = ID_HIGHEST + 8;
 const ID_DELETE: Id = ID_HIGHEST + 9;
@@ -267,8 +269,9 @@ struct RunningExport {
     job: ExportJob,
     /// The file being cut; another one may be open by the time it ends.
     source: PathBuf,
-    /// The edits being exported (see [`Editor::mark_exported`]).
-    edits: Edits,
+    /// The edits being exported (see [`Editor::mark_exported`]); `None`
+    /// for an export of the selection, which does not save the edits.
+    edits: Option<Edits>,
 }
 
 /// What the window currently shows.
@@ -766,9 +769,9 @@ impl State {
         // Only a complete export of the file that is open saves its edits.
         if outcomes.iter().all(|o| o.result.is_ok())
             && self.path.as_deref() == Some(done.source.as_path())
-            && let Some(e) = &mut self.editor
+            && let (Some(e), Some(edits)) = (&mut self.editor, done.edits)
         {
-            e.mark_exported(done.edits);
+            e.mark_exported(edits);
         }
         Some(describe_outcomes(&outcomes, self.rate.unwrap_or(1)))
     }
@@ -1155,6 +1158,11 @@ fn menu_bar(options: Options) -> MenuBar {
             "&Export…\tCtrl+E",
             "Write the kept parts to a new file, without re-encoding",
         )
+        .append_item(
+            ID_EXPORT_SELECTION,
+            "Export &selection…\tCtrl+Alt+E",
+            "Write what is kept of the selection to a new file, without re-encoding",
+        )
         .append_separator()
         .append_item(
             ID_CLEAR_CACHE,
@@ -1383,6 +1391,14 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
             v.zoom_exactly_to(&p.range(ed.total(), rate, ed.selection(), ed.cursor()));
         }
     } else if let Some(i) = context_index(id) {
+        // Exporting opens a dialog, which must not run while the state is
+        // borrowed.
+        let exporting =
+            state.borrow().menu_actions.get(i) == Some(&context_menu::Action::ExportSelection);
+        if exporting {
+            export_selection(&f, state);
+            return;
+        }
         let msg = context_command(&mut state.borrow_mut(), i);
         if let Some(msg) = msg {
             report(&f, &msg);
@@ -1397,6 +1413,8 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
         return;
     } else if id == ID_EXPORT {
         export(&f, state);
+    } else if id == ID_EXPORT_SELECTION {
+        export_selection(&f, state);
     } else if id == ID_RENAME {
         rename_track(&f, state);
     } else if id == ID_ALL_TRACKS {
@@ -1706,21 +1724,13 @@ fn export(frame: &Frame, state: &Rc<RefCell<State>>) {
             }
         }
     };
-    let file_name = |p: &Path| {
-        p.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    };
-    let source_dir = source
-        .parent()
-        .map(|d| d.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let source_dir = dir_of(&source);
     let (tasks, skipped) = if editor.splits().is_empty() {
         // One file: ask for its name.
         let dialog = FileDialog::builder(frame)
             .with_message("Export the kept parts")
             .with_default_dir(&source_dir)
-            .with_default_file(&file_name(&default_output(&source)))
+            .with_default_file(&file_name_of(&default_output(&source)))
             .with_style(FileDialogStyle::Save | FileDialogStyle::OverwritePrompt)
             .build();
         if dialog.show_modal() != ID_OK {
@@ -1772,8 +1782,86 @@ fn export(frame: &Frame, state: &Rc<RefCell<State>>) {
         report(frame, "everything is deleted; nothing to export");
         return;
     }
+    let edits = editor.edits().clone();
+    start_export(frame, state, source, tasks, &skipped, Some(edits));
+}
+
+/// File > Export selection, or the waveform menu's "Export selection as…"
+/// (issue #101): asks for a file name and writes what is kept of the
+/// selection to it. The edits do not count as saved by it.
+fn export_selection(frame: &Frame, state: &Rc<RefCell<State>>) {
+    let (source, editor) = {
+        let st = state.borrow();
+        if st.export.is_some() {
+            report(frame, "an export is still running");
+            return;
+        }
+        match (&st.path, &st.editor) {
+            (Some(p), Some(e)) => (p.clone(), e.clone()),
+            _ => {
+                report(frame, "open a file first");
+                return;
+            }
+        }
+    };
+    let Some(sel) = editor.selection() else {
+        report(frame, "select something to export first");
+        return;
+    };
+    // Checked before asking for a name, which would be in vain.
+    if lac_app::export_job::selection_task(&editor, sel.clone(), "").is_none() {
+        report(
+            frame,
+            "the selection is deleted entirely; nothing to export",
+        );
+        return;
+    }
+    let default = lac_app::export_job::selection_output(&source);
+    let dialog = FileDialog::builder(frame)
+        .with_message("Export the selection")
+        .with_default_dir(&dir_of(&source))
+        .with_default_file(&file_name_of(&default))
+        .with_style(FileDialogStyle::Save | FileDialogStyle::OverwritePrompt)
+        .build();
+    if dialog.show_modal() != ID_OK {
+        return;
+    }
+    let Some(output) = dialog.get_path().map(PathBuf::from) else {
+        return;
+    };
+    let Some(task) = lac_app::export_job::selection_task(&editor, sel, output) else {
+        return;
+    };
+    start_export(frame, state, source, vec![task], &[], None);
+}
+
+/// The file name of `p`, for dialogs and messages.
+fn file_name_of(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The folder `p` is in, for dialogs.
+fn dir_of(p: &Path) -> String {
+    p.parent()
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Starts writing `tasks` from `source` in the background and says so;
+/// `skipped` are the numbers of tracks deleted entirely, `edits` what a
+/// successful export saves (see [`RunningExport::edits`]).
+fn start_export(
+    frame: &Frame,
+    state: &Rc<RefCell<State>>,
+    source: PathBuf,
+    tasks: Vec<lac_app::export_job::ExportTask>,
+    skipped: &[usize],
+    edits: Option<Edits>,
+) {
     let mut msg = match tasks.as_slice() {
-        [one] => format!("exporting to {}…", file_name(&one.output)),
+        [one] => format!("exporting to {}…", file_name_of(&one.output)),
         many => format!("exporting {} tracks…", many.len()),
     };
     if !skipped.is_empty() {
@@ -1782,11 +1870,7 @@ fn export(frame: &Frame, state: &Rc<RefCell<State>>) {
     }
     report(frame, &msg);
     let job = ExportJob::start_all(&source, tasks);
-    state.borrow_mut().export = Some(RunningExport {
-        job,
-        source,
-        edits: editor.edits().clone(),
-    });
+    state.borrow_mut().export = Some(RunningExport { job, source, edits });
 }
 
 /// Edit > Rename track: asks for the name of the track under the cursor.
@@ -2468,6 +2552,8 @@ fn context_command(st: &mut State, index: usize) -> Option<String> {
             jump_to(st, pos);
             None
         }
+        // Handled before the state is borrowed (see `command`).
+        Effect::ExportSelection => None,
     }
 }
 
@@ -2976,6 +3062,52 @@ mod tests {
         // Turned back on, they are offered again.
         st.options.chained_links = true;
         assert_eq!(st.suggested_starts().len(), 1);
+    }
+
+    /// Exporting the selection writes a file but does not save the edits:
+    /// closing would still lose them. A full export saves them.
+    #[test]
+    fn only_a_full_export_saves_the_edits() {
+        let src = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../lac-container/tests/fixtures/flac_stereo16_44k.flac"
+        ));
+        let dir = std::env::temp_dir().join(format!("lac-gui-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let mut ed = Editor::new(40_000);
+        ed.select(1000, 2000);
+        ed.delete_selection();
+        ed.select(5000, 9000);
+        let mut st = State {
+            path: Some(src.clone()),
+            editor: Some(ed.clone()),
+            ..State::default()
+        };
+        let run = |st: &mut State, task, edits| {
+            st.export = Some(RunningExport {
+                job: ExportJob::start_all(&src, vec![task]),
+                source: src.clone(),
+                edits,
+            });
+            let start = Instant::now();
+            loop {
+                if let Some(msg) = st.poll_export() {
+                    return msg;
+                }
+                assert!(start.elapsed() < Duration::from_secs(20), "export hangs");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let sel = ed.selection().expect("selected");
+        let task =
+            lac_app::export_job::selection_task(&ed, sel, dir.join("sel.flac")).expect("kept");
+        run(&mut st, task, None);
+        assert!(dir.join("sel.flac").exists());
+        assert!(st.unexported(), "a selection export saves nothing");
+        let task = lac_app::export_job::single_task(&ed, dir.join("all.flac"));
+        run(&mut st, task, Some(ed.edits().clone()));
+        assert!(!st.unexported());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
