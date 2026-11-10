@@ -52,9 +52,12 @@ parts inside it (Ctrl+R), undo (Ctrl+Z), redo (Ctrl+Y), select all (Ctrl+A)
 or nothing (Esc). Deleted parts stay visible, shaded red, so they can be
 restored; the export leaves them out. File > Export (Ctrl+E) writes the kept
 parts to a new file of the same format without re-encoding; the status bar
-then says how much the cuts moved to packet boundaries. A `*` in the title
-marks edits that are not exported yet, and closing or opening another file
-asks before they are lost.
+then says how much the cuts moved to packet boundaries. File > Export
+selection (Ctrl+Alt+E, or "Export selection as…" in the waveform's
+right-click menu) writes only what is kept of the selection to a file of
+your choice. A `*` in the title marks edits that are not exported yet (an
+export of the selection does not count), and closing or opening another
+file asks before they are lost.
 
 Ctrl+K starts a new track at the cursor (or the selection start), Ctrl+J
 joins the track under the cursor with the one before it, and F2 names it.

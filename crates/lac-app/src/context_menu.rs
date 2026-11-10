@@ -115,6 +115,9 @@ pub enum Action {
     JoinWithPrevious(usize),
     /// Merges these tracks (0-based, inclusive) into one.
     MergeTracks(RangeInclusive<usize>),
+    /// Asks for a file name and writes what is kept of the selection to
+    /// it (issue #101).
+    ExportSelection,
     /// Selects this range (a track) and deletes it.
     DeleteRange(Range<SamplePos>),
     /// Selects this range (a track) and restores what is deleted in it.
@@ -155,6 +158,9 @@ pub enum Effect {
     ZoomTo(Range<SamplePos>),
     /// Move the cursor (and playback) here, see [`Action::JumpTo`].
     JumpTo(SamplePos),
+    /// Export the selection: the GUI asks for the file (see
+    /// [`crate::export_job::selection_task`]).
+    ExportSelection,
 }
 
 /// The menu for a right-click at source position `pos`, with marks within
@@ -271,6 +277,11 @@ fn selection_items(scene: &Scene, sel: &Range<SamplePos>, pos: SamplePos) -> Vec
             },
             enabled: tuned.is_some(),
             action: Action::Select(tuned.unwrap_or_else(|| sel.clone())),
+        },
+        Item {
+            label: "Export selection as…".into(),
+            action: Action::ExportSelection,
+            enabled: any_kept,
         },
         Item {
             label: "Delete selection".into(),
@@ -422,6 +433,7 @@ pub fn apply(editor: &mut Editor, action: &Action, rate: u32) -> Effect {
         Action::JumpTo(p) => Effect::JumpTo(*p),
         Action::JoinWithPrevious(i) => Effect::Edited(editor.join_with_previous(*i)),
         Action::MergeTracks(r) => Effect::Edited(editor.merge_tracks(r.clone())),
+        Action::ExportSelection => Effect::ExportSelection,
         Action::DeleteRange(r) => {
             editor.select(r.start, r.end);
             Effect::Edited(editor.delete_selection())
@@ -736,6 +748,24 @@ mod tests {
                 .iter()
                 .all(|i| !i.label.contains("playback position"))
         );
+    }
+
+    #[test]
+    fn the_selection_menu_exports_what_is_kept_of_it() {
+        let mut e = Editor::new(60_000);
+        e.select(10_000, 20_000);
+        let menu = waveform(&scene(&e, &[], &[]), 15_000, 10);
+        let export = item(&menu, "Export selection as…");
+        assert!(export.enabled);
+        assert_eq!(export.action, Action::ExportSelection);
+        assert_eq!(
+            apply(&mut e.clone(), &export.action, RATE),
+            Effect::ExportSelection
+        );
+        // All of it deleted: nothing to export.
+        e.delete_selection();
+        let menu = waveform(&scene(&e, &[], &[]), 15_000, 10);
+        assert!(!item(&menu, "Export selection as…").enabled);
     }
 
     #[test]
