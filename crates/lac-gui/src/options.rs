@@ -9,6 +9,7 @@
 //! deliberately not remembered.
 
 use lac_app::appearance::Appearance;
+use lac_app::detector_settings::DetectorSettings;
 use wxdragon::config::{Config, ConfigStyle};
 
 /// Key of [`Options::keep_pitch`].
@@ -23,6 +24,16 @@ const CHAINED_LINKS: &str = "/Tracks/ChainedLinks";
 const TRACK_TINT: &str = "/View/TrackTint";
 /// Key of [`Appearance::selection`].
 const SELECTION: &str = "/View/Selection";
+/// Key of [`DetectorSettings::min_pause_ms`].
+const MIN_PAUSE: &str = "/Detection/MinPauseMs";
+/// Key of [`DetectorSettings::track_gap_ms`].
+const TRACK_GAP: &str = "/Detection/TrackGapMs";
+/// Key of [`DetectorSettings::min_track_secs`].
+const MIN_TRACK: &str = "/Detection/MinTrackSecs";
+/// Key of [`DetectorSettings::timbre`].
+const TIMBRE: &str = "/Detection/Timbre";
+/// Key of [`DetectorSettings::key`].
+const KEY: &str = "/Detection/Key";
 
 /// The remembered options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +52,9 @@ pub struct Options {
     /// Settings > Waveform: how strongly tracks and the selection are
     /// coloured (issue #132).
     pub appearance: Appearance,
+    /// Settings > Detection: what counts as a pause and a track start
+    /// (issue #92).
+    pub detector: DetectorSettings,
 }
 
 impl Default for Options {
@@ -51,6 +65,7 @@ impl Default for Options {
             ruler: true,
             chained_links: true,
             appearance: Appearance::default(),
+            detector: DetectorSettings::default(),
         }
     }
 }
@@ -70,6 +85,14 @@ impl Options {
                 selection: percent(c.read_long(SELECTION, d.appearance.selection.into())),
             }
             .normalized(),
+            detector: DetectorSettings {
+                min_pause_ms: count(c.read_long(MIN_PAUSE, d.detector.min_pause_ms.into())),
+                track_gap_ms: count(c.read_long(TRACK_GAP, d.detector.track_gap_ms.into())),
+                min_track_secs: count(c.read_long(MIN_TRACK, d.detector.min_track_secs.into())),
+                timbre: c.read_bool(TIMBRE, d.detector.timbre),
+                key: c.read_bool(KEY, d.detector.key),
+            }
+            .normalized(),
         }
     }
 
@@ -83,6 +106,11 @@ impl Options {
         c.write_bool(CHAINED_LINKS, self.chained_links);
         c.write_long(TRACK_TINT, self.appearance.track_tint.into());
         c.write_long(SELECTION, self.appearance.selection.into());
+        c.write_long(MIN_PAUSE, self.detector.min_pause_ms.into());
+        c.write_long(TRACK_GAP, self.detector.track_gap_ms.into());
+        c.write_long(MIN_TRACK, self.detector.min_track_secs.into());
+        c.write_bool(TIMBRE, self.detector.timbre);
+        c.write_bool(KEY, self.detector.key);
         c.flush(false);
     }
 }
@@ -91,6 +119,13 @@ impl Options {
 /// pulled into range, [`Appearance::normalized`] does the rest.
 fn percent(stored: i64) -> u8 {
     u8::try_from(stored.clamp(0, 100)).unwrap_or(0)
+}
+
+/// A stored count (milliseconds, seconds); a negative or huge value from
+/// a hand-edited store is pulled into `u32`, [`DetectorSettings::normalized`]
+/// does the rest.
+fn count(stored: i64) -> u32 {
+    u32::try_from(stored.clamp(0, i64::from(u32::MAX))).unwrap_or(0)
 }
 
 /// The application's config store.
@@ -120,6 +155,7 @@ mod tests {
                 ruler: true,
                 chained_links: true,
                 appearance: Appearance::default(),
+                detector: DetectorSettings::default(),
             }
         );
     }
@@ -129,5 +165,8 @@ mod tests {
         assert_eq!(percent(-5), 0);
         assert_eq!(percent(40), 40);
         assert_eq!(percent(1_000_000), 100);
+        assert_eq!(count(-1), 0);
+        assert_eq!(count(1500), 1500);
+        assert_eq!(count(i64::MAX), u32::MAX);
     }
 }

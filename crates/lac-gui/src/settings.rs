@@ -3,7 +3,8 @@
 //!
 //! Pages so far:
 //! - **Detection**: whether the streams of a chained Ogg file are offered
-//!   as track starts (issue #115).
+//!   as track starts (issue #115), and what the pause and track detector
+//!   looks for (issue #92).
 //! - **Waveform**: how strongly tracks and the selection are coloured
 //!   (issue #132).
 //!
@@ -15,7 +16,12 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use std::ops::RangeInclusive;
+
 use lac_app::appearance::{Appearance, SELECTION_RANGE, TRACK_TINT_RANGE};
+use lac_app::detector_settings::{
+    DetectorSettings, MIN_PAUSE_RANGE, MIN_TRACK_RANGE, TRACK_GAP_RANGE,
+};
 use wxdragon::prelude::*;
 
 use crate::icons::Icon;
@@ -119,8 +125,116 @@ fn detection_page(
         SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         GAP,
     );
+    detector_controls(&page, &sizer, chosen, preview);
     page.set_sizer_and_fit(sizer, true);
     page
+}
+
+/// The detector settings (issue #92) on the Detection page, added to
+/// `sizer`: three times and two switches, and a button back to the
+/// defaults. Each change runs the detector again at once (`preview`), so
+/// the suggestion marks in the waveform move while the dialog is open.
+fn detector_controls(
+    page: &Panel,
+    sizer: &BoxSizer,
+    chosen: &Rc<Cell<Options>>,
+    preview: &Rc<dyn Fn(Options)>,
+) {
+    let d = chosen.get().detector;
+    // A time in seconds, shown with `digits` decimals.
+    let time = |range: &RangeInclusive<u32>, scale: f64, value: u32, step: f64, digits: u32| {
+        let spin = SpinCtrlDouble::builder(page)
+            .with_min_value(f64::from(*range.start()) / scale)
+            .with_max_value(f64::from(*range.end()) / scale)
+            .with_initial_value(f64::from(value) / scale)
+            .with_increment(step)
+            .build();
+        spin.set_digits(digits);
+        spin
+    };
+    let pause = time(&MIN_PAUSE_RANGE, 1000.0, d.min_pause_ms, 0.1, 1);
+    let gap = time(&TRACK_GAP_RANGE, 1000.0, d.track_gap_ms, 0.5, 1);
+    let track = time(&MIN_TRACK_RANGE, 1.0, d.min_track_secs, 5.0, 0);
+    let check = |label: &str, value: bool| {
+        CheckBox::builder(page)
+            .with_label(label)
+            .with_value(value)
+            .build()
+    };
+    let timbre = check(
+        "A change of sound without a pause starts a new track",
+        d.timbre,
+    );
+    let key = check(
+        "A change of key or harmony starts a new track (finds few, adds false ones in songs)",
+        d.key,
+    );
+    let defaults = Button::builder(page)
+        .with_label("Detection defaults")
+        .build();
+
+    // Shows `s` in the controls.
+    let show = move |s: DetectorSettings| {
+        pause.set_value(f64::from(s.min_pause_ms) / 1000.0);
+        gap.set_value(f64::from(s.track_gap_ms) / 1000.0);
+        track.set_value(f64::from(s.min_track_secs));
+        timbre.set_value(s.timbre);
+        key.set_value(s.key);
+    };
+    // Takes `s` (settled by its rules), shows and previews it.
+    let take: Rc<dyn Fn(DetectorSettings)> = {
+        let (chosen, preview) = (Rc::clone(chosen), Rc::clone(preview));
+        Rc::new(move |s: DetectorSettings| {
+            let s = s.normalized();
+            show(s);
+            let mut o = chosen.get();
+            o.detector = s;
+            chosen.set(o);
+            preview(o);
+        })
+    };
+    // What the controls say now.
+    let read = move || DetectorSettings {
+        min_pause_ms: ms(pause.get_value()),
+        track_gap_ms: ms(gap.get_value()),
+        min_track_secs: track.get_value().round().max(0.0) as u32,
+        timbre: timbre.get_value(),
+        key: key.get_value(),
+    };
+    for spin in [pause, gap, track] {
+        let take = Rc::clone(&take);
+        spin.on_value_changed(move |_| take(read()));
+    }
+    for c in [timbre, key] {
+        let take = Rc::clone(&take);
+        c.on_toggled(move |_| take(read()));
+    }
+    {
+        let take = Rc::clone(&take);
+        defaults.on_click(move |_| take(DetectorSettings::default()));
+    }
+
+    let grid = FlexGridSizer::builder(3, 2)
+        .with_gap(Size::new(GAP, GAP))
+        .build();
+    for (text, spin) in [
+        ("Shortest pause to suggest (s)", pause),
+        ("Pause that starts a new track (s)", gap),
+        ("Shortest track (s)", track),
+    ] {
+        let label = StaticText::builder(page).with_label(text).build();
+        grid.add(&label, 0, SizerFlag::AlignCenterVertical, 0);
+        grid.add(&spin, 0, SizerFlag::Expand, 0);
+    }
+    sizer.add_sizer(&grid, 0, SizerFlag::All, GAP);
+    sizer.add(&timbre, 0, SizerFlag::Left | SizerFlag::Right, GAP);
+    sizer.add(&key, 0, SizerFlag::All, GAP);
+    sizer.add(&defaults, 0, SizerFlag::All, GAP);
+}
+
+/// `secs` seconds as whole milliseconds; never negative.
+fn ms(secs: f64) -> u32 {
+    (secs * 1000.0).round().clamp(0.0, f64::from(u32::MAX)) as u32
 }
 
 /// The "Waveform" page: two sliders in percent. Moving one may move the
@@ -132,7 +246,7 @@ fn waveform_page(
 ) -> Panel {
     let page = Panel::builder(book).build();
     let a = chosen.get().appearance;
-    let slider = |range: &std::ops::RangeInclusive<u8>, value: u8| {
+    let slider = |range: &RangeInclusive<u8>, value: u8| {
         Slider::builder(&page)
             .with_min_value(i32::from(*range.start()))
             .with_max_value(i32::from(*range.end()))
@@ -180,4 +294,17 @@ fn waveform_page(
     }
     page.set_sizer_and_fit(sizer, true);
     page
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_seconds_become_whole_milliseconds() {
+        assert_eq!(ms(1.5), 1500);
+        assert_eq!(ms(0.0004), 0);
+        assert_eq!(ms(-3.0), 0);
+        assert_eq!(ms(1e12), u32::MAX);
+    }
 }

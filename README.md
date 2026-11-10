@@ -59,9 +59,13 @@ your choice. A `*` in the title marks edits that are not exported yet (an
 export of the selection does not count), and closing or opening another
 file asks before they are lost.
 
-Edit > Settings (Ctrl+,) has a page per topic: *Detection* turns off
-offering the streams of a chained Ogg file as tracks (for recorded web
-radio that changes its title every few seconds), *Waveform* sets how
+Edit > Settings (Ctrl+,) has a page per topic: *Detection* sets the
+shortest pause to suggest, how long a pause must be to start a new track,
+the shortest track, whether a change of sound or of key without a pause
+starts a new track, and whether the streams of a chained Ogg file are
+offered as tracks (off for recorded web radio that changes its title
+every few seconds); the suggestions in the waveform follow at once,
+without analysing the file again. *Waveform* sets how
 strongly tracks and the selection are coloured. Changes show at once;
 Cancel takes them back.
 

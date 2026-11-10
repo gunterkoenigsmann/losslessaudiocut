@@ -53,7 +53,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use icons::Icon;
-use lac_analysis::{DetectParams, Detection, RegionKind};
+use lac_analysis::{Detection, Features, RegionKind};
 use lac_app::analysis_job::{AnalysisJob, AnalysisStatus};
 use lac_app::chapters::{Chapter, SuggestedStart, suggested_starts};
 use lac_app::context_menu::{self, Effect, Entry, RightPress};
@@ -303,6 +303,9 @@ struct State {
     analysis_error: Option<String>,
     /// The suggested pauses and track starts, once the analysis is done.
     detection: Option<Arc<Detection>>,
+    /// What the analysis measured, for detecting again with other
+    /// settings without decoding again (issue #92).
+    features: Option<Arc<Features>>,
     /// The latest decoded samples.
     detail: Option<Arc<Detail>>,
     /// Where waveform summaries are kept between runs (`None` if the
@@ -400,12 +403,13 @@ impl State {
         self.scrub = None;
         self.analysis = Some(AnalysisJob::start(
             &path_for_analysis,
-            DetectParams::default(),
+            self.options.detector.params(),
         ));
         self.analysis_seen = None;
         self.analysis_percent = 0;
         self.analysis_error = None;
         self.detection = None;
+        self.features = None;
         self.tags = None;
         self.chapters = Arc::default();
     }
@@ -811,6 +815,28 @@ impl State {
         }
     }
 
+    /// What the analysis suggests, for the status bar.
+    fn suggestion_summary(&self) -> String {
+        let pauses = self.detection.as_ref().map_or(0, |d| d.regions.len());
+        // Counts a chained file's link starts too.
+        format!(
+            "found {pauses} pause(s), {} track start(s) (Edit menu)",
+            self.suggested_starts().len()
+        )
+    }
+
+    /// Detects pauses and track starts again from the stored features
+    /// with the current settings; takes milliseconds. Nothing to do
+    /// before the analysis is done.
+    fn redetect(&mut self) {
+        if let Some(f) = &self.features {
+            self.detection = Some(Arc::new(lac_analysis::detect(
+                f,
+                &self.options.detector.params(),
+            )));
+        }
+    }
+
     /// Takes the analysis result when it is there. Returns a message for
     /// the status bar when the analysis ends.
     fn poll_analysis(&mut self) -> Option<String> {
@@ -821,15 +847,17 @@ impl State {
                 self.analysis_percent = (done * 100).checked_div(total).unwrap_or(0);
                 None
             }
-            AnalysisStatus::Done { detection, .. } => {
+            AnalysisStatus::Done {
+                detection,
+                features,
+                ..
+            } => {
                 self.analysis = None;
-                let pauses = detection.regions.len();
                 self.detection = Some(detection);
-                // Counts a chained file's link starts too.
-                Some(format!(
-                    "found {pauses} pause(s), {} track start(s) (Edit menu)",
-                    self.suggested_starts().len()
-                ))
+                self.features = Some(features);
+                // The settings may have changed while it ran.
+                self.redetect();
+                Some(self.suggestion_summary())
             }
             AnalysisStatus::Failed(e) => {
                 self.analysis = None;
@@ -1587,7 +1615,12 @@ fn open_settings(frame: &Frame, panel: &Panel, state: &Rc<RefCell<State>>) {
             let Ok(mut st) = state.try_borrow_mut() else {
                 return;
             };
+            let redetect = st.options.detector != o.detector;
             st.options = o;
+            if redetect && st.features.is_some() {
+                st.redetect();
+                f.set_status_text(&st.suggestion_summary(), FIELD_FILE);
+            }
             update_chrome(&f, &st);
             p.refresh(false, None);
         })
@@ -2928,6 +2961,7 @@ fn px(x: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lac_app::detector_settings::DetectorSettings;
 
     #[test]
     fn track_tints_stay_apart_from_selection_and_deletion() {
@@ -3134,6 +3168,69 @@ mod tests {
         let task = lac_app::export_job::single_task(&ed, dir.join("all.flac"));
         run(&mut st, task, Some(ed.edits().clone()));
         assert!(!st.unexported());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A mono 16-bit WAV of `parts`: (seconds, tone or silence).
+    fn tone_and_pauses(path: &Path, rate: u32, parts: &[(u32, bool)]) {
+        let mut pcm = Vec::new();
+        for &(secs, tone) in parts {
+            for i in 0..secs * rate {
+                let v = if tone {
+                    let t = f64::from(i) / f64::from(rate);
+                    ((t * 440.0 * std::f64::consts::TAU).sin() * 12_000.0) as i16
+                } else {
+                    0
+                };
+                pcm.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let len = u32::try_from(pcm.len()).expect("short");
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&len.to_le_bytes());
+        wav.extend_from_slice(&pcm);
+        std::fs::write(path, wav).expect("write wav");
+    }
+
+    /// Changing the detector settings detects again from the stored
+    /// features, without decoding the file again (issue #92).
+    #[test]
+    fn detector_settings_change_the_suggestions_at_once() {
+        let dir = std::env::temp_dir().join(format!("lac-gui-detect-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("pauses.wav");
+        // A 1 s and a 3 s pause between tones.
+        tone_and_pauses(
+            &path,
+            8000,
+            &[(3, true), (1, false), (3, true), (3, false), (3, true)],
+        );
+        let AnalysisStatus::Done { features, .. } =
+            AnalysisJob::start(&path, DetectorSettings::default().params()).wait()
+        else {
+            panic!("analysis failed");
+        };
+        let mut st = State {
+            features: Some(features),
+            ..State::default()
+        };
+        let pauses = |st: &State| st.detection.as_ref().map_or(0, |d| d.regions.len());
+        st.redetect();
+        assert_eq!(pauses(&st), 2, "both pauses at the defaults");
+        st.options.detector.min_pause_ms = 2000;
+        st.redetect();
+        assert_eq!(pauses(&st), 1, "only the long pause");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

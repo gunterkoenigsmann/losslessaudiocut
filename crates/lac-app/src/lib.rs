@@ -41,6 +41,7 @@
 //!   pointer.
 //! - [`context_menu`]: the waveform's right-click menu.
 //! - [`perspective`]: views of the waveform around the selection's edges.
+//! - [`detector_settings`]: the pause and track detector's user settings.
 //! - [`appearance`]: how strongly track tints and the selection colour.
 //!
 //! See `docs/architecture.md` in the repository for how this crate fits in.
@@ -50,6 +51,7 @@ pub mod appearance;
 pub mod chapters;
 pub mod context_menu;
 pub mod detail;
+pub mod detector_settings;
 pub mod editor;
 pub mod export_job;
 pub mod file_types;
