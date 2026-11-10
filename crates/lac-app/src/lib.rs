@@ -44,6 +44,7 @@
 //! - [`detector_settings`]: the pause and track detector's user settings.
 //! - [`i18n`]: translations of the user interface.
 //! - [`appearance`]: how strongly track tints and the selection colour.
+//! - [`project`]: project files, saving a recording's edits for later.
 //! - [`theme`]: light or dark windows, and the track list's colours in each.
 //!
 //! See `docs/architecture.md` in the repository for how this crate fits in.
@@ -68,6 +69,7 @@ pub mod peak_job;
 pub mod perspective;
 pub mod playback;
 pub mod positions;
+pub mod project;
 pub mod ranges;
 pub mod recent_files;
 pub mod ruler;

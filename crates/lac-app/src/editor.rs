@@ -106,6 +106,46 @@ impl Editor {
         }
     }
 
+    /// A recording of `total` sample frames with `edits` from a saved
+    /// project. Whatever does not fit the recording (it may have been
+    /// shortened since) is dropped: deletions and splits outside it, tag
+    /// changes of tracks that no longer start anywhere. The result counts
+    /// as saved ([`Editor::has_unexported_changes`] is false) and has no
+    /// undo history.
+    pub fn with_edits(total: SamplePos, edits: Edits) -> Self {
+        let mut deleted: Vec<Range<SamplePos>> = edits
+            .deleted
+            .into_iter()
+            .map(|r| r.start.min(total)..r.end.min(total))
+            .filter(|r| r.start < r.end)
+            .collect();
+        ranges::normalize(&mut deleted);
+        let mut splits: Vec<SamplePos> = edits
+            .splits
+            .into_iter()
+            .filter(|&p| p > 0 && p < total)
+            .collect();
+        splits.sort_unstable();
+        splits.dedup();
+        let track_tags = edits
+            .track_tags
+            .into_iter()
+            .filter(|(start, t)| {
+                (*start == 0 || splits.binary_search(start).is_ok()) && !t.is_empty()
+            })
+            .collect();
+        let edits = Edits {
+            deleted,
+            splits,
+            all_tags: edits.all_tags,
+            track_tags,
+        };
+        let mut editor = Editor::new(total);
+        editor.exported = Some(edits.clone());
+        editor.edits = edits;
+        editor
+    }
+
     /// Length of the recording.
     pub fn total(&self) -> SamplePos {
         self.total
@@ -734,15 +774,15 @@ impl Editor {
         self.edits != Edits::default()
     }
 
-    /// Remembers `edits` as exported: the [`Editor::edits`] taken when an
-    /// export started, so edits made while it ran still count as
-    /// unexported.
+    /// Remembers `edits` as exported or saved in a project: the
+    /// [`Editor::edits`] taken when an export started or the project was
+    /// written, so edits made since still count as unexported.
     pub fn mark_exported(&mut self, edits: Edits) {
         self.exported = Some(edits);
     }
 
-    /// Whether there are edits that no export contains, i.e. closing the
-    /// file would lose work. Undoing back to the exported state, or to no
+    /// Whether there are edits that no export or saved project contains,
+    /// i.e. closing the file would lose work. Undoing back to the exported state, or to no
     /// edits at all, counts as nothing to lose.
     pub fn has_unexported_changes(&self) -> bool {
         self.is_modified() && self.exported.as_ref() != Some(&self.edits)
@@ -864,6 +904,34 @@ pub fn describe_export(kept: &[KeptRange], rate: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_edits_are_fitted_to_the_recording() {
+        let mut title = TagEdits::new();
+        title.set(TagField::Title, "Two").expect("title");
+        let edits = Edits {
+            deleted: vec![80..120, 10..20, 15..30, 200..300],
+            splits: vec![50, 0, 50, 150, 30],
+            all_tags: TagEdits::new(),
+            track_tags: [
+                (50, title.clone()),
+                (60, title.clone()),
+                (150, title.clone()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let e = Editor::with_edits(100, edits);
+        assert_eq!(e.deleted(), [10..30, 80..100]);
+        assert_eq!(e.splits(), [30, 50]);
+        assert_eq!(
+            e.edits().track_tags.keys().copied().collect::<Vec<_>>(),
+            [50],
+            "tags of tracks that no longer start anywhere are dropped"
+        );
+        assert!(!e.has_unexported_changes(), "loaded edits count as saved");
+        assert!(!e.can_undo());
+    }
 
     #[test]
     fn moving_a_track_start_keeps_its_tags_and_the_order() {

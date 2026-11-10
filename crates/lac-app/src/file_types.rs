@@ -169,8 +169,8 @@ pub fn associated_extensions() -> Vec<&'static str> {
 }
 
 /// The wildcard of the open dialog (wxWidgets syntax: pairs of
-/// `description|patterns`, separated by `|`): all supported files first,
-/// then each type, then everything.
+/// `description|patterns`, separated by `|`): all supported files and
+/// projects first, then each type, projects, then everything.
 pub fn dialog_wildcard() -> String {
     let patterns = |t: &FileType| {
         t.extensions
@@ -180,10 +180,17 @@ pub fn dialog_wildcard() -> String {
             .join(";")
     };
     let all: Vec<String> = FILE_TYPES.iter().map(patterns).collect();
-    let mut w = format!("{}|{}", tr("Audio files"), all.join(";"));
+    // Projects (`crate::project`) open like recordings.
+    let project = format!("*.{}", crate::project::EXTENSION);
+    let mut w = format!(
+        "{}|{};{project}",
+        tr("Audio files and projects"),
+        all.join(";")
+    );
     for t in FILE_TYPES {
         w.push_str(&format!("|{}|{}", tr(t.name), patterns(t)));
     }
+    w.push_str(&format!("|{}|{project}", tr("losslessaudiocut projects")));
     w.push_str(&format!("|{}|*", tr("All files")));
     w
 }
@@ -229,9 +236,9 @@ mod tests {
     fn wildcard_lists_everything_first() {
         let w = dialog_wildcard();
         assert!(w.starts_with(
-            "Audio files|*.mp3;*.m4a;*.m4b;*.ac3;*.aac;*.ogg;*.oga;*.opus;*.spx;*.flac;*.wav;*.aiff;*.aif;*.aifc;*.mka;*.webm;*.mkv;*.mp4|MP3 audio|*.mp3|"
+            "Audio files and projects|*.mp3;*.m4a;*.m4b;*.ac3;*.aac;*.ogg;*.oga;*.opus;*.spx;*.flac;*.wav;*.aiff;*.aif;*.aifc;*.mka;*.webm;*.mkv;*.mp4;*.lacproj|MP3 audio|*.mp3|"
         ));
-        assert!(w.ends_with("|All files|*"));
+        assert!(w.ends_with("|losslessaudiocut projects|*.lacproj|All files|*"));
         // Description and pattern alternate, so the count is even.
         assert_eq!(w.split('|').count() % 2, 0);
     }

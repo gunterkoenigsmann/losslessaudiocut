@@ -59,6 +59,13 @@ your choice. A `*` in the title marks edits that are not exported yet (an
 export of the selection does not count), and closing or opening another
 file asks before they are lost.
 
+File > Save project (Ctrl+S) keeps the edits, track splits, tags and the
+shown part of the waveform in a small text file (`.lacproj`) next to the
+recording or anywhere else; opening that file with File > Open (or from the
+command line) brings the recording back with them. A recording inside the
+project file's folder is stored by a relative path, so the folder can be
+moved as a whole.
+
 Edit > Settings (Ctrl+,) has a page per topic: *Detection* sets the
 shortest pause to suggest, how long a pause must be to start a new track,
 the shortest track, whether a change of sound or of key without a pause

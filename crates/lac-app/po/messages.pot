@@ -140,39 +140,39 @@ msgstr ""
 msgid "Restore track {n}"
 msgstr ""
 
-#: crates/lac-app/src/editor.rs:779
+#: crates/lac-app/src/editor.rs:819
 msgid "track {n} of {count}"
 msgstr ""
 
-#: crates/lac-app/src/editor.rs:788
+#: crates/lac-app/src/editor.rs:828
 msgid "keeping {kept} of {total}"
 msgstr ""
 
-#: crates/lac-app/src/editor.rs:803
+#: crates/lac-app/src/editor.rs:843
 msgid "selected {start} .. {end} ({length})"
 msgstr ""
 
-#: crates/lac-app/src/editor.rs:829
+#: crates/lac-app/src/editor.rs:869
 msgid "exported {n} part, {length}"
 msgstr ""
 
-#: crates/lac-app/src/editor.rs:831
+#: crates/lac-app/src/editor.rs:871
 msgid "exported {n} parts, {length}"
 msgstr ""
 
-#: crates/lac-app/src/editor.rs:838
+#: crates/lac-app/src/editor.rs:878
 msgid ", all cuts exact"
 msgstr ""
 
-#: crates/lac-app/src/editor.rs:841
+#: crates/lac-app/src/editor.rs:881
 msgid "; cuts at packet boundaries add {added}"
 msgstr ""
 
-#: crates/lac-app/src/editor.rs:847
+#: crates/lac-app/src/editor.rs:887
 msgid "; codec padding at joins adds {padding}"
 msgstr ""
 
-#: crates/lac-app/src/editor.rs:853
+#: crates/lac-app/src/editor.rs:893
 msgid "; cuts at packet boundaries add {added}, codec padding {padding}"
 msgstr ""
 
@@ -244,11 +244,16 @@ msgstr ""
 msgid "MP4 video (audio track only)"
 msgstr ""
 
-#: crates/lac-app/src/file_types.rs:183
-msgid "Audio files"
+#: crates/lac-app/src/file_types.rs:187
+msgid "Audio files and projects"
 msgstr ""
 
-#: crates/lac-app/src/file_types.rs:187
+#: crates/lac-app/src/file_types.rs:193
+#: crates/lac-gui/src/main.rs:1968
+msgid "losslessaudiocut projects"
+msgstr ""
+
+#: crates/lac-app/src/file_types.rs:194
 msgid "All files"
 msgstr ""
 
@@ -356,579 +361,619 @@ msgstr ""
 msgid "Dark"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:136
+#: crates/lac-gui/src/main.rs:140
 msgid "Open an audio file (Ctrl+O)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:141
+#: crates/lac-gui/src/main.rs:145
 msgid "Export the kept parts (Ctrl+E)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:147
+#: crates/lac-gui/src/main.rs:151
 msgid "Undo (Ctrl+Z)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:152
+#: crates/lac-gui/src/main.rs:156
 msgid "Redo (Ctrl+Y)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:158
+#: crates/lac-gui/src/main.rs:162
 msgid "Delete the selection (Del)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:163
+#: crates/lac-gui/src/main.rs:167
 msgid "Restore deleted parts in the selection (Ctrl+R)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:168
+#: crates/lac-gui/src/main.rs:172
 msgid "Start a new track here (Ctrl+K)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:174
+#: crates/lac-gui/src/main.rs:178
 msgid "Cursor to the start (Home)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:179
+#: crates/lac-gui/src/main.rs:183
 msgid "Play or stop (Space)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:184
+#: crates/lac-gui/src/main.rs:188
 msgid "Play the first 3 seconds of the track (Ctrl+Shift+B)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:189
+#: crates/lac-gui/src/main.rs:193
 msgid "Play the last 3 seconds of the track (Ctrl+Shift+E)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:192
+#: crates/lac-gui/src/main.rs:196
 msgid "Playback speed (Ctrl+Up, Ctrl+Down; Ctrl+Shift+N for normal)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:198
+#: crates/lac-gui/src/main.rs:202
 msgid "Zoom in (Ctrl++)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:203
+#: crates/lac-gui/src/main.rs:207
 msgid "Zoom out (Ctrl+-)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:208
+#: crates/lac-gui/src/main.rs:212
 msgid "Show the whole file (Ctrl+0)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:449
+#: crates/lac-gui/src/main.rs:458
+msgid "; the recording's length changed since the project was saved, check the edits"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:494
 msgid "; {n} chained streams, offered as track starts (Edit > Split at suggested track starts)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:453
+#: crates/lac-gui/src/main.rs:498
 msgid "; {n} chained streams, not offered as track starts (Edit > Settings > Detection)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:491
-#: crates/lac-gui/src/main.rs:509
-#: crates/lac-gui/src/main.rs:528
-#: crates/lac-gui/src/main.rs:897
-#: crates/lac-gui/src/main.rs:914
-#: crates/lac-gui/src/main.rs:1650
-#: crates/lac-gui/src/main.rs:1782
-#: crates/lac-gui/src/main.rs:1894
-#: crates/lac-gui/src/main.rs:1981
-#: crates/lac-gui/src/main.rs:2068
-#: crates/lac-gui/src/main.rs:2243
-#: crates/lac-gui/src/main.rs:2653
+#: crates/lac-gui/src/main.rs:536
+#: crates/lac-gui/src/main.rs:554
+#: crates/lac-gui/src/main.rs:573
+#: crates/lac-gui/src/main.rs:942
+#: crates/lac-gui/src/main.rs:959
+#: crates/lac-gui/src/main.rs:1711
+#: crates/lac-gui/src/main.rs:1843
+#: crates/lac-gui/src/main.rs:1947
+#: crates/lac-gui/src/main.rs:2060
+#: crates/lac-gui/src/main.rs:2147
+#: crates/lac-gui/src/main.rs:2234
+#: crates/lac-gui/src/main.rs:2409
+#: crates/lac-gui/src/main.rs:2819
 msgid "open a file first"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:495
+#: crates/lac-gui/src/main.rs:540
 msgid "everything is deleted; nothing to play"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:519
+#: crates/lac-gui/src/main.rs:564
 msgid "all of it is deleted; nothing to play"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:538
+#: crates/lac-gui/src/main.rs:583
 msgid "cannot play: {e}"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:560
+#: crates/lac-gui/src/main.rs:605
 msgid " (pitch kept)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:561
+#: crates/lac-gui/src/main.rs:606
 msgid " (pitch follows the speed)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:564
+#: crates/lac-gui/src/main.rs:609
 msgid "speed {speed}{how}"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:734
+#: crates/lac-gui/src/main.rs:779
 msgid "{speed}cursor {pos}"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:839
+#: crates/lac-gui/src/main.rs:884
 msgid "found {pauses} pause(s), {starts} track start(s) (Edit menu)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:884
+#: crates/lac-gui/src/main.rs:929
 msgid "could not look for pauses and track starts: {e}"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:904
+#: crates/lac-gui/src/main.rs:949
 msgid "no suggestions: {err}"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:906
+#: crates/lac-gui/src/main.rs:951
 #, no-c-format
 msgid "still looking for pauses and track starts ({percent} %)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:918
+#: crates/lac-gui/src/main.rs:963
 msgid "no new track starts suggested"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:920
+#: crates/lac-gui/src/main.rs:965
 msgid "added {n} track start(s); Ctrl+Z takes them back"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:926
-#: crates/lac-gui/src/main.rs:940
+#: crates/lac-gui/src/main.rs:971
+#: crates/lac-gui/src/main.rs:985
 msgid "no suggested pauses left to delete"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:928
+#: crates/lac-gui/src/main.rs:973
 msgid "deleted {length} of pauses; Ctrl+Z takes them back"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:932
+#: crates/lac-gui/src/main.rs:977
 msgid "{n} samples"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:975
+#: crates/lac-gui/src/main.rs:1023
 #, no-c-format
 msgid "{name}: reading… {percent} %"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:984
+#: crates/lac-gui/src/main.rs:1032
 msgid "{name} (waveform from cache){note}"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1156
+#: crates/lac-gui/src/main.rs:1204
 msgid "only one file at a time; opening the first"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1228
+#: crates/lac-gui/src/main.rs:1276
 msgid "&Open…"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1229
-#: crates/lac-gui/src/main.rs:1479
-msgid "Open an audio file"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1233
-msgid "&Export…"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1234
-msgid "Write the kept parts to a new file, without re-encoding"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1238
-msgid "Export &selection…"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1239
-msgid "Write what is kept of the selection to a new file, without re-encoding"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1244
-msgid "&Clear waveform cache"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1245
-msgid "Delete the stored waveforms; files are decoded again when opened"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1250
-msgid "&Quit"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1251
-msgid "Quit losslessaudiocut"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1258
-msgid "Open &recent"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1259
-msgid "Open one of the recently opened files"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1264
-msgid "&Undo"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1265
-msgid "Undo the last delete or restore"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1269
-msgid "&Redo"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1270
-msgid "Redo what was undone"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1275
-msgid "&Delete selection"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1276
-msgid "Leave the selection out of the export"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1280
-msgid "Re&store selection"
+#: crates/lac-gui/src/main.rs:1277
+msgid "Open an audio file or a project"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1281
-msgid "Take deleted parts inside the selection back in"
+msgid "Save &project"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1282
+msgid "Save the edits, tracks and tags to continue later"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1286
-msgid "S&plit track here"
+msgid "Save project &as…"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1287
-msgid "Start a new track at the cursor or the selection start"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1291
-msgid "&Join with previous track"
+msgid "Save the edits, tracks and tags in a new project file"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1292
-msgid "Remove the split at the start of the track under the cursor"
+msgid "&Export…"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1296
-msgid "Re&name track…"
+#: crates/lac-gui/src/main.rs:1293
+msgid "Write the kept parts to a new file, without re-encoding"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1297
-msgid "Name the track under the cursor"
+msgid "Export &selection…"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1301
-msgid "Use for all trac&ks"
+#: crates/lac-gui/src/main.rs:1298
+msgid "Write what is kept of the selection to a new file, without re-encoding"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1302
-msgid "Give every track the value of the selected cell of the track list"
+#: crates/lac-gui/src/main.rs:1303
+msgid "&Clear waveform cache"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1307
-msgid "Split at suggested &track starts"
+#: crates/lac-gui/src/main.rs:1304
+msgid "Delete the stored waveforms; files are decoded again when opened"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1308
-msgid "Start new tracks where the analysis found pauses or changes of sound"
+#: crates/lac-gui/src/main.rs:1309
+msgid "&Quit"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1312
-msgid "Delete suggested &pauses"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1313
-msgid "Delete the silent and noise-only stretches the analysis found"
+#: crates/lac-gui/src/main.rs:1310
+msgid "Quit losslessaudiocut"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1317
-msgid "Se&ttings…"
+msgid "Open &recent"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1318
-msgid "What the analysis suggests and how the waveform is coloured"
+msgid "Open one of the recently opened files"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1323
-msgid "Select &all"
+msgid "&Undo"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1324
-msgid "Select the whole file"
+msgid "Undo the last delete or restore"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1328
-msgid "Select &none"
+msgid "&Redo"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1329
-msgid "Clear the selection"
+msgid "Redo what was undone"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1334
+msgid "&Delete selection"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1335
-msgid "&Play/Stop"
+msgid "Leave the selection out of the export"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1336
-msgid "Play the kept parts from the selection or the cursor, or stop"
+#: crates/lac-gui/src/main.rs:1339
+msgid "Re&store selection"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1340
-msgid "Cursor to &start"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1341
-msgid "Put the cursor at the beginning"
+msgid "Take deleted parts inside the selection back in"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1345
-msgid "Play track &beginning"
+msgid "S&plit track here"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1346
-msgid "Play the first 3 seconds of the track at the cursor or selection"
+msgid "Start a new track at the cursor or the selection start"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1350
-msgid "Play track &end"
+msgid "&Join with previous track"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1351
-msgid "Play the last 3 seconds of the track at the cursor or selection"
+msgid "Remove the split at the start of the track under the cursor"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1355
+msgid "Re&name track…"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1356
-msgid "&Faster"
+msgid "Name the track under the cursor"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1357
-msgid "Play faster (up to 3×)"
+#: crates/lac-gui/src/main.rs:1360
+msgid "Use for all trac&ks"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1361
-msgid "S&lower"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1362
-msgid "Play slower (down to 0.5×)"
+msgid "Give every track the value of the selected cell of the track list"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1366
-msgid "&Normal speed"
+msgid "Split at suggested &track starts"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1367
-msgid "Play at normal speed"
+msgid "Start new tracks where the analysis found pauses or changes of sound"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1371
-msgid "&Keep pitch"
+msgid "Delete suggested &pauses"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1372
-msgid "At other speeds keep the pitch; else it changes like a tape played faster"
+msgid "Delete the silent and noise-only stretches the analysis found"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1376
-msgid "S&crub while selecting"
+msgid "Se&ttings…"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1377
-msgid "Play the edge of the selection while dragging it"
+msgid "What the analysis suggests and how the waveform is coloured"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1382
+msgid "Select &all"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1383
-msgid "Zoom &in"
+msgid "Select the whole file"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1384
-msgid "Show less time, more detail"
+#: crates/lac-gui/src/main.rs:1387
+msgid "Select &none"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1388
-msgid "Zoom &out"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1389
-msgid "Show more time"
-msgstr ""
-
-#: crates/lac-gui/src/main.rs:1393
-msgid "Zoom to &fit"
+msgid "Clear the selection"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1394
-msgid "Show the whole file"
+msgid "&Play/Stop"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1395
+msgid "Play the kept parts from the selection or the cursor, or stop"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1399
+msgid "Cursor to &start"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1400
-msgid "&Perspective"
+msgid "Put the cursor at the beginning"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1401
-msgid "Views of the selection's edges in context"
+#: crates/lac-gui/src/main.rs:1404
+msgid "Play track &beginning"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1405
-msgid "Time &ruler"
+msgid "Play the first 3 seconds of the track at the cursor or selection"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1406
-msgid "Show the time scale along the bottom of the waveform"
+#: crates/lac-gui/src/main.rs:1409
+msgid "Play track &end"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1419
-msgid "&File"
+#: crates/lac-gui/src/main.rs:1410
+msgid "Play the last 3 seconds of the track at the cursor or selection"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1415
+msgid "&Faster"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1416
+msgid "Play faster (up to 3×)"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1420
-msgid "&Edit"
+msgid "S&lower"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1421
-msgid "&Play"
+msgid "Play slower (down to 0.5×)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1422
-msgid "&View"
+#: crates/lac-gui/src/main.rs:1425
+msgid "&Normal speed"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1426
+msgid "Play at normal speed"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1430
+msgid "&Keep pitch"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1431
+msgid "At other speeds keep the pitch; else it changes like a tape played faster"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1435
+msgid "S&crub while selecting"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1436
+msgid "Play the edge of the selection while dragging it"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1442
+msgid "Zoom &in"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1443
+msgid "Show less time, more detail"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1447
+msgid "Zoom &out"
 msgstr ""
 
 #: crates/lac-gui/src/main.rs:1448
+msgid "Show more time"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1452
+msgid "Zoom to &fit"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1453
+msgid "Show the whole file"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1459
+msgid "&Perspective"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1460
+msgid "Views of the selection's edges in context"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1464
+msgid "Time &ruler"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1465
+msgid "Show the time scale along the bottom of the waveform"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1478
+msgid "&File"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1479
+msgid "&Edit"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1480
+msgid "&Play"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1481
+msgid "&View"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1507
 msgid "Zoom to this part, with {seconds} s around the selection's edges"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1526
+#: crates/lac-gui/src/main.rs:1538
+msgid "Open an audio file"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1587
 msgid "waveform cache cleared ({n} entries)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1527
+#: crates/lac-gui/src/main.rs:1588
 msgid "could not clear the waveform cache: {e}"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1528
+#: crates/lac-gui/src/main.rs:1589
 msgid "there is no waveform cache on this system"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1653
+#: crates/lac-gui/src/main.rs:1714
 msgid "nothing to undo"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1654
+#: crates/lac-gui/src/main.rs:1715
 msgid "nothing to redo"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1655
+#: crates/lac-gui/src/main.rs:1716
 msgid "select a part with the mouse first"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1656
+#: crates/lac-gui/src/main.rs:1717
 msgid "the selection is deleted already"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1657
+#: crates/lac-gui/src/main.rs:1718
 msgid "select a deleted part first"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1658
+#: crates/lac-gui/src/main.rs:1719
 msgid "nothing in the selection is deleted"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1669
+#: crates/lac-gui/src/main.rs:1730
 msgid "click where the new track should start"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1671
+#: crates/lac-gui/src/main.rs:1732
 msgid "the first track has no track before it"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1821
-msgid "{name} has edits that are not exported yet. Discard them?"
+#: crates/lac-gui/src/main.rs:1882
+msgid "{name} has edits that are neither exported nor saved yet. Discard them?"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1824
+#: crates/lac-gui/src/main.rs:1885
 msgid "Discard edits?"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1846
+#: crates/lac-gui/src/main.rs:1910
+msgid "cannot open {file}: {e}"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:1929
 msgid "reading…"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1864
+#: crates/lac-gui/src/main.rs:1963
+msgid "Save the project"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:2002
+msgid "saved {file}"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:2008
+msgid "cannot save {file}: {e}"
+msgstr ""
+
+#: crates/lac-gui/src/main.rs:2030
 msgid "{file} no longer exists; removed it from the list"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1888
-#: crates/lac-gui/src/main.rs:1975
+#: crates/lac-gui/src/main.rs:2054
+#: crates/lac-gui/src/main.rs:2141
 msgid "an export is still running"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1903
+#: crates/lac-gui/src/main.rs:2069
 msgid "Export the kept parts"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1923
+#: crates/lac-gui/src/main.rs:2089
 msgid "Export the tracks into this folder"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1939
+#: crates/lac-gui/src/main.rs:2105
 msgid "{existing} of the {count} track files exist already in {folder}. Replace them?"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1946
+#: crates/lac-gui/src/main.rs:2112
 msgid "Replace files?"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1961
+#: crates/lac-gui/src/main.rs:2127
 msgid "everything is deleted; nothing to export"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1987
+#: crates/lac-gui/src/main.rs:2153
 msgid "select something to export first"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:1994
+#: crates/lac-gui/src/main.rs:2160
 msgid "the selection is deleted entirely; nothing to export"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:2000
+#: crates/lac-gui/src/main.rs:2166
 msgid "Export the selection"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:2044
+#: crates/lac-gui/src/main.rs:2210
 msgid "exporting to {file}…"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:2047
+#: crates/lac-gui/src/main.rs:2213
 msgid "exporting {n} tracks…"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:2052
+#: crates/lac-gui/src/main.rs:2218
 msgid " (track {tracks} deleted entirely, no file)"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:2075
+#: crates/lac-gui/src/main.rs:2241
 msgid "Name of track {n} (also used in its file name):"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:2078
+#: crates/lac-gui/src/main.rs:2244
 msgid "Rename track"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:2248
+#: crates/lac-gui/src/main.rs:2414
 msgid "{field} of every track: {text}"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:2254
+#: crates/lac-gui/src/main.rs:2420
 msgid "select a tag in the track list first"
 msgstr ""
 
-#: crates/lac-gui/src/main.rs:2280
+#: crates/lac-gui/src/main.rs:2446
 msgid "finishing the export…"
 msgstr ""
 

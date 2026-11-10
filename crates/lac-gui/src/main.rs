@@ -70,6 +70,7 @@ use lac_app::peak_cache::PeakCache;
 use lac_app::peak_job::{JobStatus, PeakJob};
 use lac_app::perspective::Perspective;
 use lac_app::playback::End;
+use lac_app::project::Project;
 use lac_app::recent_files::RecentFiles;
 use lac_app::theme::{ListPalette, Theme};
 use lac_app::track_list::Bound;
@@ -93,6 +94,9 @@ const ID_CLEAR_CACHE: Id = ID_HIGHEST + 5;
 const ID_EXPORT: Id = ID_HIGHEST + 6;
 /// File > Export selection (issue #101); after the perspectives.
 const ID_EXPORT_SELECTION: Id = ID_HIGHEST + 36;
+/// File > Save project and Save project as (issue #97).
+const ID_SAVE_PROJECT: Id = ID_HIGHEST + 37;
+const ID_SAVE_PROJECT_AS: Id = ID_HIGHEST + 38;
 const ID_UNDO: Id = ID_HIGHEST + 7;
 const ID_REDO: Id = ID_HIGHEST + 8;
 const ID_DELETE: Id = ID_HIGHEST + 9;
@@ -346,6 +350,15 @@ struct State {
     /// The parts the file marks as tracks (the links of a chained Ogg
     /// file), with their tags; offered as suggested track starts.
     chapters: Arc<[Chapter]>,
+    /// The project file the edits were opened from or saved to last
+    /// (issue #97); File > Save project writes there.
+    project_path: Option<PathBuf>,
+    /// A project being opened: its edits and view wait until the
+    /// recording's length is known.
+    pending_project: Option<Project>,
+    /// Why the project's edits may not fit the recording, for the status
+    /// bar once it is read.
+    project_note: String,
     /// The track list under the waveform.
     grid: Option<Grid>,
     /// The dockable panes around the waveform.
@@ -417,6 +430,38 @@ impl State {
         self.features = None;
         self.tags = None;
         self.chapters = Arc::default();
+        self.project_path = None;
+        self.pending_project = None;
+        self.project_note = String::new();
+    }
+
+    /// Opens the recording of `project` with its edits, which are applied
+    /// once the recording's length is known ([`State::poll`]).
+    fn open_project(&mut self, path: PathBuf, project: Project) {
+        self.open(project.audio.clone());
+        self.project_path = Some(path);
+        self.pending_project = Some(project);
+    }
+
+    /// Notes for the status bar after reading a file: chained streams,
+    /// a project that does not fit the recording.
+    fn open_notes(&self) -> String {
+        format!("{}{}", self.chapter_note(), self.project_note)
+    }
+
+    /// An editor for a recording of `total` frames with `project`'s edits;
+    /// shows the project's part of the waveform. Notes a recording whose
+    /// length changed since the project was saved.
+    fn editor_from(&mut self, project: Project, total: SamplePos) -> Editor {
+        if project.frames.is_some_and(|f| f != total) {
+            self.project_note =
+                tr("; the recording's length changed since the project was saved, check the edits")
+                    .into_owned();
+        }
+        if let (Some(v), Some(range)) = (&mut self.view, &project.view) {
+            v.zoom_exactly_to(&(range.start.min(total)..range.end.min(total)));
+        }
+        Editor::with_edits(total, project.edits)
     }
 
     /// The suggested track starts: the file's own (chained Ogg links, with
@@ -959,7 +1004,10 @@ impl State {
             if self.view.is_none() {
                 self.view = Some(WaveformView::new(p.total_samples(), self.width));
                 self.minimap = Some(Minimap::new(p.total_samples(), self.minimap_width));
-                self.editor = Some(Editor::new(p.total_samples()));
+                self.editor = Some(match self.pending_project.take() {
+                    Some(project) => self.editor_from(project, p.total_samples()),
+                    None => Editor::new(p.total_samples()),
+                });
             }
             self.peaks = Some(p);
         }
@@ -978,7 +1026,7 @@ impl State {
             }
             JobStatus::Done(report) if report.warnings.is_empty() => {
                 self.job = None;
-                let note = self.chapter_note();
+                let note = self.open_notes();
                 if u.cached {
                     trf(
                         "{name} (waveform from cache){note}",
@@ -993,7 +1041,7 @@ impl State {
                 format!(
                     "{name}: {}{}",
                     report.warnings.join("; "),
-                    self.chapter_note()
+                    self.open_notes()
                 )
             }
             JobStatus::Failed(msg) => {
@@ -1226,8 +1274,19 @@ fn menu_bar(options: Options) -> MenuBar {
         .append_item(
             ID_OPEN,
             &tr_menu("&Open…\tCtrl+O"),
-            &tr("Open an audio file"),
+            &tr("Open an audio file or a project"),
         )
+        .append_item(
+            ID_SAVE_PROJECT,
+            &tr_menu("Save &project\tCtrl+S"),
+            &tr("Save the edits, tracks and tags to continue later"),
+        )
+        .append_item(
+            ID_SAVE_PROJECT_AS,
+            &tr_menu("Save project &as…\tCtrl+Shift+S"),
+            &tr("Save the edits, tracks and tags in a new project file"),
+        )
+        .append_separator()
         .append_item(
             ID_EXPORT,
             &tr_menu("&Export…\tCtrl+E"),
@@ -1514,6 +1573,8 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
         return;
     } else if id == ID_EXPORT {
         export(&f, state);
+    } else if id == ID_SAVE_PROJECT || id == ID_SAVE_PROJECT_AS {
+        save_project(&f, state, id == ID_SAVE_PROJECT_AS);
     } else if id == ID_EXPORT_SELECTION {
         export_selection(&f, state);
     } else if id == ID_RENAME {
@@ -1818,7 +1879,7 @@ fn confirm_discard(frame: &Frame, state: &Rc<RefCell<State>>) -> bool {
     let dialog = MessageDialog::builder(
         frame,
         &trf(
-            "{name} has edits that are not exported yet. Discard them?",
+            "{name} has edits that are neither exported nor saved yet. Discard them?",
             &[("name", &name)],
         ),
         &tr("Discard edits?"),
@@ -1837,13 +1898,118 @@ fn open_file(frame: &Frame, state: &Rc<RefCell<State>>, path: PathBuf) {
     // directories is listed once and still found from elsewhere. If that
     // fails (the file is gone), opening it reports the error anyway.
     let listed = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    // A project names its recording; read it before forgetting the
+    // current file, so that a broken one leaves that open.
+    let project = if lac_app::project::is_project(&path) {
+        match read_project(&listed) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                report(
+                    frame,
+                    &trf(
+                        "cannot open {file}: {e}",
+                        &[("file", &path.display()), ("e", &e)],
+                    ),
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
     {
         let mut st = state.borrow_mut();
-        st.recent.add(listed);
+        st.recent.add(listed.clone());
         remember_recent(frame, &st.recent);
-        st.open(path);
+        match project {
+            Some(p) => st.open_project(listed, p),
+            None => st.open(path),
+        }
     }
     report(frame, &tr("reading…"));
+    update_chrome(frame, &state.borrow());
+}
+
+/// Reads the project file at `path`.
+fn read_project(path: &Path) -> Result<Project, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let dir = path.parent().unwrap_or(Path::new(""));
+    Project::parse(&text, dir).map_err(|e| e.to_string())
+}
+
+/// File > Save project (`ask` false) and Save project as (`ask` true):
+/// writes the edits to the project file, asking for its name the first
+/// time or when `ask`.
+fn save_project(frame: &Frame, state: &Rc<RefCell<State>>, ask: bool) {
+    let (audio, known, project) = {
+        let st = state.borrow();
+        let (Some(audio), Some(ed)) = (&st.path, &st.editor) else {
+            report(frame, &tr("open a file first"));
+            return;
+        };
+        let project = Project {
+            audio: std::fs::canonicalize(audio).unwrap_or_else(|_| audio.clone()),
+            frames: Some(ed.total()),
+            edits: ed.edits().clone(),
+            view: st.view.as_ref().map(WaveformView::visible),
+        };
+        (audio.clone(), st.project_path.clone(), project)
+    };
+    let target = match known.filter(|_| !ask) {
+        Some(p) => p,
+        None => {
+            let suggested = lac_app::project::default_path(&audio);
+            let dialog = FileDialog::builder(frame)
+                .with_message(&tr("Save the project"))
+                .with_default_dir(&dir_of(&suggested))
+                .with_default_file(&file_name_of(&suggested))
+                .with_wildcard(&format!(
+                    "{}|*.{}",
+                    tr("losslessaudiocut projects"),
+                    lac_app::project::EXTENSION
+                ))
+                .with_style(FileDialogStyle::Save | FileDialogStyle::OverwritePrompt)
+                .build();
+            if dialog.show_modal() != ID_OK {
+                return;
+            }
+            let Some(p) = dialog.get_path().map(PathBuf::from) else {
+                return;
+            };
+            // GTK does not add the extension of the filter.
+            if lac_app::project::is_project(&p) {
+                p
+            } else {
+                p.with_extension(lac_app::project::EXTENSION)
+            }
+        }
+    };
+    let dir = target.parent().unwrap_or(Path::new(""));
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    match std::fs::write(&target, project.to_text(&dir)) {
+        Ok(()) => {
+            let mut st = state.borrow_mut();
+            if let Some(ed) = &mut st.editor {
+                ed.mark_exported(project.edits);
+            }
+            let listed = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
+            st.recent.add(listed.clone());
+            remember_recent(frame, &st.recent);
+            st.project_path = Some(listed);
+            drop(st);
+            report(
+                frame,
+                &trf("saved {file}", &[("file", &file_name_of(&target))]),
+            );
+        }
+        Err(e) => report(
+            frame,
+            &trf(
+                "cannot save {file}: {e}",
+                &[("file", &target.display()), ("e", &e)],
+            ),
+        ),
+    }
     update_chrome(frame, &state.borrow());
 }
 
@@ -3444,6 +3610,76 @@ mod tests {
             assert!(*id > ID_HIGHEST, "{id} is no command of ours");
             assert_eq!(panes::pane_for(*id), None, "{id} toggles a pane");
         }
+    }
+
+    #[test]
+    fn menu_ids_are_distinct() {
+        let mut ids = vec![
+            ID_OPEN,
+            ID_ZOOM_IN,
+            ID_ZOOM_OUT,
+            ID_ZOOM_FIT,
+            ID_CLEAR_CACHE,
+            ID_EXPORT,
+            ID_EXPORT_SELECTION,
+            ID_SAVE_PROJECT,
+            ID_SAVE_PROJECT_AS,
+            ID_UNDO,
+            ID_REDO,
+            ID_DELETE,
+            ID_RESTORE,
+            ID_SELECT_ALL,
+            ID_SELECT_NONE,
+            ID_PLAY,
+            ID_TO_START,
+            ID_SPLIT,
+            ID_JOIN,
+            ID_RENAME,
+            ID_FASTER,
+            ID_SLOWER,
+            ID_NORMAL_SPEED,
+            ID_KEEP_PITCH,
+            ID_SCRUB_SELECTING,
+            ID_ALL_TRACKS,
+            ID_RULER,
+            ID_SUGGESTED_SPLITS,
+            ID_SUGGESTED_PAUSES,
+            ID_SETTINGS,
+            ID_PLAY_TRACK_START,
+            ID_PLAY_TRACK_END,
+        ];
+        ids.extend((0..Perspective::ALL.len()).map(|i| ID_PERSPECTIVE_FIRST + i as Id));
+        for (i, id) in ids.iter().enumerate() {
+            assert!(!ids[i + 1..].contains(id), "{id} twice");
+            assert_eq!(panes::pane_for(*id), None, "{id} toggles a pane");
+            assert_eq!(recent::index_of(*id), None, "{id} opens a recent file");
+            assert_eq!(context_index(*id), None, "{id} is a right-click entry");
+        }
+    }
+
+    /// A project's edits are fitted to the recording, and a recording
+    /// whose length changed is pointed out.
+    #[test]
+    fn projects_bring_their_edits() {
+        let project = Project {
+            audio: PathBuf::from("/rec/talk.wav"),
+            frames: Some(1000),
+            edits: lac_app::editor::Edits {
+                deleted: vec![100..200, 900..1100],
+                splits: vec![500],
+                ..Default::default()
+            },
+            view: None,
+        };
+        let mut st = State::default();
+        let e = st.editor_from(project.clone(), 1000);
+        assert_eq!(e.deleted(), [100..200, 900..1000]);
+        assert_eq!(e.splits(), [500]);
+        assert!(!e.has_unexported_changes());
+        assert_eq!(st.open_notes(), "", "same length");
+        let e = st.editor_from(project, 950);
+        assert_eq!(e.deleted(), [100..200, 900..950]);
+        assert!(st.open_notes().contains("length changed"));
     }
 
     #[test]
