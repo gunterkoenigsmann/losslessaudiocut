@@ -1,5 +1,5 @@
-//! Matroska and WebM files with Opus audio (RFC 9559, RFC 8794, and the
-//! Matroska codec mapping for `A_OPUS`).
+//! Matroska and WebM files with Opus audio, optionally with video (RFC
+//! 9559, RFC 8794, and the Matroska codec mappings).
 //!
 //! WebM is Matroska restricted to a few codecs; both share this module and
 //! differ only in the `DocType` of the EBML header, which is kept on
@@ -25,10 +25,11 @@
 //! on the last block trims the end, as the encoder's padding. Discard
 //! padding on other blocks is not honoured, with a warning.
 //!
-//! Only the first audio track is used. It must be Opus; other tracks
-//! (video, subtitles, further audio) are ignored with a warning and do not
-//! appear in exports. Chapters, cues and attachments of the source are
-//! not copied.
+//! Only the first audio track is used. It must be Opus. The first video
+//! track is cut too if it is VP8, VP9, AV1, H.264 or HEVC (see
+//! [`video`]); other tracks (subtitles, further audio, other video) are
+//! ignored with a warning and do not appear in exports. Chapters, cues
+//! and attachments of the source are not copied.
 //!
 //! ## Tags
 //!
@@ -39,9 +40,13 @@
 //!
 //! ## Writing
 //!
-//! A cut is one Opus track in a fresh file: EBML header, a Segment with a
+//! A cut is one Opus track (track 1), plus the video track (track 2) if
+//! the source has one, in a fresh file: EBML header, a Segment with a
 //! SeekHead, Info (with the new duration), Tracks, Clusters of verbatim
-//! packets in `SimpleBlock`s, and Cues for seeking.
+//! packets in `SimpleBlock`s, and Cues for seeking. With video, each
+//! keyframe opens a cluster and is a cue point; the frames' timestamps
+//! follow `lac_core::plan_av_cuts`, which starts the output at a keyframe
+//! because Matroska has no edit list to hide frames before it.
 //!
 //! - **Start:** at least 80 ms of preceding packets are written as
 //!   pre-roll (RFC 7845 4.3) and hidden, together with the head of the
@@ -59,12 +64,14 @@
 pub mod block;
 pub mod ebml;
 pub mod tags;
+pub mod video;
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
 use lac_core::{
-    AudioStreamInfo, CutCapabilities, CutPlan, PacketFlags, PacketIndex, PacketInfo, Tags,
+    AudioStreamInfo, CutCapabilities, CutPlan, MediaTime, PacketFlags, PacketIndex, PacketInfo,
+    PlanError, Rounding, Tags, plan_av_cuts, plan_cuts, rescale,
 };
 
 use crate::ogg::codec::{CodecInfo, CodecKind, opus_packet_samples};
@@ -110,6 +117,7 @@ mod id {
     pub const CLUSTER: u32 = 0x1F43_B675;
     pub const TIMESTAMP: u32 = 0xE7;
     pub const SIMPLE_BLOCK: u32 = 0xA3;
+    pub const REFERENCE_BLOCK: u32 = 0xFB;
     pub const BLOCK_GROUP: u32 = 0xA0;
     pub const BLOCK: u32 = 0xA1;
     pub const DISCARD_PADDING: u32 = 0x75A2;
@@ -142,6 +150,12 @@ const OPUS_PREROLL: u64 = 3840;
 /// Matroska's `TrackType` for audio.
 const TRACK_TYPE_AUDIO: u64 = 2;
 
+/// Matroska's `TrackType` for video.
+const TRACK_TYPE_VIDEO: u64 = 1;
+
+/// The default `TimestampScale`: block timestamps in milliseconds.
+const DEFAULT_SCALE_NS: u64 = 1_000_000;
+
 /// Largest element body read into memory while scanning (a block, the
 /// track list); anything larger is treated as damage.
 const MAX_ELEMENT: u64 = 16 << 20;
@@ -171,6 +185,8 @@ struct Track {
     channels: u16,
     /// Samples the decoder outputs before the timeline starts.
     pre_skip: u64,
+    /// The track's `CodecDelay` in nanoseconds, if given.
+    codec_delay_ns: Option<u64>,
 }
 
 /// An Opus packet as found in the source.
@@ -198,6 +214,10 @@ pub struct MkvFile {
     other_tracks: usize,
     /// The source's file-wide tags.
     tags: Tags,
+    /// The video track, if there is one we can cut.
+    video: Option<video::MkvVideo>,
+    /// Video time (ticks) shown with audio sample 0.
+    video_offset: MediaTime,
     warnings: Vec<String>,
 }
 
@@ -218,6 +238,11 @@ impl MkvFile {
             mut tags,
             title,
             mut warnings,
+            video_track,
+            video_frames,
+            video_problem,
+            audio_t0,
+            timestamp_scale,
             ..
         } = s;
         if tags.title.is_none() {
@@ -226,11 +251,61 @@ impl MkvFile {
         let track = track.ok_or_else(|| {
             ContainerError::Unsupported("no Opus audio track found in the Matroska file".into())
         })?;
+        let mut other_tracks = other_tracks;
+        let scale_ns = if timestamp_scale == 0 {
+            DEFAULT_SCALE_NS
+        } else {
+            timestamp_scale
+        };
+        // Ticks per second of the video timeline: one per block timestamp
+        // unit.
+        let timescale = u32::try_from(1_000_000_000 / scale_ns)
+            .ok()
+            .filter(|&t| t > 0 && 1_000_000_000 % scale_ns == 0);
+        let video = match (video_track, video_problem, timescale) {
+            (None, ..) => None,
+            (Some(_), Some(problem), _) => {
+                other_tracks += 1;
+                warnings.push(format!("ignoring the video track: {problem}"));
+                None
+            }
+            (Some(_), None, None) => {
+                other_tracks += 1;
+                warnings.push(format!(
+                    "ignoring the video track: TimestampScale {scale_ns} ns is not a whole fraction of a second"
+                ));
+                None
+            }
+            (Some(t), None, Some(ts)) => {
+                match video::build(r, t, &video_frames, ts, scale_ns, &mut warnings)? {
+                    Ok(v) => Some(v),
+                    Err(problem) => {
+                        other_tracks += 1;
+                        warnings.push(format!("ignoring the video track: {problem}"));
+                        None
+                    }
+                }
+            }
+        };
         if other_tracks > 0 {
             warnings.push(format!(
-                "ignoring {other_tracks} other track(s); only the first audio track is cut"
+                "ignoring {other_tracks} other track(s); only the first audio and video track are cut"
             ));
         }
+        // Audio sample 0 (the first after the codec delay) is shown at the
+        // first audio block's timestamp minus CodecDelay plus the samples
+        // skipped (RFC 9559 5.1.4.1.28.17); usually CodecDelay is the
+        // pre-skip and this is the block's timestamp.
+        let video_offset = match (&video, audio_t0) {
+            (Some(v), Some(t0)) => {
+                let ns = i128::from(t0) * i128::from(scale_ns)
+                    + i128::from(samples_to_ns(track.pre_skip))
+                    - i128::from(track.codec_delay_ns.unwrap_or(0));
+                let ticks = (ns + i128::from(scale_ns / 2)).div_euclid(i128::from(scale_ns));
+                MediaTime::try_from(ticks - i128::from(v.origin)).unwrap_or(0)
+            }
+            _ => 0,
+        };
         let total = raw.last().map_or(0, |p| p.start + u64::from(p.samples));
         let last_samples = raw.last().map_or(0, |p| u64::from(p.samples));
         let end_trim = discard.min(last_samples);
@@ -274,8 +349,38 @@ impl MkvFile {
             index,
             other_tracks,
             tags,
+            video,
+            video_offset,
             warnings,
         })
+    }
+
+    /// The video track, if the file has one we can cut (VP8, VP9, AV1,
+    /// H.264 or HEVC).
+    pub fn video(&self) -> Option<&video::MkvVideo> {
+        self.video.as_ref()
+    }
+
+    /// The video time (ticks of its timescale) shown with audio sample 0.
+    pub fn video_offset(&self) -> MediaTime {
+        self.video_offset
+    }
+
+    /// Plans the joined output of the kept `ranges`. With video, both
+    /// tracks are planned together ([`lac_core::plan_av_cuts`]); since
+    /// Matroska has no edit list, the output starts at a keyframe.
+    pub fn plan(&self, ranges: &[Range<u64>]) -> std::result::Result<Vec<CutPlan>, PlanError> {
+        match &self.video {
+            Some(v) => plan_av_cuts(
+                &self.index,
+                self.capabilities(),
+                &v.index,
+                self.video_offset,
+                ranges,
+                false,
+            ),
+            None => plan_cuts(&self.index, self.capabilities(), ranges),
+        }
     }
 
     /// The source's tags (see the module documentation).
@@ -431,25 +536,176 @@ impl MkvFile {
         // RFC 7845 5.1: pre-skip is a u16 at offset 10 (checked by `open`).
         head[10..12].copy_from_slice(&pre_skip_u16.to_le_bytes());
 
+        // The video's frames in output time. Without an edit list the
+        // first keyframe may lie before the first sound sample; then the
+        // sound is delayed by `lead` ms instead (see
+        // `lac_core::plan_av_cuts`).
+        let video = self.video_frames(plans);
+        let lead = video
+            .as_ref()
+            .and_then(|v| v.frames.iter().map(|f| f.2).min())
+            .map_or(0, |first| (-first).max(0));
+        let lead_u = u64::try_from(lead).unwrap_or(0);
+
+        // Blocks in the order they are written: by the time they are
+        // needed (µs), audio by presentation time (block time minus the
+        // codec delay), video by decode time; audio first on a tie.
+        let mut blocks: Vec<(i64, OutBlock)> = Vec::with_capacity(order.len());
+        let mut pos = 0u64;
+        for (k, &i) in order.iter().enumerate() {
+            let samples = u64::from(self.raw[i].samples);
+            let shown =
+                i64::try_from(pos).unwrap_or(i64::MAX) - i64::try_from(pre_skip).unwrap_or(0);
+            blocks.push((
+                rescale(shown, 48_000, 1_000_000, Rounding::Down) + lead * 1000,
+                OutBlock::Audio {
+                    raw: i,
+                    pos,
+                    discard: if k + 1 == order.len() { discard } else { 0 },
+                },
+            ));
+            pos += samples;
+        }
+        if let Some(v) = &video {
+            for &(key, frame, ms) in &v.frames {
+                blocks.push((
+                    key + lead * 1000,
+                    OutBlock::Video {
+                        frame,
+                        // Not negative: `lead` makes up for the earliest.
+                        ms: u64::try_from(ms + lead).unwrap_or(0),
+                    },
+                ));
+            }
+        }
+        blocks.sort_by_key(|&(t, ref b)| (t, matches!(b, OutBlock::Video { .. })));
+
+        let video_end_ms = video.as_ref().map(|v| (v.end_ms + lead) as f64);
         let out = OutputTrack {
             track: &self.track,
             head: &head,
             pre_skip,
-            duration,
+            duration_ms: (duration as f64 / 48.0 + lead as f64).max(video_end_ms.unwrap_or(0.0)),
+            video: self
+                .video
+                .as_ref()
+                .filter(|_| video.is_some())
+                .map(|v| &v.track),
             tags: tags.unwrap_or(&self.tags),
         };
         let mut mx = Muxer::start(w, &self.doc_type, &out)?;
-        let mut pos = 0u64;
-        for (k, &i) in order.iter().enumerate() {
-            let p = &self.raw[i];
-            let bytes = read_raw(r, p)?;
-            let discard = if k + 1 == order.len() { discard } else { 0 };
-            mx.packet(pos, &bytes, discard)?;
-            pos += u64::from(p.samples);
+        for (_, b) in blocks {
+            match b {
+                OutBlock::Audio { raw, pos, discard } => {
+                    let bytes = read_raw(r, &self.raw[raw])?;
+                    // Block timestamps in ms; the first block is at 0 and
+                    // the reader subtracts the codec delay (RFC 9559
+                    // 5.1.4.1.28.17).
+                    mx.block(
+                        AUDIO_TRACK,
+                        (pos + 24) / 48 + lead_u,
+                        false,
+                        &bytes,
+                        discard,
+                    )?;
+                }
+                OutBlock::Video { frame, ms } => {
+                    let Some(v) = &self.video else { continue };
+                    let f = &v.index.frames()[frame];
+                    let bytes = read_raw(
+                        r,
+                        &RawPacket {
+                            offset: f.byte_offset,
+                            len: f.byte_len,
+                            samples: 0,
+                            start: 0,
+                        },
+                    )?;
+                    mx.block(VIDEO_TRACK, ms, f.sync, &bytes, 0)?;
+                }
+            }
         }
         mx.finish()
     }
+
+    /// The video frames of `plans` in output time, or `None` without
+    /// video.
+    ///
+    /// The output times follow [`lac_core::plan_av_cuts`]: the first part
+    /// with pictures starts with the audio written so far, shifted by the
+    /// distance of its keyframe from the part's first sample (later when
+    /// the kept range begins before the source's first picture, earlier
+    /// when the keyframe lies before the source's first sample); every
+    /// further part follows right after the one before.
+    fn video_frames(&self, plans: &[CutPlan]) -> Option<VideoOut> {
+        let v = self.video.as_ref()?;
+        let ix = &v.index;
+        let scale = ix.info().timescale;
+        let mut audio_out: u64 = 0;
+        let mut at: Option<MediaTime> = None;
+        let mut frames = Vec::new();
+        for p in plans {
+            if let Some(vp) = p.video.as_ref().filter(|vp| !vp.frames.is_empty()) {
+                let start = at.unwrap_or_else(|| {
+                    let source = rescale(
+                        MediaTime::try_from(p.actual.start).unwrap_or(MediaTime::MAX),
+                        48_000,
+                        scale,
+                        Rounding::Down,
+                    )
+                    .saturating_add(self.video_offset);
+                    let so_far = rescale(
+                        MediaTime::try_from(audio_out).unwrap_or(MediaTime::MAX),
+                        48_000,
+                        scale,
+                        Rounding::Nearest,
+                    );
+                    so_far.saturating_add(vp.actual.start - source)
+                });
+                for i in vp.frames.clone() {
+                    let pts = start + ix.presentation_time(i) - vp.actual.start;
+                    let dts = start + ix.decode_time(i) - vp.actual.start;
+                    frames.push((
+                        rescale(dts, scale, 1_000_000, Rounding::Down),
+                        i,
+                        video::to_ms(pts, scale),
+                    ));
+                }
+                at = Some(start + vp.actual.end - vp.actual.start);
+            }
+            audio_out += p.actual.end - p.actual.start;
+        }
+        Some(VideoOut {
+            frames,
+            end_ms: video::to_ms(at?, scale),
+        })
+    }
 }
+
+/// The video part of an export, in output time before any lead.
+struct VideoOut {
+    /// (decode time in µs, decode index in the source, presentation time
+    /// in ms) of each frame, in decode order.
+    frames: Vec<(i64, usize, i64)>,
+    /// Where the video ends, in ms.
+    end_ms: i64,
+}
+
+/// A block of the output, in writing order.
+#[derive(Debug, Clone, Copy)]
+enum OutBlock {
+    /// Raw Opus packet `raw`, whose decoded output starts at sample `pos`
+    /// of the output stream (pre-roll included); `discard` samples at its
+    /// end are hidden.
+    Audio { raw: usize, pos: u64, discard: u64 },
+    /// Video frame `frame` (decode index), shown at `ms`.
+    Video { frame: usize, ms: u64 },
+}
+
+/// Track numbers of exports.
+const AUDIO_TRACK: u8 = 1;
+/// See [`AUDIO_TRACK`].
+const VIDEO_TRACK: u8 = 2;
 
 /// Reads a raw packet's payload.
 fn read_raw<R: Read + Seek + ?Sized>(r: &mut R, p: &RawPacket) -> Result<Vec<u8>> {
@@ -489,6 +745,18 @@ struct Scanner {
     tags: Tags,
     /// The `Info` element's title.
     title: Option<String>,
+    /// `TimestampScale` in nanoseconds; 0 until read (then the default).
+    timestamp_scale: u64,
+    /// Timestamp of the current cluster.
+    cluster_ts: i64,
+    /// Timestamp of the first block of the audio track.
+    audio_t0: Option<i64>,
+    /// The first video track with a codec we can cut.
+    video_track: Option<video::VideoTrack>,
+    /// Its frames in file order.
+    video_frames: Vec<video::RawFrame>,
+    /// Why the video track cannot be cut (it is then ignored).
+    video_problem: Option<String>,
     warnings: Vec<String>,
 }
 
@@ -641,8 +909,14 @@ impl Scanner {
                 }
                 id::INFO if size <= MAX_ELEMENT && end <= seg_end => {
                     let b = body_at(w, body, size)?;
-                    if let Some((_, t)) = children(&b).find(|&(i, _)| i == id::TITLE) {
-                        self.title = Some(tags::string(t));
+                    for (i, b) in children(&b) {
+                        match i {
+                            id::TITLE => self.title = Some(tags::string(b)),
+                            id::TIMESTAMP_SCALE => {
+                                self.timestamp_scale = ebml::read_uint(b).unwrap_or(0);
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 // A second segment (concatenated files) is not supported.
@@ -727,6 +1001,13 @@ impl Scanner {
                     _ => {}
                 }
             }
+            if kind == TRACK_TYPE_VIDEO && self.video_track.is_none() {
+                match video::VideoTrack::parse(entry) {
+                    Some(v) => self.video_track = Some(v),
+                    None => self.other_tracks += 1,
+                }
+                continue;
+            }
             if kind != TRACK_TYPE_AUDIO || self.track.is_some() {
                 self.other_tracks += 1;
                 continue;
@@ -765,6 +1046,7 @@ impl Scanner {
                 codec_private: private,
                 channels: info.channels,
                 pre_skip,
+                codec_delay_ns: delay,
             });
         }
         Ok(())
@@ -785,6 +1067,8 @@ impl Scanner {
             ));
         };
         let end = size.map_or(seg_end, |s| body.saturating_add(s).min(seg_end));
+        // RFC 9559 5.1.3.1: the Timestamp is the cluster's first child.
+        self.cluster_ts = 0;
         let mut pos = body;
         while pos < end {
             w.keep = pos;
@@ -813,14 +1097,22 @@ impl Scanner {
                 return Ok(seg_end);
             }
             match h.id {
+                id::TIMESTAMP => {
+                    let b = body_at(w, child, s)?;
+                    let t = ebml::read_uint(&b).unwrap_or(0);
+                    self.cluster_ts = i64::try_from(t).unwrap_or(i64::MAX);
+                }
                 id::SIMPLE_BLOCK => {
                     let b = body_at(w, child, s)?;
-                    self.block(&b, child, track, 0);
+                    self.block(&b, child, track, 0, None);
                 }
                 id::BLOCK_GROUP => {
                     let g = body_at(w, child, s)?;
                     let mut block = None;
                     let mut discard = 0i64;
+                    // A Block refers to other frames unless it is a
+                    // keyframe (RFC 9559 10.2).
+                    let mut references = false;
                     // Children of a BlockGroup: offsets relative to `g`.
                     let mut p = 0usize;
                     while let Ok(gh) = ebml::parse_header(&g[p..]) {
@@ -834,6 +1126,7 @@ impl Scanner {
                         match gh.id {
                             id::BLOCK => block = Some((start, b)),
                             id::DISCARD_PADDING => discard = ebml::read_int(b).unwrap_or(0),
+                            id::REFERENCE_BLOCK => references = true,
                             _ => {}
                         }
                         p = start + gs;
@@ -844,7 +1137,7 @@ impl Scanner {
                                 .push(format!("negative DiscardPadding at byte {child} ignored"));
                         }
                         let d = ns_to_samples(discard.max(0) as u64);
-                        self.block(b, child + start as u64, track, d);
+                        self.block(b, child + start as u64, track, d, Some(!references));
                     }
                 }
                 _ => {}
@@ -855,8 +1148,10 @@ impl Scanner {
     }
 
     /// Adds the frames of a block (body at file offset `at`) if it belongs
-    /// to `track`.
-    fn block(&mut self, b: &[u8], at: u64, track: u64, discard: u64) {
+    /// to the audio `track` or the video track. `key` says whether a
+    /// BlockGroup's block is a keyframe; for a SimpleBlock it is `None`
+    /// and the block's flags say.
+    fn block(&mut self, b: &[u8], at: u64, track: u64, discard: u64, key: Option<bool>) {
         let blk = match block::parse_block(b) {
             Ok(blk) => blk,
             Err(e) => {
@@ -865,8 +1160,31 @@ impl Scanner {
                 return;
             }
         };
+        let ts = self.cluster_ts.saturating_add(i64::from(blk.timestamp));
+        if let Some(v) = &self.video_track
+            && blk.track == v.number
+        {
+            if self.video_problem.is_some() {
+                return;
+            }
+            let [(off, len)] = blk.frames[..] else {
+                self.video_problem = Some("laced video blocks are not supported".into());
+                return;
+            };
+            self.video_frames.push(video::RawFrame {
+                offset: at + off as u64,
+                // Bounded by MAX_ELEMENT.
+                len: len as u32,
+                pts: ts,
+                key: key.unwrap_or(blk.flags & 0x80 != 0),
+            });
+            return;
+        }
         if blk.track != track {
             return;
+        }
+        if self.audio_t0.is_none() {
+            self.audio_t0 = Some(ts);
         }
         if self.discard > 0 && !self.inner_discard {
             self.inner_discard = true;
@@ -914,10 +1232,26 @@ struct Muxer<'a, W: Write + Seek + ?Sized> {
     segment_start: u64,
     /// File offset of the SeekHead's (8-byte) Cues position value.
     cues_seek_at: u64,
-    /// The cluster being built: (timestamp in ms, body).
-    cluster: Option<(u64, Vec<u8>)>,
-    /// (timestamp in ms, segment position) of every written cluster.
+    /// The cluster being built.
+    cluster: Option<OutCluster>,
+    /// (timestamp in ms, segment position) of every cue point.
     cues: Vec<(u64, u64)>,
+    /// The track that cue points refer to: the video track if there is
+    /// one (each starts a cluster with a keyframe), else the audio track
+    /// (every cluster).
+    cue_track: u8,
+}
+
+/// A cluster of an export while it is built.
+struct OutCluster {
+    /// Its timestamp in ms.
+    ms: u64,
+    /// Its body so far: the Timestamp, then the blocks.
+    body: Vec<u8>,
+    /// Whether it holds any block yet.
+    has_blocks: bool,
+    /// Whether it is a cue point.
+    cue: bool,
 }
 
 /// What the Info and Tracks elements of an output file say.
@@ -927,8 +1261,10 @@ struct OutputTrack<'t> {
     head: &'t [u8],
     /// The new pre-skip in samples.
     pre_skip: u64,
-    /// Output length in samples (after pre-skip and discard padding).
-    duration: u64,
+    /// Output length in ms (the longer of audio and video).
+    duration_ms: f64,
+    /// The video track, copied as track 2.
+    video: Option<&'t video::VideoTrack>,
     /// The file's tags.
     tags: &'t Tags,
 }
@@ -961,7 +1297,7 @@ impl<'a, W: Write + Seek + ?Sized> Muxer<'a, W> {
         ebml::put_uint(&mut info, id::TIMESTAMP_SCALE, 1_000_000);
         ebml::put_element(&mut info, id::MUXING_APP, b"losslessaudiocut");
         ebml::put_element(&mut info, id::WRITING_APP, b"losslessaudiocut");
-        ebml::put_float(&mut info, id::DURATION, t.duration as f64 / 48.0);
+        ebml::put_float(&mut info, id::DURATION, t.duration_ms);
         if let Some(title) = &t.tags.title {
             ebml::put_element(&mut info, id::TITLE, title.as_bytes());
         }
@@ -985,6 +1321,10 @@ impl<'a, W: Write + Seek + ?Sized> Muxer<'a, W> {
         ebml::put_element(&mut entry, id::AUDIO, &audio);
         let mut tracks = Vec::new();
         ebml::put_element(&mut tracks, id::TRACK_ENTRY, &entry);
+        if let Some(v) = t.video {
+            let entry = v.output_entry(u64::from(VIDEO_TRACK));
+            ebml::put_element(&mut tracks, id::TRACK_ENTRY, &entry);
+        }
         let mut tracks_el = Vec::new();
         ebml::put_element(&mut tracks_el, id::TRACKS, &tracks);
 
@@ -1036,31 +1376,54 @@ impl<'a, W: Write + Seek + ?Sized> Muxer<'a, W> {
             cues_seek_at,
             cluster: None,
             cues: Vec::new(),
+            cue_track: if t.video.is_some() {
+                VIDEO_TRACK
+            } else {
+                AUDIO_TRACK
+            },
         })
     }
 
-    /// Adds a packet whose output starts at sample `pos` of the decoded
-    /// stream; `discard` samples at its end are hidden.
-    fn packet(&mut self, pos: u64, data: &[u8], discard: u64) -> Result<()> {
-        // Block timestamps in ms; the first block is at 0 and the codec
-        // delay is subtracted by the reader (RFC 9559 5.1.4.1.28.17).
-        let ms = (pos + 24) / 48;
-        if let Some((start, _)) = &self.cluster
-            && ms - start >= CLUSTER_MS
+    /// Adds a block of `track` with timestamp `ms`. A video keyframe
+    /// starts a new cluster (WebM wants clusters to start with one, and
+    /// it becomes a cue point); `discard` samples at the end of an audio
+    /// block are hidden.
+    fn block(&mut self, track: u8, ms: u64, key: bool, data: &[u8], discard: u64) -> Result<()> {
+        let video_key = key && track == self.cue_track && track == VIDEO_TRACK;
+        let rel_to =
+            |start: u64| i64::try_from(ms).unwrap_or(i64::MAX) - i64::try_from(start).unwrap_or(0);
+        if let Some(c) = &self.cluster
+            && ((video_key && c.has_blocks) || rel_to(c.ms).unsigned_abs() >= CLUSTER_MS)
         {
             self.flush_cluster()?;
         }
-        let (start, body) = self.cluster.get_or_insert_with(|| {
-            let mut b = Vec::new();
-            ebml::put_uint(&mut b, id::TIMESTAMP, ms);
-            (ms, b)
+        let c = self.cluster.get_or_insert_with(|| {
+            let mut body = Vec::new();
+            ebml::put_uint(&mut body, id::TIMESTAMP, ms);
+            OutCluster {
+                ms,
+                body,
+                has_blocks: false,
+                cue: false,
+            }
         });
-        // Below CLUSTER_MS, so it fits the 16-bit relative timestamp.
-        let rel = (ms - *start) as i16;
-        let mut block = vec![0x81]; // track 1 as a one-byte VINT
+        // Without video every cluster is a cue point, with video those
+        // opened by a keyframe.
+        if !c.has_blocks {
+            c.cue = video_key || self.cue_track == AUDIO_TRACK;
+        }
+        c.has_blocks = true;
+        // Within CLUSTER_MS, so it fits the 16-bit relative timestamp;
+        // negative for B-frames shown before the cluster's keyframe.
+        let rel = rel_to(c.ms) as i16;
+        let body = &mut c.body;
+        // The track number as a one-byte VINT.
+        let mut block = vec![0x80 | track];
         block.extend_from_slice(&rel.to_be_bytes());
         if discard == 0 {
-            block.push(0x80); // keyframe, no lacing
+            // Audio packets are all "keyframes" for Matroska.
+            let keyframe = key || track == AUDIO_TRACK;
+            block.push(if keyframe { 0x80 } else { 0x00 }); // no lacing
             block.extend_from_slice(data);
             ebml::put_element(body, id::SIMPLE_BLOCK, &block);
         } else {
@@ -1076,9 +1439,11 @@ impl<'a, W: Write + Seek + ?Sized> Muxer<'a, W> {
     }
 
     fn flush_cluster(&mut self) -> Result<()> {
-        if let Some((ms, body)) = self.cluster.take() {
+        if let Some(OutCluster { ms, body, cue, .. }) = self.cluster.take() {
             let pos = self.w.stream_position()? - self.segment_start;
-            self.cues.push((ms, pos));
+            if cue {
+                self.cues.push((ms, pos));
+            }
             let mut el = Vec::with_capacity(body.len() + 12);
             ebml::put_element(&mut el, id::CLUSTER, &body);
             self.w.write_all(&el)?;
@@ -1094,7 +1459,7 @@ impl<'a, W: Write + Seek + ?Sized> Muxer<'a, W> {
         let mut points = Vec::new();
         for &(ms, pos) in &self.cues {
             let mut tp = Vec::new();
-            ebml::put_uint(&mut tp, id::CUE_TRACK, 1);
+            ebml::put_uint(&mut tp, id::CUE_TRACK, u64::from(self.cue_track));
             ebml::put_uint(&mut tp, id::CUE_CLUSTER_POSITION, pos);
             let mut cp = Vec::new();
             ebml::put_uint(&mut cp, id::CUE_TIME, ms);

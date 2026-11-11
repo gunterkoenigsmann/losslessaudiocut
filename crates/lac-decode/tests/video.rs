@@ -1,7 +1,7 @@
 //! Decoding the pictures of the video fixtures of `lac-container`.
 //!
 //! The oracle is the ffmpeg command line tool, which demuxes with its own
-//! MP4 demuxer: every picture we decode from our frame index must equal
+//! MP4 and Matroska demuxers: every picture we decode from our frame index must equal
 //! ffmpeg's, byte for byte in the decoder's pixel format. Both use
 //! libavcodec, so this checks that our frames, codec configuration,
 //! timestamps and the choice of where to start decoding are right.
@@ -15,7 +15,8 @@ use lac_core::{MediaTime, VideoCodec};
 use lac_decode::{Frame, VideoDecoder};
 
 /// The video fixtures: H.264 (closed GOP, open GOP with B-frames,
-/// fragmented), HEVC with open GOPs, AV1, VP9, ProRes and MPEG-4 Visual.
+/// fragmented), HEVC with open GOPs, AV1, VP9, ProRes and MPEG-4 Visual
+/// in MP4; VP8, VP9, AV1, H.264 and HEVC in WebM and Matroska.
 const FIXTURES: &[&str] = &[
     "video_h264_aac.mp4",
     "video_h264_opengop_rot90.mp4",
@@ -25,6 +26,11 @@ const FIXTURES: &[&str] = &[
     "video_vp9.mp4",
     "video_prores.mov",
     "video_mpeg4.3gp",
+    "video_vp8_opus.webm",
+    "video_vp9_opus.webm",
+    "video_av1_opus.webm",
+    "video_h264_opus.mkv",
+    "video_hevc_opus.mkv",
 ];
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -64,20 +70,21 @@ fn step_through(name: &str) -> Vec<Frame> {
         .collect()
 }
 
-/// All pictures of `path` as ffmpeg decodes them in `pix_fmt` (with the
-/// edit list ignored, so all frames come out), split into frames of
+/// All pictures of `path` as ffmpeg decodes them in `pix_fmt` (with an
+/// MP4 edit list ignored, so all frames come out), split into frames of
 /// `size` bytes; `None` without ffmpeg (fatal when `LAC_REQUIRE_TOOLS` is
 /// set, as in CI).
 fn ffmpeg_frames(path: &Path, pix_fmt: &str, size: usize) -> Option<Vec<Vec<u8>>> {
+    // Only the MP4 demuxer knows edit lists (Matroska has none).
+    let mp4 = !matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("webm" | "mkv")
+    );
+    let edits: &[&str] = if mp4 { &["-ignore_editlist", "1"] } else { &[] };
     let out = match Command::new("ffmpeg")
-        .args([
-            "-v",
-            "error",
-            "-noautorotate",
-            "-ignore_editlist",
-            "1",
-            "-i",
-        ])
+        .args(["-v", "error", "-noautorotate"])
+        .args(edits)
+        .arg("-i")
         .arg(path)
         .args([
             "-map",

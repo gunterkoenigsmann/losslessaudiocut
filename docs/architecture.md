@@ -221,7 +221,7 @@ pub struct CutPlan {
 | Ogg Vorbis | pages; timestamps from packet durations, granule positions ignored except a consistent end trim | new pages, copy headers, new serial, CRC; one chained stream per kept part, led by its predecessor packet as pre-roll; a kept end-trimmed last packet keeps its end trim | packet-granular, bit-exact including joins *(implemented)*; sample-exact via granule positions later | block size variable (64..8192) |
 | Ogg Opus | as above; pre-skip from `OpusHead`; end trim from the final granule when the granules before it are consistent | as Vorbis, with at least 80 ms pre-roll hidden by a rewritten `pre_skip`; the start trim is added to `pre_skip`, the end trim lowers the final granule (RFC 7845 4.4) | **sample-exact at every cut**, including joins, since each kept part is its own chained stream *(implemented)*; bit-exact after a short convergence window at joins | ffmpeg plays a kept part that starts and ends inside the same packet too long (see below) |
 | Speex | Ogg pages, Speex header | as Vorbis, but all kept parts of a link in one stream, no pre-roll | packet-granular (20 ms) *(implemented)*; bit-exact after convergence at joins | ffmpeg and speexdec do not handle chained Speex |
-| Matroska / WebM Opus | EBML elements, `SimpleBlock`/`BlockGroup` frames (all lacing modes), unknown-size Segments and Clusters of live recordings; timeline from packet durations, codec delay from `CodecDelay` (or the `OpusHead` pre-skip), end trim from `DiscardPadding` on the last block; only the first audio track | one Opus track in a fresh file of the same `DocType`: SeekHead, Info, Tracks, Clusters of verbatim packets, Cues; ≥ 80 ms pre-roll plus the start trim hidden by `CodecDelay` and `OpusHead` pre-skip, end trim by `DiscardPadding` | sample-exact at the file's start and end, packet-granular at joins (`trims_at_file_ends_only`) *(implemented)*; bit-exact after a convergence window at joins | Matroska cannot drop leading samples in the middle of a track (ffmpeg ignores negative `DiscardPadding`), so joins have neither pre-roll nor chaining; video and other tracks are dropped with a warning |
+| Matroska / WebM Opus | EBML elements, `SimpleBlock`/`BlockGroup` frames (all lacing modes), unknown-size Segments and Clusters of live recordings; timeline from packet durations, codec delay from `CodecDelay` (or the `OpusHead` pre-skip), end trim from `DiscardPadding` on the last block; only the first audio track and the first VP8, VP9, AV1, H.264 or HEVC video track (section 13) | one Opus track in a fresh file of the same `DocType`: SeekHead, Info, Tracks, Clusters of verbatim packets, Cues; ≥ 80 ms pre-roll plus the start trim hidden by `CodecDelay` and `OpusHead` pre-skip, end trim by `DiscardPadding` | sample-exact at the file's start and end, packet-granular at joins (`trims_at_file_ends_only`) *(implemented)*; bit-exact after a convergence window at joins | Matroska cannot drop leading samples in the middle of a track (ffmpeg ignores negative `DiscardPadding`), so joins have neither pre-roll nor chaining; other tracks are dropped with a warning |
 
 ### Tags per container
 
@@ -748,7 +748,8 @@ packets in the same state. This gives:
 
 Target: videos recorded on phones (Android: MP4 with H.264 or HEVC video and
 AAC or Opus audio, a keyframe about every second; older phones MPEG-4 with
-AMR in 3GP; cameras and screen recorders MOV with uncompressed sound). The design proposal is the
+AMR in 3GP; cameras and screen recorders MOV with uncompressed sound;
+browsers WebM with VP8 or VP9 and Opus, OBS Matroska). The design proposal is the
 Claude doc "Lossless cutting of phone videos"; Gunter decided on 2026-11-10:
 **keyframes plus edit list, never re-encoding** (no "smart cut").
 
@@ -760,6 +761,11 @@ Claude doc "Lossless cutting of phone videos"; Gunter decided on 2026-11-10:
   ISO/IEC 14496-12 8.6.6) hides the copied frames that are not wanted, so
   both ends are frame-exact (in fact tick-exact), exactly like audio
   pre-roll. Players that ignore edit lists show up to one GOP extra.
+  Matroska and WebM have no edit list (ffmpeg shows frames with negative
+  timestamps too), so there the output **starts at the keyframe** before
+  the chosen start, picture and sound alike; the end is frame-exact for
+  codecs without B-frames and otherwise extends until every copied frame
+  is shown.
 - At a **join** inside a file nothing can hide frames, so the part after the
   join starts at a keyframe and the part before it ends where every copied
   frame is shown (`plan_video_cuts`). Multi-entry edit lists could make joins
@@ -809,6 +815,23 @@ before the first picture. Tests compare ffmpeg's decoded pictures of
 each export with the source's (`framemd5`), for every codec fixture.
 ffmpeg 6.1 with libdav1d ignores part of an AV1 edit list; the tests
 decode AV1 with libaom.
+
+Matroska and WebM *(implemented)*: `lac_container::mkv::video` reads the
+first video track with VP8, VP9, AV1, H.264 or HEVC (`CodecPrivate` is the
+same `avcC`/`hvcC`/`av1C` body as in MP4). Blocks carry presentation
+times only, so decode times are the presentation times in ascending order
+(negative composition offsets with B-frames); keyframes are the flagged
+SimpleBlocks and BlockGroups without `ReferenceBlock`, checked in the
+bitstream like MP4's. Laced video blocks, duplicate timestamps and a
+`TimestampScale` that is no whole fraction of a second drop the video with
+a warning. `plan_av_cuts` plans with `trim_file_ends = false`: the first
+part starts at its keyframe and the sound with it. The muxer writes the
+Opus track as track 1 and copies the source's video TrackEntry (with a
+new number) as track 2, with block timestamps in ms; each video keyframe
+opens a cluster and becomes a cue point, as WebM players expect.
+`tests/mkv_video.rs` checks the exports like the MP4 ones (verbatim
+frames, ffmpeg's decoded pictures, sound and picture starting and ending
+together).
 
 Decoding *(implemented)*: `lac_decode::VideoDecoder` decodes single
 pictures by presentation time for the preview. It feeds libavcodec the

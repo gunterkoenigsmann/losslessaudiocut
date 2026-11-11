@@ -557,6 +557,8 @@ impl Mp4File {
                 v.index(),
                 self.video_offset(v),
                 ranges,
+                // The edit list hides copied frames at the file's ends.
+                true,
             ),
             None => plan_cuts(&self.index, self.capabilities(), ranges),
         }

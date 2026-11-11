@@ -8,7 +8,7 @@
 //! [`lac_core::CutPlan`]s. Lossy audio is never decoded or re-encoded here.
 //!
 //! Supported so far: [`wav`], [`aiff`], [`flac`], [`ogg`] (Vorbis, Opus, Speex),
-//! [`mp3`], [`mkv`] (Matroska/WebM with Opus), [`mp4`] (MP4/M4A with
+//! [`mp3`], [`mkv`] (Matroska/WebM with Opus, also with video), [`mp4`] (MP4/M4A with
 //! AAC, ALAC, Opus, AMR or PCM), [`adts`] (raw AAC) and [`ac3`] (raw AC-3). [`open`] detects the format
 //! from the file's content and returns it behind the common [`Container`]
 //! interface. Each format also reads and writes its tags; the shared tag
@@ -368,13 +368,28 @@ impl Container for mkv::MkvFile {
         }
     }
     fn details(&self) -> String {
+        let video = mkv::MkvFile::video(self)
+            .map(|v| format!(" with {} video", v.track.codec.name()))
+            .unwrap_or_default();
         match self.other_tracks() {
-            0 => "Opus".into(),
-            n => format!("Opus, {n} other track(s) ignored"),
+            0 => format!("Opus{video}"),
+            n => format!("Opus{video}, {n} other track(s) ignored"),
         }
     }
     fn index(&self) -> &PacketIndex {
         mkv::MkvFile::index(self)
+    }
+    fn video(&self) -> Option<&VideoIndex> {
+        mkv::MkvFile::video(self).map(|v| &v.index)
+    }
+    fn video_codec_config(&self) -> &[u8] {
+        mkv::MkvFile::video(self).map_or(&[], |v| &v.track.codec_private)
+    }
+    fn video_offset(&self) -> MediaTime {
+        mkv::MkvFile::video_offset(self)
+    }
+    fn plan(&self, ranges: &[Range<SamplePos>]) -> std::result::Result<Vec<CutPlan>, PlanError> {
+        mkv::MkvFile::plan(self, ranges)
     }
     fn capabilities(&self) -> CutCapabilities {
         mkv::MkvFile::capabilities(self)

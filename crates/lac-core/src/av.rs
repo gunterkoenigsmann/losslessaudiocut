@@ -2,8 +2,10 @@
 //!
 //! The editor's timeline is the audio track's: kept ranges are audio
 //! sample positions. A video track can only be cut frame-exactly at the
-//! file's start and end (by the edit list); at a join inside the file the
-//! part after the join starts at a keyframe (see [`crate::plan_video_cuts`]).
+//! file's start and end, and only where the container has an edit list
+//! (MP4); at a join inside the file, and at the start of a file without
+//! edit list (Matroska), a part starts at a keyframe (see
+//! [`crate::plan_video_cuts`]).
 //! The audio must then follow the video, or picture and sound drift apart
 //! by up to a GOP per join.
 //!
@@ -32,6 +34,12 @@ use crate::{
 /// source's edit lists): video time = sample · timescale / rate +
 /// `video_offset`.
 ///
+/// `trim_file_ends` says whether the output container can hide copied
+/// frames at the file's start and end (an MP4 edit list). Without, the
+/// first part starts at its keyframe and the last ends after the last
+/// copied frame, and the sound follows the picture there too, so both
+/// tracks start and end together.
+///
 /// Returns one plan per kept part, each with its [`CutPlan::video`].
 /// Parts whose video would overlap after moving a join to a keyframe (a
 /// deleted gap shorter than the distance to the keyframe before it) are
@@ -44,6 +52,7 @@ pub fn plan_av_cuts(
     video: &VideoIndex,
     video_offset: MediaTime,
     ranges: &[Range<SamplePos>],
+    trim_file_ends: bool,
 ) -> Result<Vec<CutPlan>, PlanError> {
     let rate = audio.info().sample_rate;
     let scale = video.info().timescale;
@@ -90,7 +99,7 @@ pub fn plan_av_cuts(
             .iter()
             .map(|r| to_video(r.start, Rounding::Down)..to_video(r.end, Rounding::Up))
             .collect();
-        let vplans = plan_video_cuts(video, &vranges, true)?;
+        let vplans = plan_video_cuts(video, &vranges, trim_file_ends)?;
         let overlap = (1..vplans.len()).find(|&i| {
             !vplans[i].frames.is_empty()
                 && !vplans[i - 1].frames.is_empty()
@@ -104,6 +113,18 @@ pub fn plan_av_cuts(
             None => break vplans,
         }
     };
+    if !trim_file_ends {
+        // The sound starts with the first copied picture and ends with
+        // the last; never later or earlier than asked where the picture
+        // does not reach that far (sound before the first picture).
+        let last = ranges.len() - 1;
+        if let Some(v) = vplans.first().filter(|v| !v.frames.is_empty()) {
+            ranges[0].start = ranges[0].start.min(to_audio(v.actual.start));
+        }
+        if let Some(v) = vplans.last().filter(|v| !v.frames.is_empty()) {
+            ranges[last].end = ranges[last].end.max(to_audio(v.actual.end));
+        }
+    }
 
     // Inner audio cuts: exact where the format can cut there exactly,
     // else on the nearest packet boundary.
@@ -142,6 +163,9 @@ pub fn plan_av_cuts(
             // The video begins with the audio output so far plus, when
             // the kept range starts before the source's first picture,
             // the time until that picture (the muxer's empty edit).
+            // Without edit list the picture may also begin earlier than
+            // the sound: when the keyframe lies before the source's
+            // first sample, the muxer delays the sound instead.
             let at = rescale(
                 MediaTime::try_from(r.start).unwrap_or(MediaTime::MAX),
                 rate,
@@ -155,34 +179,34 @@ pub fn plan_av_cuts(
                 scale,
                 Rounding::Nearest,
             );
-            video_ticks = so_far.saturating_add((v.actual.start - at).max(0));
+            let lead = v.actual.start - at;
+            video_ticks = so_far.saturating_add(if trim_file_ends { lead.max(0) } else { lead });
         }
-        let video_out_before = to_audio(video_ticks.saturating_add(video_offset));
+        // Output positions of the video in audio samples, signed: the
+        // video may begin before the sound (see above).
+        let out = |t: MediaTime| rescale(t, scale, rate, Rounding::Nearest);
+        let video_out_before = out(video_ticks);
         let video_len = v.actual.end - v.actual.start;
         video_ticks = video_ticks.saturating_add(video_len);
-        let video_out_after = to_audio(video_ticks.saturating_add(video_offset));
+        let video_out_after = out(video_ticks);
+        let total_t = MediaTime::try_from(total).unwrap_or(MediaTime::MAX);
+        let audio_out_t = MediaTime::try_from(audio_out).unwrap_or(MediaTime::MAX);
+        let clamp = |s: MediaTime| SamplePos::try_from(s.clamp(0, total_t)).unwrap_or(0);
         let start = if i == 0 || v.frames.is_empty() {
             r.start
         } else {
             // Sound in sync with the picture where this part's picture
             // starts: source position of the picture plus how far the
             // audio output is ahead of the video output.
-            let pic = to_audio(v.actual.start);
-            snap(
-                (pic + audio_out)
-                    .saturating_sub(video_out_before)
-                    .min(total),
-            )
+            let pic = MediaTime::try_from(to_audio(v.actual.start)).unwrap_or(0);
+            snap(clamp(pic + audio_out_t - video_out_before))
         };
         let end = if i == last || v.frames.is_empty() {
             r.end
         } else {
             // Both outputs end this part at (nearly) the same position.
-            snap(
-                (start + video_out_after)
-                    .saturating_sub(audio_out)
-                    .min(total),
-            )
+            let start_t = MediaTime::try_from(start).unwrap_or(MediaTime::MAX);
+            snap(clamp(start_t + video_out_after - audio_out_t))
         };
         // A part whose picture is shorter than half a packet may keep no
         // sound at all; the next part makes up for it.
@@ -268,8 +292,15 @@ mod tests {
         let a = aac(470);
         let v = video(300, 3000, 30);
         // Keep 1.5..3.5 s and 6.5..8.25 s.
-        let plans =
-            plan_av_cuts(&a, AAC_CAPS, &v, 0, &[72_000..168_000, 312_000..396_000]).expect("plan");
+        let plans = plan_av_cuts(
+            &a,
+            AAC_CAPS,
+            &v,
+            0,
+            &[72_000..168_000, 312_000..396_000],
+            true,
+        )
+        .expect("plan");
         assert_eq!(plans.len(), 2);
         let v0 = plans[0].video.as_ref().expect("video");
         let v1 = plans[1].video.as_ref().expect("video");
@@ -285,13 +316,39 @@ mod tests {
     }
 
     #[test]
+    fn without_edit_list_the_file_starts_at_a_keyframe() {
+        let a = aac(470);
+        let v = video(300, 3000, 30);
+        // Keep 1.5..3.5 s and 6.5..8.25 s, as above.
+        let plans = plan_av_cuts(
+            &a,
+            AAC_CAPS,
+            &v,
+            0,
+            &[72_000..168_000, 312_000..396_000],
+            false,
+        )
+        .expect("plan");
+        let v0 = plans[0].video.as_ref().expect("video");
+        let v1 = plans[1].video.as_ref().expect("video");
+        // Picture and sound start at the keyframe at 1 s.
+        assert_eq!(v0.actual.start, 90_000);
+        assert_eq!(plans[0].actual.start, 48_000);
+        // The end extends to the end of the frame shown at 8.25 s, the
+        // sound with it.
+        assert_eq!(v1.actual.end, 744_000);
+        assert_eq!(plans[1].actual.end, 396_800);
+        assert_eq!(v1.actual.start, 540_000);
+    }
+
+    #[test]
     fn a_short_gap_before_a_far_keyframe_merges_the_parts() {
         let a = aac(470);
         let v = video(300, 3000, 30);
         // Deleting 6.2..6.4 s: the part after it would start at the
         // keyframe at 6 s, before the part in front of it ends.
         let plans =
-            plan_av_cuts(&a, AAC_CAPS, &v, 0, &[0..297_600, 307_200..480_000]).expect("plan");
+            plan_av_cuts(&a, AAC_CAPS, &v, 0, &[0..297_600, 307_200..480_000], true).expect("plan");
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].actual, 0..480_000);
     }
@@ -300,9 +357,9 @@ mod tests {
     fn errors_are_reported() {
         let a = aac(10);
         let v = video(30, 3000, 30);
-        assert!(plan_av_cuts(&a, AAC_CAPS, &v, 0, &[0..20_000, 30_000..40_000]).is_err());
+        assert!(plan_av_cuts(&a, AAC_CAPS, &v, 0, &[0..20_000, 30_000..40_000], true).is_err());
         assert!(
-            plan_av_cuts(&a, AAC_CAPS, &v, 0, &[])
+            plan_av_cuts(&a, AAC_CAPS, &v, 0, &[], true)
                 .expect("empty")
                 .is_empty()
         );
@@ -319,6 +376,7 @@ mod tests {
             frame in prop_oneof![Just(3000u32), Just(3003), Just(1500), Just(3600)],
             // Negative: the video starts up to 1.5 packets after the audio.
             offset in -3000i64..9000,
+            trim_file_ends in any::<bool>(),
         ) {
             let a = aac(470);
             // Video covering the whole audio (after the offset): where
@@ -331,7 +389,8 @@ mod tests {
             cuts.dedup();
             let ranges: Vec<Range<SamplePos>> =
                 cuts.as_chunks::<2>().0.iter().map(|&[a, b]| a..b).collect();
-            let plans = plan_av_cuts(&a, AAC_CAPS, &v, offset, &ranges).expect("plan");
+            let plans = plan_av_cuts(&a, AAC_CAPS, &v, offset, &ranges, trim_file_ends)
+                .expect("plan");
             let to_samples = |t: MediaTime| t as f64 * 48_000.0 / 90_000.0;
             let mut audio_out = 0.0;
             let mut video_out = 0.0;
@@ -344,7 +403,14 @@ mod tests {
                     // its first picture comes after the part's start.
                     started = true;
                     let picture = to_samples(vp.actual.start - offset);
-                    video_out = audio_out + (picture - p.actual.start as f64).max(0.0);
+                    let lead = picture - p.actual.start as f64;
+                    video_out = audio_out + if trim_file_ends { lead.max(0.0) } else { lead };
+                    if !trim_file_ends && i == 0 {
+                        // Without edit list the sound starts with the
+                        // first picture, or before it if it was asked to.
+                        prop_assert!(p.actual.start as f64 <= picture.max(0.0) + 1.0,
+                            "sound starts at {} after the picture at {}", p.actual.start, picture);
+                    }
                 } else if started && i > 0 {
                     // Sync where the part starts: source audio position
                     // minus source picture position equals the output
