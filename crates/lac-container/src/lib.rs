@@ -9,7 +9,7 @@
 //!
 //! Supported so far: [`wav`], [`aiff`], [`flac`], [`ogg`] (Vorbis, Opus, Speex),
 //! [`mp3`], [`mkv`] (Matroska/WebM with Opus), [`mp4`] (MP4/M4A with
-//! AAC or ALAC), [`adts`] (raw AAC) and [`ac3`] (raw AC-3). [`open`] detects the format
+//! AAC, ALAC or Opus), [`adts`] (raw AAC) and [`ac3`] (raw AC-3). [`open`] detects the format
 //! from the file's content and returns it behind the common [`Container`]
 //! interface. Each format also reads and writes its tags; the shared tag
 //! formats live in [`tags`].

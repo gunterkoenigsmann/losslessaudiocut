@@ -1,9 +1,9 @@
 //! MP4 / M4A files (ISO/IEC 14496-12, the ISO base media file format, and
-//! 14496-14, the MP4 file format) with AAC or ALAC audio.
+//! 14496-14, the MP4 file format) with AAC, ALAC or Opus audio.
 //!
 //! Phones, iTunes and most podcast tools record and distribute AAC this
 //! way (`.m4a`, `.m4b`, `.mp4`); Apple Lossless (ALAC) uses the same
-//! container. QuickTime `.mov` files share the box structure and open too.
+//! container, and Android phones record videos with Opus sound in it. QuickTime `.mov` files share the box structure and open too.
 //!
 //! ## Structure
 //!
@@ -30,7 +30,10 @@
 //! Each sample's decoder output is known without decoding: an AAC frame
 //! always yields the same number of samples (1024 for AAC-LC, the most
 //! common `stts` duration of the track), an ALAC frame its own `stts`
-//! duration. ffmpeg's fragmented files without an edit list lengthen the
+//! duration. An Opus sample decodes to its `stts` duration too, except
+//! the first and the last, whose length comes from their TOC byte (RFC
+//! 6716 3.1): the muxer states the encoder's padding by shortening the
+//! last one's `stts` duration, as for AAC. ffmpeg's fragmented files without an edit list lengthen the
 //! first AAC sample's duration to fill the time before it; that gap is
 //! left out of the audio timeline and only shifts the video's alignment.
 //! The decoder output that belongs to the timeline is given by the edit
@@ -84,6 +87,12 @@
 //!   frame after a join overlaps with a foreign predecessor: a transient
 //!   of one frame.
 //!
+//! Opus is cut like AAC, with at least [`OPUS_PREROLL`] samples of
+//! pre-roll; the sample entry's `dOps` pre-skip is set to the edit list's
+//! `media_time`, so players that use either agree. After a join the
+//! decoder converges within a few hundred milliseconds (as for Opus in
+//! Matroska).
+//!
 //! ALAC is lossless and its frames are independent, so every frame that a
 //! cut point cuts (at the file's ends or at a join, or by the source's own
 //! edit list) is decoded and written back as an uncompressed ALAC frame
@@ -124,6 +133,13 @@ const MAX_MOOV: u64 = 256 << 20;
 /// (HE-AAC's SBR filter bank).
 pub const AAC_PREROLL_FRAMES: usize = 2;
 
+/// Opus pre-roll in 48 kHz samples (RFC 7845 4.3: 80 ms), written in
+/// front of a cut's first sample: the decoder converges within it.
+pub const OPUS_PREROLL: u64 = 3840;
+
+/// The sample rate of every Opus stream's decoder output (RFC 7845 4).
+const OPUS_RATE: u32 = 48_000;
+
 /// The codec of the audio track.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mp4Codec {
@@ -140,6 +156,14 @@ pub enum Mp4Codec {
         /// The `alac` box.
         cookie: Vec<u8>,
     },
+    /// Opus, as Android phones record it (the Opus mapping for ISOBMFF,
+    /// "Encapsulation of Opus in ISO Base Media File Format"); `head` is
+    /// the `OpusHead` (RFC 7845 5.1) equivalent of the sample entry's
+    /// `dOps` box, the extradata FFmpeg's decoder expects.
+    Opus {
+        /// The `OpusHead`.
+        head: Vec<u8>,
+    },
 }
 
 impl Mp4Codec {
@@ -148,6 +172,7 @@ impl Mp4Codec {
         match self {
             Self::Aac { .. } => "AAC",
             Self::Alac { .. } => "ALAC",
+            Self::Opus { .. } => "Opus",
         }
     }
 }
@@ -174,6 +199,8 @@ pub struct Mp4File {
     rate: u32,
     /// The `stsd` box (header included), copied to exports.
     stsd: Vec<u8>,
+    /// Opus: where in `stsd` the `dOps` box's PreSkip lies.
+    preskip_at: Option<usize>,
     /// ISO 639-2 language code as packed in `mdhd`.
     language: u16,
     raw: Vec<RawPacket>,
@@ -299,6 +326,7 @@ impl Mp4File {
                 continue;
             }
             track = Some(parse_track(
+                r,
                 trak,
                 movie_timescale,
                 &frag,
@@ -354,6 +382,7 @@ impl Mp4File {
             channels: t.channels,
             rate: t.rate,
             stsd: t.stsd,
+            preskip_at: t.preskip_at,
             language: t.language,
             raw: t.raw,
             audible: t.audible,
@@ -471,14 +500,14 @@ impl Mp4File {
         }
     }
 
-    /// AAC: sample-exact at the start and end of the output file (edit
-    /// list); joins inside the file are packet-granular. Pre-roll is added
-    /// and hidden inside [`Mp4File::write_cut`]. ALAC: sample-exact
+    /// AAC and Opus: sample-exact at the start and end of the output file
+    /// (edit list); joins inside the file are packet-granular. Pre-roll is
+    /// added and hidden inside [`Mp4File::write_cut`]. ALAC: sample-exact
     /// everywhere, since a frame cut by a cut point is rewritten as an
     /// uncompressed frame of the kept samples (see [`alac`]).
     pub fn capabilities(&self) -> CutCapabilities {
         match self.codec {
-            Mp4Codec::Aac { .. } => CutCapabilities {
+            Mp4Codec::Aac { .. } | Mp4Codec::Opus { .. } => CutCapabilities {
                 preroll_packets: 0,
                 can_trim_start: true,
                 can_trim_end: true,
@@ -504,6 +533,7 @@ impl Mp4File {
         let (codec, extradata) = match &self.codec {
             Mp4Codec::Aac { asc } => (crate::Codec::Aac, asc.clone()),
             Mp4Codec::Alac { cookie } => (crate::Codec::Alac, cookie.clone()),
+            Mp4Codec::Opus { head } => (crate::Codec::Opus, head.clone()),
         };
         Ok(vec![crate::DecodeSection {
             codec,
@@ -537,7 +567,7 @@ impl Mp4File {
     }
 
     /// Writes the kept samples of `plans`, joined, as a new MP4 file. For
-    /// AAC only the start of the first and the end of the last non-empty
+    /// AAC and Opus only the start of the first and the end of the last non-empty
     /// plan may be trimmed (see [`Mp4File::capabilities`]). `tags`, or
     /// else the source's tags, are written as the `ilst`.
     pub fn write_cut<R, W>(
@@ -562,10 +592,11 @@ impl Mp4File {
             }
             let trims_inside =
                 (p.trim_start != 0 && i != 0) || (p.trim_end != 0 && i + 1 != kept.len());
-            if trims_inside && matches!(self.codec, Mp4Codec::Aac { .. }) {
-                return Err(ContainerError::InvalidPlan(
-                    "MP4 with AAC can only trim at the start and end of the file".into(),
-                ));
+            if trims_inside && !matches!(self.codec, Mp4Codec::Alac { .. }) {
+                return Err(ContainerError::InvalidPlan(format!(
+                    "MP4 with {} can only trim at the start and end of the file",
+                    self.codec.name()
+                )));
             }
         }
         let tags = tags.unwrap_or(&self.tags);
@@ -584,7 +615,7 @@ impl Mp4File {
 
         // Raw packets to write: pre-roll, then the kept entries in order.
         let r_first = self.entry_raw[first.packets.start];
-        let r0 = r_first.saturating_sub(AAC_PREROLL_FRAMES);
+        let r0 = self.preroll_start(r_first);
         let mut order: Vec<OutSample> = (r0..r_first).map(OutSample::Source).collect();
         for p in &kept {
             order.extend(
@@ -604,6 +635,25 @@ impl Mp4File {
         let lp_end = lp.start + u64::from(lp.out);
         let discard = lp_end - (lp_end.min(self.audible.end) - last.trim_end);
         self.write_file(r, &order, (media_time, discard), video, tags, w)
+    }
+
+    /// The first raw packet to write for a cut whose first kept sample is
+    /// raw packet `first`: [`AAC_PREROLL_FRAMES`] earlier for AAC, as many
+    /// as hold [`OPUS_PREROLL`] samples for Opus (fewer at the stream's
+    /// start, where the decoder starts clean anyway).
+    fn preroll_start(&self, first: usize) -> usize {
+        match self.codec {
+            Mp4Codec::Opus { .. } => {
+                let mut start = first;
+                let mut held = 0u64;
+                while start > 0 && held < OPUS_PREROLL {
+                    start -= 1;
+                    held += u64::from(self.raw[start].out);
+                }
+                start
+            }
+            _ => first.saturating_sub(AAC_PREROLL_FRAMES),
+        }
     }
 
     /// The video track of a cut and the source frames (decode indexes) of
@@ -725,7 +775,7 @@ impl Mp4File {
             durations,
             ctts,
             sync: (!all_sync).then_some(sync),
-            roll: false,
+            roll: None,
             empty_edit,
             media_time,
             edit_duration,
@@ -818,10 +868,10 @@ impl Mp4File {
                 OutSample::Rewritten { data, .. } => data.len() as u32,
             })
             .collect();
-        // Sample durations: the decoder output. For AAC, whose frames all
-        // decode to the same length, the last one is shortened by the
-        // discarded tail, as ffmpeg writes it. ALAC cuts discard nothing:
-        // cut frames are rewritten to their kept length.
+        // Sample durations: the decoder output. For AAC and Opus the last
+        // one is shortened by the discarded tail, as ffmpeg writes it. ALAC
+        // cuts discard nothing: cut frames are rewritten to their kept
+        // length.
         let mut durations: Vec<u32> = samples
             .iter()
             .map(|s| match s {
@@ -830,14 +880,15 @@ impl Mp4File {
             })
             .collect();
         let decoded: u64 = durations.iter().map(|&d| u64::from(d)).sum();
-        if let (Some(d), Mp4Codec::Aac { .. }) = (durations.last_mut(), &self.codec) {
+        let lossy = !matches!(self.codec, Mp4Codec::Alac { .. });
+        if let (Some(d), true) = (durations.last_mut(), lossy) {
             // discard < out: the last packet keeps at least one sample.
             *d -= discard as u32;
         }
         let media_duration: u64 = durations.iter().map(|&d| u64::from(d)).sum();
         let duration = decoded - media_time - discard;
         let udta = ilst::udta(&ilst::write(tags, &self.ilst_other));
-        let stsd = self.stsd_for(sizes.iter().copied().max().unwrap_or(0));
+        let stsd = self.stsd_for(sizes.iter().copied().max().unwrap_or(0), media_time);
 
         let audio = mux::TrakOut {
             id: 1,
@@ -849,7 +900,7 @@ impl Mp4File {
             sizes,
             ctts: Vec::new(),
             sync: None,
-            roll: matches!(self.codec, Mp4Codec::Aac { .. }),
+            roll: self.roll_distance(),
             empty_edit: 0,
             media_time: i64::try_from(media_time).unwrap_or(i64::MAX),
             edit_duration: duration,
@@ -929,12 +980,42 @@ impl Mp4File {
         Ok(())
     }
 
+    /// The `roll` sample group's distance for the codec (ISO/IEC
+    /// 14496-12 10.1): how many samples before a sample a player must
+    /// decode from to play it correctly; `None` for ALAC, whose frames are
+    /// independent. AAC needs its predecessor; Opus 80 ms (the Opus
+    /// mapping for ISOBMFF, 4.4), counted in samples of the common length.
+    fn roll_distance(&self) -> Option<i16> {
+        match self.codec {
+            Mp4Codec::Aac { .. } => Some(-1),
+            Mp4Codec::Alac { .. } => None,
+            Mp4Codec::Opus { .. } => {
+                let outs: Vec<u32> = self.raw.iter().map(|p| p.out).collect();
+                let frame = u64::from(most_common(&outs).unwrap_or(960).max(1));
+                let n = OPUS_PREROLL.div_ceil(frame);
+                Some(-i16::try_from(n).unwrap_or(i16::MAX))
+            }
+        }
+    }
+
     /// The source's `stsd` for an output whose largest sample has
-    /// `largest` bytes. An ALAC configuration states the largest frame of
-    /// the stream (0 for unknown); an uncompressed frame may exceed it, so
-    /// it is raised then, as decoders may size their buffers by it.
-    fn stsd_for(&self, largest: u32) -> Vec<u8> {
+    /// `largest` bytes and whose edit list starts at `media_time`.
+    ///
+    /// An ALAC configuration states the largest frame of the stream (0 for
+    /// unknown); an uncompressed frame may exceed it, so it is raised then,
+    /// as decoders may size their buffers by it.
+    ///
+    /// Opus states its pre-skip in `dOps` as well as in the edit list;
+    /// players use one or the other (ffmpeg the edit list, and the
+    /// pre-skip when told to ignore edit lists), so it is set to the edit
+    /// list's start, which then hides the pre-roll and the cut-away head.
+    fn stsd_for(&self, largest: u32, media_time: u64) -> Vec<u8> {
         let mut stsd = self.stsd.clone();
+        if let (Some(at), Ok(skip)) = (self.preskip_at, u16::try_from(media_time))
+            && let Some(field) = stsd.get_mut(at..at + 2)
+        {
+            field.copy_from_slice(&skip.to_be_bytes());
+        }
         let Mp4Codec::Alac { cookie } = &self.codec else {
             return stsd;
         };
@@ -967,6 +1048,8 @@ struct Track {
     channels: u16,
     rate: u32,
     stsd: Vec<u8>,
+    /// See [`Mp4File`]'s field of the same name.
+    preskip_at: Option<usize>,
     language: u16,
     raw: Vec<RawPacket>,
     audible: Range<u64>,
@@ -991,8 +1074,10 @@ fn parse_mvhd_timescale(b: &[u8]) -> Option<u32> {
 }
 
 /// Parses an audio `trak` box, with its samples in the movie fragments
-/// `frag`.
-fn parse_track(
+/// `frag`. Reads the first bytes of an Opus track's first and last
+/// sample from `r`.
+fn parse_track<R: Read + Seek + ?Sized>(
+    r: &mut R,
     trak: BoxRef,
     movie_timescale: u32,
     frag: &Fragments,
@@ -1005,9 +1090,19 @@ fn parse_track(
     let (timescale, language) = parse_mdhd(mdhd.body).ok_or_else(|| at("invalid mdhd"))?;
     let stbl = boxes::path(mdia.body, &[b"minf", b"stbl"]).ok_or_else(|| at("no sample table"))?;
     let stsd = boxes::find(stbl.body, b"stsd").ok_or_else(|| at("no stsd box"))?;
-    let (codec, channels) = parse_stsd(stsd.body)?;
+    let (codec, channels, preskip_at) = parse_stsd(stsd.body)?;
     let mut stsd_box = Vec::new();
     boxes::put(&mut stsd_box, b"stsd", stsd.body);
+    // The body follows the box header.
+    let preskip_at = preskip_at.map(|at| at + stsd_box.len() - stsd.body.len());
+    let opus = matches!(codec, Mp4Codec::Opus { .. });
+    if opus && timescale != OPUS_RATE {
+        // Sample durations would have to be rescaled to the decoder's
+        // 48 kHz; the mapping recommends 48000 and recorders write it.
+        return Err(ContainerError::Unsupported(format!(
+            "Opus in MP4 with a timescale of {timescale} (only 48000 is supported)"
+        )));
+    }
 
     let Samples {
         offsets,
@@ -1023,7 +1118,7 @@ fn parse_track(
         // padding, and a muxer may lengthen the first one's to fill a gap
         // before it (ffmpeg's fragmented files without an edit list).
         Mp4Codec::Aac { .. } => most_common(&durations[..count]),
-        Mp4Codec::Alac { .. } => None,
+        Mp4Codec::Alac { .. } | Mp4Codec::Opus { .. } => None,
     };
     let mut raw = Vec::with_capacity(count);
     let mut start = 0u64;
@@ -1038,7 +1133,19 @@ fn parse_track(
             ));
             break;
         }
-        let out = fixed_out.unwrap_or(durations[i]);
+        let mut out = fixed_out.unwrap_or(durations[i]);
+        if opus && (i == 0 || i + 1 == count) {
+            // An Opus packet's duration is in its TOC (RFC 6716 3.1). The
+            // muxer shortens the last sample's `stts` duration by the
+            // encoder's padding, and may lengthen the first one's to fill
+            // a gap before it, like for AAC.
+            let mut toc = [0u8; 2];
+            let n = read_up_to(r, offsets[i], &mut toc[..(len as usize).min(2)])?;
+            match crate::ogg::codec::opus_packet_samples(&toc[..n]) {
+                Ok(samples) => out = samples,
+                Err(e) => warnings.push(format!("Opus sample {i}: {e}")),
+            }
+        }
         if out == 0 {
             warnings.push(format!("skipped sample {i} without duration"));
             continue;
@@ -1095,6 +1202,7 @@ fn parse_track(
         channels,
         rate: timescale,
         stsd: stsd_box,
+        preskip_at,
         language,
         raw,
         audible,
@@ -1486,8 +1594,9 @@ fn parse_moof(
     Ok(out)
 }
 
-/// Parses an `stsd` body: the codec and channel count of its first entry.
-fn parse_stsd(b: &[u8]) -> Result<(Mp4Codec, u16)> {
+/// Parses an `stsd` body: the codec and channel count of its first entry,
+/// and for Opus where in `b` the `dOps` PreSkip field lies.
+fn parse_stsd(b: &[u8]) -> Result<(Mp4Codec, u16, Option<usize>)> {
     let bad = |what: &str| malformed(0, &format!("sample description: {what}"));
     let entry = boxes::Boxes::new(b.get(8..).unwrap_or_default())
         .next()
@@ -1519,7 +1628,7 @@ fn parse_stsd(b: &[u8]) -> Result<(Mp4Codec, u16)> {
             if channels == 0 {
                 return Err(bad("no channel count"));
             }
-            Ok((Mp4Codec::Aac { asc }, channels))
+            Ok((Mp4Codec::Aac { asc }, channels, None))
         }
         b"alac" => {
             let cookie = boxes::find(children, b"alac")
@@ -1533,13 +1642,53 @@ fn parse_stsd(b: &[u8]) -> Result<(Mp4Codec, u16)> {
             if channels == 0 {
                 return Err(bad("ALAC without channels"));
             }
-            Ok((Mp4Codec::Alac { cookie: out }, channels))
+            Ok((Mp4Codec::Alac { cookie: out }, channels, None))
+        }
+        b"Opus" => {
+            let dops = boxes::find(children, b"dOps").ok_or_else(|| bad("Opus without dOps"))?;
+            let head = opus_head(dops.body).ok_or_else(|| bad("invalid dOps box"))?;
+            // OutputChannelCount, checked by `opus_head`.
+            let channels = u16::from(head[9]);
+            // PreSkip follows Version and OutputChannelCount. Both slices
+            // point into `b`.
+            let at = dops.body.as_ptr() as usize - b.as_ptr() as usize + 2;
+            Ok((Mp4Codec::Opus { head }, channels, Some(at)))
         }
         other => Err(ContainerError::Unsupported(format!(
-            "MP4 audio codec {:?} (only AAC and ALAC are supported)",
+            "MP4 audio codec {:?} (only AAC, ALAC and Opus are supported)",
             String::from_utf8_lossy(other)
         ))),
     }
+}
+
+/// The `OpusHead` (RFC 7845 5.1) that says what a `dOps` body says (the
+/// Opus mapping for ISOBMFF, 4.3.2): the same fields, but little-endian,
+/// with a magic signature and version 1. `None` when malformed.
+fn opus_head(dops: &[u8]) -> Option<Vec<u8>> {
+    let mut r = Reader::new(dops);
+    if r.u8()? != 0 {
+        return None; // Version
+    }
+    let channels = r.u8()?;
+    let pre_skip = r.u16()?;
+    let input_rate = r.u32()?;
+    let gain = r.u16()?;
+    let family = r.u8()?;
+    if channels == 0 {
+        return None;
+    }
+    let mut head = b"OpusHead".to_vec();
+    head.push(1);
+    head.push(channels);
+    head.extend(pre_skip.to_le_bytes());
+    head.extend(input_rate.to_le_bytes());
+    head.extend(gain.to_le_bytes());
+    head.push(family);
+    if family != 0 {
+        // StreamCount, CoupledCount and the channel mapping.
+        head.extend(r.bytes(2 + usize::from(channels))?);
+    }
+    Some(head)
 }
 
 /// Reads an MPEG-4 descriptor's tag and length (ISO/IEC 14496-1 8.3.3:

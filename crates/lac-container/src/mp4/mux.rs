@@ -54,9 +54,10 @@ pub(super) struct TrakOut {
     pub ctts: Vec<i32>,
     /// Sync flags; `None` when every sample is a sync sample.
     pub sync: Option<Vec<bool>>,
-    /// Every sample needs its predecessor (AAC): a `roll` sample group
-    /// with distance -1.
-    pub roll: bool,
+    /// The distance of a `roll` sample group holding every sample: how
+    /// many samples before one must be decoded to play it (-1 for AAC);
+    /// `None` for none.
+    pub roll: Option<i16>,
     /// A leading empty edit (movie timescale): how much later than the
     /// movie's start the track begins; 0 for none.
     pub empty_edit: u64,
@@ -336,14 +337,14 @@ fn trak(
         }
     }
     boxes::put_full(&mut stbl, if large { b"co64" } else { b"stco" }, 0, 0, &co);
-    if t.roll && n > 0 {
+    if let Some(distance) = t.roll.filter(|_| n > 0) {
         // ISO/IEC 14496-12 10.1: every AAC sample needs its predecessor
-        // (roll distance -1), as ffmpeg writes it, so seeking players
-        // decode one sample ahead.
+        // (roll distance -1), an Opus sample 80 ms before it, as ffmpeg
+        // writes it, so seeking players decode that far ahead.
         let mut sgpd = b"roll".to_vec();
         sgpd.extend(2u32.to_be_bytes()); // default_length
         sgpd.extend(1u32.to_be_bytes());
-        sgpd.extend((-1i16).to_be_bytes());
+        sgpd.extend(distance.to_be_bytes());
         boxes::put_full(&mut stbl, b"sgpd", 1, 0, &sgpd);
         let mut sbgp = b"roll".to_vec();
         sbgp.extend(1u32.to_be_bytes());
@@ -398,7 +399,7 @@ mod tests {
             durations,
             ctts: Vec::new(),
             sync: None,
-            roll: false,
+            roll: None,
             empty_edit: 0,
             media_time: 0,
             edit_duration: 0,

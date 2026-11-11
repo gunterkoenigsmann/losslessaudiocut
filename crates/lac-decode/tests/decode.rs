@@ -190,9 +190,9 @@ fn chained_files_decode_like_their_links() {
     }
 }
 
-/// MP4 files with AAC: ffmpeg honours the edit list's start; ffmpeg 6.1
+/// MP4 files with AAC and Opus: ffmpeg honours the edit list's start; ffmpeg 6.1
 /// decodes the last frame whole, so its output is ours plus the hidden
-/// tail (less than one 1024-sample frame), while ffmpeg 9 also honours the
+/// tail (less than one frame), while ffmpeg 9 also honours the
 /// edit list's end. The rest agrees bit for bit.
 #[test]
 fn mp4_decodes_like_ffmpeg_up_to_its_untrimmed_end() {
@@ -203,18 +203,22 @@ fn mp4_decodes_like_ffmpeg_up_to_its_untrimmed_end() {
         let Some(want) = ffmpeg(name) else { return };
         let ch = usize::from(channels);
         assert!(want.len() >= pcm.len(), "{name}: ffmpeg is shorter");
-        assert!(want.len() - pcm.len() < 1024 * ch, "{name}: tail too long");
+        // An Opus packet may last up to 120 ms.
+        let frame = if name.contains("opus") { 5760 } else { 1024 };
+        assert!(want.len() - pcm.len() < frame * ch, "{name}: tail too long");
         assert_bit_identical(name, &pcm, &want[..pcm.len()], channels);
     }
 }
 
 /// The MP4 fixtures without perceptual noise substitution.
-const MP4: [&str; 5] = [
+const MP4: [&str; 7] = [
     "mp4_aac_stereo_44k.m4a",
     "mp4_aac_mono_48k.m4a",
     "mp4_aac_noedit_22k.m4a",
     "mp4_aac_with_video.mp4",
     "mp4_aac_fragmented_44k.m4a",
+    "mp4_opus_stereo.mp4",
+    "video_h264_opus.mp4",
 ];
 
 /// Files where our timeline deliberately differs from ffmpeg's (random
@@ -292,7 +296,7 @@ fn sink_can_stop_decoding() {
 }
 
 /// Every fixture with its chained and damaged variants.
-const ALL: [&str; 45] = [
+const ALL: [&str; 47] = [
     "adts_aac_stereo_44k.aac",
     "adts_aac_mono_22k.aac",
     "ac3_stereo_44k.ac3",
@@ -338,6 +342,8 @@ const ALL: [&str; 45] = [
     "mkv_opus_live.webm",
     "mkv_opus_damaged.webm",
     "mkv_opus_with_video.mkv",
+    "mp4_opus_stereo.mp4",
+    "video_h264_opus.mp4",
 ];
 
 /// Ranges at the start, the end, around section boundaries and spread over
