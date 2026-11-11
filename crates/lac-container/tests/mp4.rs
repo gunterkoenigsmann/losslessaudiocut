@@ -1,10 +1,12 @@
-//! Tests of the MP4 demuxer and muxer with AAC, ALAC, Opus and AMR.
+//! Tests of the MP4 demuxer and muxer with AAC, ALAC, Opus, AMR and
+//! uncompressed audio.
 //!
 //! Fixtures come from `tests/fixtures/generate.sh` (ffmpeg's AAC-LC
 //! encoder: moov after and before mdat, without an edit list, with a
 //! video track, and fragmented; ffmpeg's ALAC encoder at 16 and 24 bit,
 //! and fragmented; libopus; AMR-NB and AMR-WB from the 3GPP reference
-//! encoders in 3GP files).
+//! encoders in 3GP files; uncompressed integer and float samples in
+//! QuickTime and ISO/IEC 23003-5 sample entries).
 //!
 //! Oracles:
 //! 1. Samples are copied verbatim: re-opening the output with our demuxer
@@ -54,7 +56,7 @@ use proptest::prelude::*;
 /// Fixtures: (name, sample rate, channels, length in samples). With an
 /// edit list the length is exactly the encoder's input; without one it
 /// includes the 1024 priming samples.
-const FIXTURES: [(&str, u32, u16, u64); 12] = [
+const FIXTURES: [(&str, u32, u16, u64); 18] = [
     ("mp4_aac_stereo_44k.m4a", 44_100, 2, 66_150),
     ("mp4_aac_mono_48k.m4a", 48_000, 1, 48_000),
     ("mp4_aac_noedit_22k.m4a", 22_050, 2, 22_050 + 1024),
@@ -67,6 +69,12 @@ const FIXTURES: [(&str, u32, u16, u64); 12] = [
     ("mp4_opus_stereo.mp4", 48_000, 2, 72_000),
     ("mp4_amrnb_8k.3gp", 8_000, 1, 12_000),
     ("mp4_amrwb_16k.3gp", 16_000, 1, 24_000),
+    ("mp4_pcm_s16le.mov", 44_100, 2, 13_230),
+    ("mp4_pcm_s24le.mov", 44_100, 2, 13_230),
+    ("mp4_pcm_s16be.mov", 22_050, 1, 6_615),
+    ("mp4_pcm_f32be.mov", 22_050, 1, 6_615),
+    ("mp4_pcm_lpcm_4ch.mov", 96_000, 4, 4_800),
+    ("mp4_pcm_iso.mp4", 22_050, 1, 6_615),
 ];
 
 /// The ALAC fixtures.
@@ -87,6 +95,8 @@ fn max_frame(f: &Mp4File) -> u64 {
         Mp4Codec::Opus { .. } => 5760,
         // One frame per sample in the fixtures.
         Mp4Codec::Amr { wideband } => 160 << u8::from(*wideband),
+        // Packets of uncompressed audio group up to 4096 frames.
+        Mp4Codec::Pcm(_) => 4096,
     }
 }
 
@@ -101,7 +111,7 @@ fn max_frame(f: &Mp4File) -> u64 {
 fn join_window(f: &Mp4File) -> usize {
     match f.codec() {
         Mp4Codec::Aac { .. } => 1024,
-        Mp4Codec::Alac { .. } => 0,
+        Mp4Codec::Alac { .. } | Mp4Codec::Pcm(_) => 0,
         Mp4Codec::Opus { .. } | Mp4Codec::Amr { .. } => {
             f.index().info().sample_rate as usize * 2 / 5
         }
@@ -177,7 +187,9 @@ fn payloads(f: &Mp4File, bytes: &[u8], entries: impl Iterator<Item = usize>) -> 
 
 /// Checks oracle 1 and returns the re-opened output. ALAC frames that a
 /// cut point cuts are rewritten (uncompressed, issue #75): those must
-/// decode to exactly the kept part of the source frame.
+/// decode to exactly the kept part of the source frame. Of an
+/// uncompressed packet that a cut point cuts, exactly the kept frames'
+/// bytes are written.
 fn assert_samples_copied(src: &[u8], out: &[u8], plans: &[CutPlan]) -> Mp4File {
     let f = open(src);
     let o = open(out);
@@ -202,6 +214,10 @@ fn assert_samples_copied(src: &[u8], out: &[u8], plans: &[CutPlan]) -> Mp4File {
         (a, b) => assert_eq!(a, b),
     }
     assert_eq!(o.index().info(), f.index().info());
+    let pcm_frame = match f.codec() {
+        Mp4Codec::Pcm(p) => Some(p.frame_bytes as usize),
+        _ => None,
+    };
     let alac_cfg = match f.codec() {
         Mp4Codec::Alac { cookie } => Some(alac::AlacConfig::parse(cookie).expect("config")),
         _ => None,
@@ -223,6 +239,11 @@ fn assert_samples_copied(src: &[u8], out: &[u8], plans: &[CutPlan]) -> Mp4File {
             }
             if e + 1 == p.packets.end {
                 drop += p.trim_end;
+            }
+            if let Some(fb) = pcm_frame.filter(|_| skip > 0 || drop > 0) {
+                let (a, b) = (skip as usize * fb, want.len() - drop as usize * fb);
+                assert!(*g == want[a..b], "packet {e}: kept frames differ");
+                continue;
             }
             match &alac_cfg {
                 Some(cfg) if skip > 0 || drop > 0 => {
