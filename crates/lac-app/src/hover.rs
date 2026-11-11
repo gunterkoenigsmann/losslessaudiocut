@@ -28,6 +28,8 @@ pub enum Zone {
     Bottom,
     /// The time ruler under the lanes.
     Ruler,
+    /// The pictures at the keyframes of a video file, above the ruler.
+    Thumbnails,
     /// Anywhere else on the waveform.
     Lanes,
 }
@@ -61,6 +63,12 @@ pub fn tooltip(scene: &Scene, pos: SamplePos, zone: Zone, near: SamplePos) -> Op
     if zone == Zone::Ruler {
         return Some(trf(
             "Time ruler: {time} under the pointer (View > Time ruler hides it)",
+            &[("time", &t(pos))],
+        ));
+    }
+    if zone == Zone::Thumbnails {
+        return Some(trf(
+            "Pictures at the video's keyframes: {time} under the pointer",
             &[("time", &t(pos))],
         ));
     }
@@ -179,6 +187,9 @@ mod tests {
         assert_eq!(tooltip(&s, 10_000, Zone::Lanes, 10), None);
         let ruler = tooltip(&s, 10_000, Zone::Ruler, 10).expect("ruler");
         assert!(ruler.contains("0:10.000"), "{ruler}");
+        let pictures = tooltip(&s, 10_000, Zone::Thumbnails, 10).expect("pictures");
+        assert!(pictures.contains("keyframes"), "{pictures}");
+        assert!(pictures.contains("0:10.000"), "{pictures}");
     }
 
     #[test]

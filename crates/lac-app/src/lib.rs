@@ -84,6 +84,7 @@ pub mod ruler;
 pub mod session;
 pub mod tag_edits;
 pub mod theme;
+pub mod thumbnails;
 pub mod time;
 pub mod track_list;
 pub mod video;
