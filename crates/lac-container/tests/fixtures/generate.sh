@@ -140,6 +140,11 @@ $og -i "$tmp/ma.wav" $ma -b:a 128k \
 $og -i "$tmp/lb.wav" -fflags +bitexact -c:a alac -movflags frag_keyframe \
     -frag_duration 150000 mp4_alac_fragmented_48k.m4a
 
+# Opus in MP4 (the Opus mapping for ISOBMFF, a dOps box, 48 kHz timescale,
+# an edit list hiding the pre-skip and a shortened last sample duration):
+# stereo speech, as ffmpeg writes it. A video with Opus follows below.
+$og -i "$tmp/o.wav" -fflags +bitexact -c:a libopus -b:a 64k mp4_opus_stereo.mp4
+
 # Raw AC-3, encoded by ffmpeg's native (fixed-point) AC-3 encoder: stereo
 # 2/0 at 44.1 kHz (frame sizes alternate between 834 and 836 bytes),
 # 5.1 (3/2 + LFE) at 48 kHz and mono at 32 kHz.
@@ -196,3 +201,7 @@ $og $vs -i "$tmp/va.wav" $vo -c:v libvpx-vp9 -g 15 -keyint_min 15 -b:v 100k \
     -pix_fmt yuv420p video_vp9.mp4
 $og $vs -i "$tmp/va.wav" $vo -c:v prores_ks -profile:v 0 video_prores.mov
 $og $vs -i "$tmp/va.wav" $vo -c:v mpeg4 -g 15 -bf 0 video_mpeg4.3gp
+# H.264 with Opus sound, as Android phones record with Opus.
+$og $vs -i "$tmp/va.wav" -fflags +bitexact -c:a libopus -b:a 64k \
+    -c:v libx264 -bf 0 -g 15 -keyint_min 15 -sc_threshold 0 -pix_fmt yuv420p \
+    video_h264_opus.mp4

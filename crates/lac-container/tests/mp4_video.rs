@@ -59,6 +59,16 @@ const FIXTURES: &[Expected] = &[
         unclean: &[],
         demoted: 0,
     },
+    // The same video with Opus sound (20 ms packets instead of AAC's
+    // 1024 samples).
+    Expected {
+        name: "video_h264_opus.mp4",
+        codec: VideoCodec::H264,
+        rotation: 0,
+        keyframes: GOP15,
+        unclean: &[],
+        demoted: 0,
+    },
     // x264's open GOP: only the first I-frame is an IDR picture; the
     // others (at 13, 30 and 43 in decode order) are marked as sync samples
     // by the muxer but are plain I-slices.

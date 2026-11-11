@@ -220,10 +220,11 @@ fn preroll(codec: lac_container::Codec, sample_rate: u32) -> (usize, u64) {
         // The first block's IMDCT output overlaps with the previous
         // frame's last block (A/52 7.9.4.2); nothing reaches further back.
         Codec::Ac3 => (1, 0),
-        // RFC 7845 4.6 recommends at least 80 ms of pre-roll; measured on
-        // the fixtures, the output is bit-exact again about 140 ms later.
-        // Decoding 250 ms more is cheap and leaves a margin.
-        Codec::Opus => (1, ms(250)),
+        // RFC 7845 4.6 recommends at least 80 ms of pre-roll. On the
+        // speech fixtures the output is bit-exact again about 140 ms later;
+        // the tones of `video_h264_opus.mp4` (CELT) still differ by 4.5
+        // LSB after 250 ms, by far less than one after 400 ms.
+        Codec::Opus => (1, ms(400)),
         // Speex's float state decays geometrically and need not become
         // bit-exact at all (issue #17); after 400 ms it is far below one
         // 16-bit LSB.

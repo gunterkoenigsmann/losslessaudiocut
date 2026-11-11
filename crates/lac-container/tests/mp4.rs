@@ -1,9 +1,9 @@
-//! Tests of the MP4 demuxer and muxer with AAC and ALAC.
+//! Tests of the MP4 demuxer and muxer with AAC, ALAC and Opus.
 //!
 //! Fixtures come from `tests/fixtures/generate.sh` (ffmpeg's AAC-LC
 //! encoder: moov after and before mdat, without an edit list, with a
 //! video track, and fragmented; ffmpeg's ALAC encoder at 16 and 24 bit,
-//! and fragmented).
+//! and fragmented; libopus).
 //!
 //! Oracles:
 //! 1. Samples are copied verbatim: re-opening the output with our demuxer
@@ -15,7 +15,10 @@
 //!    frame overlaps (MDCT) with a frame that was not its predecessor.
 //!    ALAC frames are independent, so ALAC has no such window; frames cut
 //!    by a cut point are rewritten uncompressed, so ALAC cuts are
-//!    sample-exact at joins too.
+//!    sample-exact at joins too. Opus decoders carry state much further
+//!    and need not become bit-exact again: as for Opus in Matroska (issue
+//!    #54), after its window each sample must stay within
+//!    [`OPUS_JOIN_TOLERANCE`].
 //! 3. ffmpeg honours the edit list's start. Whether it honours its end
 //!    depends on the version: ffmpeg 6.1 decodes the last frame whole, so
 //!    its output is our planned length plus the hidden tail of the last
@@ -48,7 +51,7 @@ use proptest::prelude::*;
 /// Fixtures: (name, sample rate, channels, length in samples). With an
 /// edit list the length is exactly the encoder's input; without one it
 /// includes the 1024 priming samples.
-const FIXTURES: [(&str, u32, u16, u64); 9] = [
+const FIXTURES: [(&str, u32, u16, u64); 10] = [
     ("mp4_aac_stereo_44k.m4a", 44_100, 2, 66_150),
     ("mp4_aac_mono_48k.m4a", 48_000, 1, 48_000),
     ("mp4_aac_noedit_22k.m4a", 22_050, 2, 22_050 + 1024),
@@ -58,6 +61,7 @@ const FIXTURES: [(&str, u32, u16, u64); 9] = [
     ("mp4_alac_stereo24_44k.m4a", 44_100, 2, 17_640),
     ("mp4_aac_fragmented_44k.m4a", 44_100, 2, 66_150 + 1024),
     ("mp4_alac_fragmented_48k.m4a", 48_000, 1, 24_000),
+    ("mp4_opus_stereo.mp4", 48_000, 2, 72_000),
 ];
 
 /// The ALAC fixtures.
@@ -69,11 +73,13 @@ const ALAC_FIXTURES: [&str; 4] = [
 ];
 
 /// The largest decoder output of one sample: an AAC-LC frame always
-/// decodes to 1024 samples, ffmpeg's ALAC frames hold up to 4096.
+/// decodes to 1024 samples, ffmpeg's ALAC frames hold up to 4096, an Opus
+/// packet up to 120 ms (RFC 6716 3.2.5).
 fn max_frame(f: &Mp4File) -> u64 {
     match f.codec() {
         Mp4Codec::Aac { .. } => 1024,
         Mp4Codec::Alac { .. } => 4096,
+        Mp4Codec::Opus { .. } => 5760,
     }
 }
 
@@ -82,12 +88,38 @@ fn max_frame(f: &Mp4File) -> u64 {
 /// with the second half of the frame before the join (ISO/IEC 14496-3
 /// 4.6.11); from the next frame on, the decoder state holds only the
 /// current frame, so the output is bit-exact again. ALAC: none, every
-/// frame decodes on its own.
+/// frame decodes on its own. Opus: 400 ms, as in `tests/mkv.rs`, after
+/// which the output must stay within [`OPUS_JOIN_TOLERANCE`].
 fn join_window(f: &Mp4File) -> usize {
     match f.codec() {
         Mp4Codec::Aac { .. } => 1024,
         Mp4Codec::Alac { .. } => 0,
+        Mp4Codec::Opus { .. } => 19_200,
     }
+}
+
+/// Largest difference allowed after an Opus join's window: one 16-bit LSB
+/// (2^-15), as for Opus in Matroska (issue #54) and Speex (issue #17).
+/// Wrong packets or offsets differ by orders of magnitude more.
+const OPUS_JOIN_TOLERANCE: f32 = 1.0 / 32768.0;
+
+/// Whether two decoded f32le frames agree: bit for bit when `tolerance` is
+/// 0, otherwise each sample within `tolerance`.
+fn frames_match(want: &[u8], got: &[u8], tolerance: f32) -> bool {
+    if tolerance == 0.0 {
+        return want == got;
+    }
+    let f = |b: &[u8]| -> Vec<f32> {
+        b.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&x| f32::from_le_bytes(x))
+            .collect()
+    };
+    f(want)
+        .iter()
+        .zip(f(got))
+        .all(|(w, g)| (w - g).abs() <= tolerance)
 }
 
 fn open(bytes: &[u8]) -> Mp4File {
@@ -145,12 +177,18 @@ fn assert_samples_copied(src: &[u8], out: &[u8], plans: &[CutPlan]) -> Mp4File {
             let max = |c: &[u8]| u32::from_be_bytes(c[at..at + 4].try_into().expect("4 bytes"));
             assert!(max(a) >= max(b));
         }
+        // The pre-skip is the new edit list's start (pre-roll included);
+        // everything else stays.
+        (Mp4Codec::Opus { head: a }, Mp4Codec::Opus { head: b }) => {
+            assert_eq!(a[..10], b[..10]);
+            assert_eq!(a[12..], b[12..]);
+        }
         (a, b) => assert_eq!(a, b),
     }
     assert_eq!(o.index().info(), f.index().info());
     let alac_cfg = match f.codec() {
         Mp4Codec::Alac { cookie } => Some(alac::AlacConfig::parse(cookie).expect("config")),
-        Mp4Codec::Aac { .. } => None,
+        Mp4Codec::Aac { .. } | Mp4Codec::Opus { .. } => None,
     };
     let got = payloads(&o, out, 0..o.index().packets().len());
     let mut k = 0;
@@ -234,20 +272,34 @@ fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPl
     let mut out_pos = 0usize;
     let mut prev_end = 0u64;
     let mut window_end = 0usize;
+    // Opus: all parts share one decoder, so the state of a join carries
+    // into every later part, even contiguous ones.
+    let opus = matches!(f.codec(), Mp4Codec::Opus { .. });
+    let mut after_join = false;
     for p in plans {
         let r = p.actual.start as usize..p.actual.end as usize;
         out_pos += p.padding_before as usize;
         if r.start as u64 != prev_end || p.padding_before > 0 {
             window_end = r.start + join_window(&f);
+            after_join = true;
         }
+        let tolerance = if opus && after_join {
+            OPUS_JOIN_TOLERANCE
+        } else {
+            0.0
+        };
         let a = window_end.max(r.start).min(r.end);
         if a < r.end {
             let want = &s[a * frame..r.end * frame];
             let got_at = out_pos + (a - r.start);
             let got = &d[got_at * frame..(got_at + r.end - a) * frame];
-            if let Some(i) = (0..r.end - a)
-                .find(|&i| want[i * frame..(i + 1) * frame] != got[i * frame..(i + 1) * frame])
-            {
+            if let Some(i) = (0..r.end - a).find(|&i| {
+                !frames_match(
+                    &want[i * frame..(i + 1) * frame],
+                    &got[i * frame..(i + 1) * frame],
+                    tolerance,
+                )
+            }) {
                 panic!(
                     "{name}: range {r:?} differs at source sample {} ({i} samples after the allowed window)",
                     a + i

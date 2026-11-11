@@ -23,7 +23,7 @@ The one documented exception are **internal join points** of lossy codecs
 predecessor state. Tests compare everything outside that window bit for bit
 and check that the window is no longer than `docs/architecture.md`
 (section "Join points inside a file") says for the codec. Speex and Opus in
-Matroska (joined in one stream without pre-roll) are the codecs whose
+Matroska or MP4 (joined in one stream without pre-roll) are the codecs whose
 decoders never provably reach bit-exactness after a join; there the tests
 require a difference below one 16-bit LSB after the window (decided in
 issues #17 and #54).
