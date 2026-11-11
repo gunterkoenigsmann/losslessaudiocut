@@ -32,6 +32,10 @@ const TRACK_LABEL_INSET: f64 = 4.0;
 const TRACK_LABEL_TOP: f64 = 2.0;
 /// How close a mark must be to the pointer for its tooltip, in DIPs.
 const TOOLTIP_REACH: f64 = 3.0;
+/// Height of the strip of keyframe pictures of a video file, in DIPs.
+const THUMBNAIL_STRIP: f64 = 48.0;
+/// Room between two keyframe pictures, in DIPs.
+const THUMBNAIL_GAP: f64 = 4.0;
 /// How far the pointer may move while the right button is down for it to
 /// still be a click rather than a scrub, in DIPs.
 const CLICK_SLOP: f64 = 4.0;
@@ -95,6 +99,17 @@ impl Metrics {
         self.px(2.0 * SUGGESTION_MARK)
     }
 
+    /// Height of the strip of keyframe pictures above the ruler, shown for
+    /// video files.
+    pub fn thumbnail_strip(&self) -> i32 {
+        self.px(THUMBNAIL_STRIP)
+    }
+
+    /// Least room between two keyframe pictures in their strip.
+    pub fn thumbnail_gap(&self) -> f64 {
+        THUMBNAIL_GAP * self.scale
+    }
+
     /// Length of a labelled ruler tick.
     pub fn ruler_major(&self) -> i32 {
         self.px(RULER_MAJOR)
@@ -144,13 +159,17 @@ impl Metrics {
     }
 
     /// The strip that row `y` of a window `height` rows high is in, with a
-    /// ruler `ruler` rows high (0 when hidden) at the bottom. The strips
-    /// are where the marks are drawn: the suggested-start ticks at the top,
-    /// the suggested-pause strip just above the ruler.
-    pub fn zone(&self, y: i32, height: i32, ruler: i32) -> Zone {
+    /// ruler `ruler` rows high (0 when hidden) at the bottom and the strip
+    /// of keyframe pictures, `thumbnails` rows high (0 for audio files),
+    /// above it. The strips are where the marks are drawn: the
+    /// suggested-start ticks at the top, the suggested-pause strip just
+    /// above the keyframe pictures.
+    pub fn zone(&self, y: i32, height: i32, ruler: i32, thumbnails: i32) -> Zone {
         if y >= height - ruler {
             Zone::Ruler
-        } else if y >= height - ruler - self.suggestion_strip() {
+        } else if y >= height - ruler - thumbnails {
+            Zone::Thumbnails
+        } else if y >= height - ruler - thumbnails - self.suggestion_strip() {
             Zone::Bottom
         } else if y < self.suggestion_tick() {
             Zone::Top
@@ -178,6 +197,8 @@ mod tests {
         assert_eq!(m.track_label_offset(), (4, 2));
         assert_eq!(m.tooltip_reach(), 3.0);
         assert_eq!(m.click_slop(), 4.0);
+        assert_eq!(m.thumbnail_strip(), 48);
+        assert_eq!(m.thumbnail_gap(), 4.0);
     }
 
     /// At 200 % every mark is twice as many device pixels; text sizes come
@@ -196,6 +217,8 @@ mod tests {
         assert_eq!(two.track_label_offset(), (8, 4));
         assert_eq!(two.tooltip_reach(), 6.0);
         assert_eq!(two.click_slop(), 8.0);
+        assert_eq!(two.thumbnail_strip(), 96);
+        assert_eq!(two.thumbnail_gap(), 8.0);
     }
 
     /// Fractional scales round to whole pixels, and no mark disappears.
@@ -220,23 +243,31 @@ mod tests {
     }
 
     /// The hit test's strips are exactly where the marks are drawn, at any
-    /// scale: the pause strip ends at the ruler, the tick zone at the
-    /// tick's end.
+    /// scale: the pause strip ends at the keyframe pictures (or the ruler),
+    /// the tick zone at the tick's end.
     #[test]
     fn zones_match_the_drawn_marks() {
         for m in [Metrics::default(), Metrics::new(1.5), Metrics::new(2.0)] {
             let (height, ruler) = (300, m.ruler_height(13));
-            let strip_top = height - ruler - m.suggestion_strip();
-            assert_eq!(m.zone(height - 1, height, ruler), Zone::Ruler);
-            assert_eq!(m.zone(height - ruler, height, ruler), Zone::Ruler);
-            assert_eq!(m.zone(height - ruler - 1, height, ruler), Zone::Bottom);
-            assert_eq!(m.zone(strip_top, height, ruler), Zone::Bottom);
-            assert_eq!(m.zone(strip_top - 1, height, ruler), Zone::Lanes);
-            assert_eq!(m.zone(0, height, ruler), Zone::Top);
-            assert_eq!(m.zone(m.suggestion_tick() - 1, height, ruler), Zone::Top);
-            assert_eq!(m.zone(m.suggestion_tick(), height, ruler), Zone::Lanes);
+            for thumbs in [0, m.thumbnail_strip()] {
+                let zone = |y| m.zone(y, height, ruler, thumbs);
+                let pictures_top = height - ruler - thumbs;
+                let strip_top = pictures_top - m.suggestion_strip();
+                assert_eq!(zone(height - 1), Zone::Ruler);
+                assert_eq!(zone(height - ruler), Zone::Ruler);
+                if thumbs > 0 {
+                    assert_eq!(zone(height - ruler - 1), Zone::Thumbnails);
+                    assert_eq!(zone(pictures_top), Zone::Thumbnails);
+                }
+                assert_eq!(zone(pictures_top - 1), Zone::Bottom);
+                assert_eq!(zone(strip_top), Zone::Bottom);
+                assert_eq!(zone(strip_top - 1), Zone::Lanes);
+                assert_eq!(zone(0), Zone::Top);
+                assert_eq!(zone(m.suggestion_tick() - 1), Zone::Top);
+                assert_eq!(zone(m.suggestion_tick()), Zone::Lanes);
+            }
             // Without a ruler the pause strip is at the very bottom.
-            assert_eq!(m.zone(height - 1, height, 0), Zone::Bottom);
+            assert_eq!(m.zone(height - 1, height, 0, 0), Zone::Bottom);
         }
     }
 }

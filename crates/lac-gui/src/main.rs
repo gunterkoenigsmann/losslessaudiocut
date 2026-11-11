@@ -80,6 +80,7 @@ use lac_app::playback::End;
 use lac_app::project::Project;
 use lac_app::recent_files::RecentFiles;
 use lac_app::theme::{ListPalette, Theme};
+use lac_app::thumbnails::{ThumbnailLoader, strip_layout, thumbnail_width};
 use lac_app::track_list::Bound;
 use lac_app::video::{Picture, VideoLoader};
 use lac_app::waveform::{DrawMode, WaveformView};
@@ -407,10 +408,18 @@ struct State {
     /// The video pane was shown for the file opened last (once, so the
     /// user can close it again).
     video_pane_offered: bool,
+    /// Decodes the pictures at the keyframes of a video file for the
+    /// strip under the waveform.
+    thumbnails: Option<ThumbnailLoader>,
+    /// Generation of `thumbnails` when the waveform was last redrawn.
+    thumbnails_seen: u64,
 
     /// Height of the time ruler as last painted (0 when hidden), so the
     /// tooltip knows where the ruler is.
     ruler_height: std::cell::Cell<i32>,
+    /// Height of the strip of keyframe pictures as last painted (0 for
+    /// audio files), for the tooltip.
+    thumbnail_height: std::cell::Cell<i32>,
     /// The waveform's tooltip as last set, so it is set only on changes.
     tooltip: String,
     /// Whether the pointer shows that the track boundary under it can be
@@ -454,6 +463,8 @@ impl State {
         self.video_seen = None;
         self.video_picture = None;
         self.video_pane_offered = false;
+        self.thumbnails = Some(ThumbnailLoader::start(&path));
+        self.thumbnails_seen = 0;
         let path_for_analysis = path.clone();
         self.path = Some(path);
         self.seen = None;
@@ -983,8 +994,6 @@ impl State {
         })
     }
 
-    /// Asks for the samples the view needs and takes new ones. Returns
-    /// whether the display must be redrawn.
     /// Timer: asks for the picture at the playhead (or the cursor) and
     /// takes a newly decoded one. Returns whether the video pane needs
     /// redrawing, and whether it should be shown because a file with a
@@ -1055,6 +1064,19 @@ impl State {
         None
     }
 
+    /// Timer: whether new keyframe pictures arrived since the waveform was
+    /// last redrawn (the paint asks for the pictures it needs).
+    fn poll_thumbnails(&mut self) -> bool {
+        let Some(g) = self.thumbnails.as_ref().map(ThumbnailLoader::generation) else {
+            return false;
+        };
+        let new = g != self.thumbnails_seen;
+        self.thumbnails_seen = g;
+        new
+    }
+
+    /// Asks for the samples the view needs and takes new ones. Returns
+    /// whether the display must be redrawn.
     fn poll_detail(&mut self) -> bool {
         let packet_len = self.packet_len();
         let wanted = self.view.as_ref().and_then(|v| v.detail_wanted(packet_len));
@@ -1441,7 +1463,8 @@ fn main() {
                     let mut st = state.borrow_mut();
                     (
                         st.poll(),
-                        st.poll_detail(),
+                        // New keyframe pictures are drawn like new detail.
+                        st.poll_detail() | st.poll_thumbnails(),
                         st.poll_export(),
                         st.poll_player(),
                         st.poll_analysis(),
@@ -2904,7 +2927,7 @@ fn update_tooltip(st: &mut State, panel: &Panel, x: f64, y: i32) {
         let height = panel.get_client_size().height;
         let ruler = st.ruler_height.get();
         let metrics = metrics(panel);
-        let zone = metrics.zone(y, height, ruler);
+        let zone = metrics.zone(y, height, ruler, st.thumbnail_height.get());
         let (pos, near) = pointer_at(view, x, &metrics);
         hover::tooltip(scene, pos, zone, near)
     })
@@ -3384,7 +3407,17 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
             0
         };
         st.ruler_height.set(ruler_height);
-        let lanes = lanes::lanes(peaks.channels(), size.height - ruler_height);
+        // Above it, for a video file, the pictures at the keyframes.
+        let thumbnails = st.thumbnails.as_ref().filter(|t| t.track().is_some());
+        let thumbnail_height = if thumbnails.is_some() {
+            metrics.thumbnail_strip()
+        } else {
+            0
+        };
+        st.thumbnail_height.set(thumbnail_height);
+        // Everything under the lanes.
+        let below = ruler_height + thumbnail_height;
+        let lanes = lanes::lanes(peaks.channels(), size.height - below);
         let editor = st.editor.as_ref();
         // Backgrounds first, the waveform goes on top.
         let spans = |ranges: &mut dyn Iterator<Item = Range<SamplePos>>| -> Vec<Range<u32>> {
@@ -3476,7 +3509,7 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
                 dc.set_brush(colour, BrushStyle::Solid);
                 dc.draw_rectangle(
                     px(span.start),
-                    size.height - ruler_height - metrics.suggestion_strip(),
+                    size.height - below - metrics.suggestion_strip(),
                     px(span.end - span.start),
                     metrics.suggestion_strip(),
                 );
@@ -3520,6 +3553,9 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
                 dc.draw_text(&label, x0.max(0.0) as i32 + dx, dy);
             }
         }
+        if let Some(t) = thumbnails {
+            draw_thumbnails(&dc, view, t, size, below, thumbnail_height, &metrics);
+        }
         if let Some(rate) = st.rate.filter(|_| ruler_height > 0) {
             draw_ruler(&dc, view, rate, size, ruler_height, &metrics);
         }
@@ -3540,6 +3576,52 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
             }
         }
     });
+}
+
+/// Draws the strip of keyframe pictures (issue #156) `height` rows high
+/// and its bottom `bottom` rows above the bottom of the window of `size`:
+/// each picture starts at its keyframe, which is marked by a line on its
+/// left edge. Pictures still being decoded leave their place empty.
+fn draw_thumbnails(
+    dc: &impl DeviceContext,
+    view: &WaveformView,
+    loader: &ThumbnailLoader,
+    size: Size,
+    bottom: i32,
+    height: i32,
+    metrics: &Metrics,
+) {
+    let top = size.height - bottom;
+    dc.set_pen(RULER_BACKGROUND, 1, PenStyle::Solid);
+    dc.set_brush(RULER_BACKGROUND, BrushStyle::Solid);
+    dc.draw_rectangle(0, top, size.width, height);
+    let (Some(track), Ok(h)) = (loader.track(), u32::try_from(height)) else {
+        return;
+    };
+    let width = thumbnail_width(&track, h);
+    let starts = track
+        .index
+        .clean_start_times()
+        .map(|t| (t, view.sample_to_x(track.clock.position_of(t))));
+    let shown = strip_layout(
+        starts,
+        f64::from(width),
+        metrics.thumbnail_gap(),
+        f64::from(view.width()),
+    );
+    let times: Vec<_> = shown.iter().map(|&(t, _)| t).collect();
+    let pictures = loader.request(h, &times);
+    dc.set_pen(RULER_TICK, 1, PenStyle::Solid);
+    for (&(_, x), picture) in shown.iter().zip(&pictures) {
+        let x = x.round() as i32;
+        if let Some(p) = picture
+            && let Some(bitmap) = Bitmap::from_rgba(&p.rgba, p.width, p.height)
+        {
+            let at = |v: u32| i32::try_from(v).unwrap_or(0);
+            dc.draw_bitmap(&bitmap, x + at(p.x), top + at(p.y), false);
+        }
+        dc.draw_line(x, top, x, top + height);
+    }
 }
 
 /// The video pane: paints the current picture, and again when resized.
