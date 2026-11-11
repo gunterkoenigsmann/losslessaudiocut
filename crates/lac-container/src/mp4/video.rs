@@ -135,6 +135,46 @@ impl Mp4Video {
     }
 }
 
+/// What [`is_keyframe`] needs to know about a stream.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct KeyframeCheck {
+    /// The stream's codec.
+    pub codec: VideoCodec,
+    /// Bytes of the NAL unit length prefix (H.264, HEVC), 1, 2 or 4.
+    pub nal_length: usize,
+    /// AV1 `reduced_still_picture_header` (every frame is a key frame).
+    pub av1_reduced: bool,
+}
+
+impl KeyframeCheck {
+    /// The check for a stream of `codec` whose decoder configuration
+    /// (`avcC`, `hvcC` or `av1C` body; Matroska's `CodecPrivate` holds
+    /// the same) is `config`. `None` if the configuration is malformed.
+    pub(crate) fn new(codec: VideoCodec, config: &[u8]) -> Option<Self> {
+        let mut c = Self {
+            codec,
+            nal_length: 4,
+            av1_reduced: false,
+        };
+        match codec {
+            // ISO/IEC 14496-15 5.3.3.1 and 8.3.3.1: lengthSizeMinusOne in
+            // the low 2 bits of byte 4 (avcC) or 21 (hvcC).
+            VideoCodec::H264 => c.nal_length = nal_length(*config.get(4)?).ok()?,
+            VideoCodec::Hevc => c.nal_length = nal_length(*config.get(21)?).ok()?,
+            VideoCodec::Av1 => {
+                if let Some(obus) = config.get(4..) {
+                    c.av1_reduced = av1_obus(obus)
+                        .find(|o| o.kind == AV1_SEQUENCE_HEADER)
+                        .and_then(|o| o.payload.first().map(|&b| b & 0x08 != 0))
+                        .unwrap_or(false);
+                }
+            }
+            _ => {}
+        }
+        Some(c)
+    }
+}
+
 /// The codec of a visual sample entry and how to look into its frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
@@ -213,9 +253,14 @@ pub(super) fn parse_video_track<R: Read + Seek + ?Sized>(
 
     // Check the claimed keyframes (the first frame is left alone: the
     // source itself is decoded from there).
+    let check = KeyframeCheck {
+        codec: entry.codec,
+        nal_length: entry.nal_length,
+        av1_reduced: entry.av1_reduced,
+    };
     let mut demoted = 0;
     for i in 1..count {
-        if sync[i] && is_keyframe(r, &entry, offsets[i], sizes[i])? == Some(false) {
+        if sync[i] && is_keyframe(r, &check, offsets[i], sizes[i])? == Some(false) {
             sync[i] = false;
             demoted += 1;
         }
@@ -448,9 +493,9 @@ fn tkhd_rotation(b: &[u8]) -> Option<u16> {
 /// Whether the frame at `offset` (`size` bytes) is a keyframe a decoder
 /// can start at; `None` when the codec has no cheap check or the data
 /// does not say. Reads only the headers it needs.
-fn is_keyframe<R: Read + Seek + ?Sized>(
+pub(crate) fn is_keyframe<R: Read + Seek + ?Sized>(
     r: &mut R,
-    e: &Entry,
+    e: &KeyframeCheck,
     offset: u64,
     size: u32,
 ) -> Result<Option<bool>> {
@@ -491,6 +536,14 @@ fn is_keyframe<R: Read + Seek + ?Sized>(
                 return Ok(None);
             }
             Ok(vp9_is_key(head[0]))
+        }
+        VideoCodec::Vp8 => {
+            // RFC 6386 9.1: bit 0 of the frame tag is 0 for a key frame.
+            let mut head = [0u8; 1];
+            if size == 0 || read_up_to(r, offset, &mut head)? < 1 {
+                return Ok(None);
+            }
+            Ok(Some(head[0] & 1 == 0))
         }
         VideoCodec::Mpeg4Visual => {
             let mut buf = vec![0u8; size.min(MPEG4_SEARCH as u64) as usize];

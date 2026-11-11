@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 830eca658dcd876f04aaa957ad026be5bc96d92607ef065896ebe4f4d2ee36fb # shrinks to cuts = [9216, 9600, 9601, 9217], gop = 1, frame = 1500
 cc 679eaf2eaa4d4e252d1e8c9b33e4b7ec471bafe9f4ccb035fb36003b54b1395e # shrinks to cuts = [199287, 416087, 141687, 259287, 171287, 430487, 476160, 417687, 0, 476161], gop = 11, frame = 3000, offset = 7560
+cc a9b49a6b5b18f5c5ca2fb244fbd2380110fe98851618355904082a5039d66233 # shrinks to cuts = [130363, 0, 126523, 1, 2, 130364], gop = 35, frame = 3600, offset = 7570, trim_file_ends = false

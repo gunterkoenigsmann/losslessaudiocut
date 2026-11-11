@@ -243,3 +243,21 @@ $synth "$tmp/vp.wav" 16000 1 16 2.0
 $og $vs -i "$tmp/vp.wav" -fflags +bitexact -c:a pcm_s16le \
     -c:v libx264 -bf 0 -g 15 -keyint_min 15 -sc_threshold 0 -pix_fmt yuv420p \
     video_h264_pcm.mov
+# Matroska and WebM videos with Opus sound: VP8 and VP9 as browsers
+# record WebM (MediaRecorder), AV1 as newer browsers do, H.264 with
+# B-frames and HEVC with an open GOP in .mkv, as OBS and some cameras write.
+vw="-fflags +bitexact -c:a libopus -b:a 64k"
+$og $vs -i "$tmp/va.wav" $vw -c:v libvpx -g 15 -keyint_min 15 -b:v 100k \
+    video_vp8_opus.webm
+$og $vs -i "$tmp/va.wav" $vw -c:v libvpx-vp9 -g 15 -keyint_min 15 -b:v 100k \
+    -pix_fmt yuv420p video_vp9_opus.webm
+$og $vs -i "$tmp/va.wav" $vw -c:v libsvtav1 -g 15 -pix_fmt yuv420p \
+    -svtav1-params scd=0 video_av1_opus.webm
+$og $vs -i "$tmp/va.wav" $vw -c:v libx264 -bf 2 -g 15 -keyint_min 15 \
+    -sc_threshold 0 -pix_fmt yuv420p video_h264_opus.mkv
+$og $vs -i "$tmp/va.wav" $vw -c:v libx265 -pix_fmt yuv420p \
+    -x265-params log-level=error:keyint=15:min-keyint=15:scenecut=0:bframes=2:open-gop=1 \
+    video_hevc_opus.mkv
+# Sound that starts 100 ms after the picture, as screen recorders write.
+$og $vs -itsoffset 0.1 -i "$tmp/va.wav" $vw -c:v libvpx -g 15 -keyint_min 15 \
+    -b:v 100k video_vp8_late_sound.webm

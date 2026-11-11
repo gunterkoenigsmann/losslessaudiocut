@@ -370,7 +370,11 @@ mod tests {
         assert_eq!(got[1].as_deref(), Some(&want));
         // Another height decodes again.
         let g = l.generation();
-        assert!(l.request(8, &times[..1])[0].is_none());
+        // Never a picture of the old height; the thread may already have
+        // the new one by the time `request` reads the cache, so `None` is
+        // not guaranteed here (that race failed a CI-like loaded run).
+        let now = l.request(8, &times[..1]);
+        assert!(now[0].as_ref().is_none_or(|p| p.height == 8));
         let p = wait(|| l.request(8, &times[..1])[0].clone());
         assert_eq!(p.height, 8);
         assert!(l.generation() > g);

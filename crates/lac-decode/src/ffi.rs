@@ -272,6 +272,7 @@ fn video_codec(codec: VideoCodec) -> VideoId {
         VideoCodec::Hevc => VideoId::Id(Id::HEVC),
         VideoCodec::Av1 => VideoId::Id(Id::AV1),
         VideoCodec::Vp9 => VideoId::Id(Id::VP9),
+        VideoCodec::Vp8 => VideoId::Id(Id::VP8),
         VideoCodec::Mpeg4Visual => VideoId::Id(Id::MPEG4),
         VideoCodec::Other(fourcc) => match &fourcc {
             b"apco" | b"apcs" | b"apcn" | b"apch" | b"ap4h" | b"ap4x" => VideoId::Id(Id::PRORES),

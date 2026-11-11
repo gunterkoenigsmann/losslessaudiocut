@@ -45,6 +45,8 @@ pub enum VideoCodec {
     Av1,
     /// VP9.
     Vp9,
+    /// VP8 (RFC 6386), as browsers record WebM.
+    Vp8,
     /// MPEG-4 Part 2 Visual (ISO/IEC 14496-2), as old phones wrote it.
     Mpeg4Visual,
     /// Anything else, named by its four-character code (e.g. `apch` for
@@ -61,6 +63,7 @@ impl VideoCodec {
             Self::Hevc => "HEVC".into(),
             Self::Av1 => "AV1".into(),
             Self::Vp9 => "VP9".into(),
+            Self::Vp8 => "VP8".into(),
             Self::Mpeg4Visual => "MPEG-4 Visual".into(),
             Self::Other(fourcc) => match fourcc {
                 // Apple ProRes 422 Proxy, LT, standard, HQ, 4444, 4444 XQ.

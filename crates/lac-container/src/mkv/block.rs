@@ -21,6 +21,10 @@ use super::ebml::{read_signed_vint, read_size};
 pub struct Block {
     /// Track the block belongs to.
     pub track: u64,
+    /// Timestamp relative to the cluster's, in `TimestampScale` units.
+    pub timestamp: i16,
+    /// The flag byte; for a SimpleBlock, bit 7 marks a keyframe.
+    pub flags: u8,
     /// Frames as (offset, length) relative to the start of the body.
     pub frames: Vec<(usize, usize)>,
 }
@@ -31,11 +35,14 @@ pub fn parse_block(b: &[u8]) -> Result<Block, &'static str> {
     let track = track.ok_or("invalid track number")?;
     // Timestamp (2 bytes) and flags.
     let flags = *b.get(n + 2).ok_or("block too short")?;
+    let timestamp = i16::from_be_bytes([b[n], b[n + 1]]);
     let mut p = n + 3;
     let lacing = (flags >> 1) & 3;
     if lacing == 0 {
         return Ok(Block {
             track,
+            timestamp,
+            flags,
             frames: vec![(p, b.len() - p)],
         });
     }
@@ -91,7 +98,12 @@ pub fn parse_block(b: &[u8]) -> Result<Block, &'static str> {
             f
         })
         .collect();
-    Ok(Block { track, frames })
+    Ok(Block {
+        track,
+        timestamp,
+        flags,
+        frames,
+    })
 }
 
 #[cfg(test)]
@@ -116,6 +128,12 @@ mod tests {
     fn unlaced() {
         let b = [head(0x80), vec![1, 2, 3]].concat();
         assert_eq!(frames(&b), vec![vec![1, 2, 3]]);
+    }
+
+    #[test]
+    fn timestamp_and_flags() {
+        let blk = parse_block(&[0x82, 0xFF, 0xFE, 0x80, 9]).expect("block");
+        assert_eq!((blk.track, blk.timestamp, blk.flags), (2, -2, 0x80));
     }
 
     #[test]
