@@ -45,6 +45,8 @@ struct Expected {
     unclean: &'static [usize],
     /// Keyframes the file claims that are none.
     demoted: usize,
+    /// Sample rate of the sound.
+    audio_rate: u32,
 }
 
 /// Every 15th frame, as the fixtures were encoded.
@@ -58,6 +60,18 @@ const FIXTURES: &[Expected] = &[
         keyframes: GOP15,
         unclean: &[],
         demoted: 0,
+        audio_rate: 48_000,
+    },
+    // MPEG-4 Part 2 with AMR-NB sound (8 kHz, 160-sample packets), as
+    // older phones record.
+    Expected {
+        name: "video_mpeg4_amr.3gp",
+        codec: VideoCodec::Mpeg4Visual,
+        rotation: 0,
+        keyframes: GOP15,
+        unclean: &[],
+        demoted: 0,
+        audio_rate: 8_000,
     },
     // The same video with Opus sound (20 ms packets instead of AAC's
     // 1024 samples).
@@ -68,6 +82,7 @@ const FIXTURES: &[Expected] = &[
         keyframes: GOP15,
         unclean: &[],
         demoted: 0,
+        audio_rate: 48_000,
     },
     // x264's open GOP: only the first I-frame is an IDR picture; the
     // others (at 13, 30 and 43 in decode order) are marked as sync samples
@@ -79,6 +94,7 @@ const FIXTURES: &[Expected] = &[
         keyframes: &[0],
         unclean: &[],
         demoted: 3,
+        audio_rate: 48_000,
     },
     Expected {
         name: "video_h264_fragmented.mp4",
@@ -87,6 +103,7 @@ const FIXTURES: &[Expected] = &[
         keyframes: GOP15,
         unclean: &[],
         demoted: 0,
+        audio_rate: 48_000,
     },
     // x265's open GOP: CRA pictures at 15, 30 and 43; only the last one is
     // followed by RASL pictures (shown before it, referring to the GOP
@@ -98,6 +115,7 @@ const FIXTURES: &[Expected] = &[
         keyframes: &[0, 15, 30, 43],
         unclean: &[43],
         demoted: 0,
+        audio_rate: 48_000,
     },
     Expected {
         name: "video_av1.mp4",
@@ -106,6 +124,7 @@ const FIXTURES: &[Expected] = &[
         keyframes: GOP15,
         unclean: &[],
         demoted: 0,
+        audio_rate: 48_000,
     },
     Expected {
         name: "video_vp9.mp4",
@@ -114,6 +133,7 @@ const FIXTURES: &[Expected] = &[
         keyframes: GOP15,
         unclean: &[],
         demoted: 0,
+        audio_rate: 48_000,
     },
     // ProRes 422 Proxy: every frame is a keyframe, the file has no stss.
     Expected {
@@ -127,6 +147,7 @@ const FIXTURES: &[Expected] = &[
         ],
         unclean: &[],
         demoted: 0,
+        audio_rate: 48_000,
     },
     Expected {
         name: "video_mpeg4.3gp",
@@ -135,6 +156,7 @@ const FIXTURES: &[Expected] = &[
         keyframes: GOP15,
         unclean: &[],
         demoted: 0,
+        audio_rate: 48_000,
     },
 ];
 
@@ -186,7 +208,7 @@ fn video_tracks_are_read() {
         let warned = f.warnings().iter().any(|w| w.contains("open GOP"));
         assert_eq!(warned, x.demoted > 0, "{}: {:?}", x.name, f.warnings());
         // The audio is unaffected by the video next to it.
-        assert_eq!(f.index().info().sample_rate, 48_000, "{}", x.name);
+        assert_eq!(f.index().info().sample_rate, x.audio_rate, "{}", x.name);
     }
 }
 
@@ -301,6 +323,11 @@ fn mp4v_entries_name_their_object_type() {
 /// One 30 fps frame at 48 kHz, in audio samples.
 const FRAME: SamplePos = 1600;
 
+/// One 30 fps frame of fixture `x`, in audio samples.
+fn frame(x: &Expected) -> SamplePos {
+    SamplePos::from(x.audio_rate) / 30
+}
+
 /// Cuts `name` to `keep` (audio sample ranges) and returns the output.
 fn cut(name: &str, keep: &[Range<SamplePos>]) -> (Mp4File, Vec<lac_core::CutPlan>, Vec<u8>) {
     let data = fixture(name);
@@ -388,14 +415,22 @@ fn check_cut(name: &str, keep: &[Range<SamplePos>]) {
         assert_eq!(s.sync, dst.sync, "{name}: keyframe flag of frame {k}");
     }
 
-    // 5. Audio and video end together (in seconds, within half a packet
-    // of 1024 samples at 48 kHz); a delayed video counts from 0.
-    let audio_s = o.index().total_samples() as f64 / 48_000.0;
+    // 5. Audio and video end together (in seconds, within half the
+    // longest audio packet); a delayed video counts from 0.
+    let rate = f64::from(f.index().info().sample_rate);
+    let packet = f
+        .index()
+        .packets()
+        .iter()
+        .map(|p| p.n_samples + p.hidden_before + p.hidden_after)
+        .max()
+        .unwrap_or(0);
+    let audio_s = o.index().total_samples() as f64 / rate;
     let shown = ov.shown();
     let video_s =
         (ov.delay() + shown.end - shown.start) as f64 / f64::from(ov.index().info().timescale);
     assert!(
-        (audio_s - video_s).abs() <= 512.0 / 48_000.0 + 1e-3,
+        (audio_s - video_s).abs() <= f64::from(packet) / 2.0 / rate + 1e-3,
         "{name}: audio {audio_s} s, video {video_s} s"
     );
 
@@ -430,7 +465,8 @@ fn check_cut(name: &str, keep: &[Range<SamplePos>]) {
 #[test]
 fn trimmed_videos_show_exactly_the_kept_frames() {
     for x in FIXTURES {
-        check_cut(x.name, std::slice::from_ref(&(9 * FRAME..51 * FRAME)));
+        let f = frame(x);
+        check_cut(x.name, std::slice::from_ref(&(9 * f..51 * f)));
     }
 }
 
@@ -440,15 +476,9 @@ fn trimmed_videos_show_exactly_the_kept_frames() {
 #[test]
 fn joins_start_at_keyframes() {
     for x in FIXTURES {
-        check_cut(x.name, &[0..20 * FRAME, 36 * FRAME..60 * FRAME]);
-        check_cut(
-            x.name,
-            &[
-                3 * FRAME..10 * FRAME,
-                17 * FRAME..40 * FRAME,
-                47 * FRAME..58 * FRAME,
-            ],
-        );
+        let f = frame(x);
+        check_cut(x.name, &[0..20 * f, 36 * f..60 * f]);
+        check_cut(x.name, &[3 * f..10 * f, 17 * f..40 * f, 47 * f..58 * f]);
     }
 }
 

@@ -407,6 +407,8 @@ fn codec_id(section: &DecodeSection) -> Result<(Id, i32), FfmpegError> {
         Codec::Aac => (Id::AAC, 0),
         Codec::Alac => (Id::ALAC, 0),
         Codec::Ac3 => (Id::AC3, 0),
+        Codec::AmrNb => (Id::AMR_NB, 0),
+        Codec::AmrWb => (Id::AMR_WB, 0),
         Codec::Pcm {
             encoding,
             block_align,

@@ -9,7 +9,7 @@
 //!
 //! Supported so far: [`wav`], [`aiff`], [`flac`], [`ogg`] (Vorbis, Opus, Speex),
 //! [`mp3`], [`mkv`] (Matroska/WebM with Opus), [`mp4`] (MP4/M4A with
-//! AAC, ALAC or Opus), [`adts`] (raw AAC) and [`ac3`] (raw AC-3). [`open`] detects the format
+//! AAC, ALAC, Opus or AMR), [`adts`] (raw AAC) and [`ac3`] (raw AC-3). [`open`] detects the format
 //! from the file's content and returns it behind the common [`Container`]
 //! interface. Each format also reads and writes its tags; the shared tag
 //! formats live in [`tags`].
@@ -446,11 +446,14 @@ impl Container for mp4::Mp4File {
         mp4::Mp4File::plan(self, ranges)
     }
     fn cut_notes(&self, r: &mut dyn ReadSeek) -> Result<Vec<String>> {
-        Ok(if self.uses_noise_substitution(r)? {
-            vec![mp4::aac::NOISE_NOTE.to_owned()]
-        } else {
-            Vec::new()
-        })
+        let mut notes = Vec::new();
+        if self.uses_noise_substitution(r)? {
+            notes.push(mp4::aac::NOISE_NOTE.to_owned());
+        }
+        if matches!(self.codec(), mp4::Mp4Codec::Amr { wideband: true }) {
+            notes.push(mp4::AMR_WB_NOTE.to_owned());
+        }
+        Ok(notes)
     }
     fn write_cut(
         &self,

@@ -52,6 +52,12 @@ pub enum Codec {
     Alac,
     /// AC-3 (ATSC A/52); no extradata. Packets are whole sync frames.
     Ac3,
+    /// AMR narrowband (3GPP TS 26.071), 8 kHz mono; no extradata. Each
+    /// packet holds one or more frames in the storage format (RFC 4867 5.3:
+    /// a header byte, then the speech bits).
+    AmrNb,
+    /// AMR wideband (3GPP TS 26.171), 16 kHz mono; as [`Codec::AmrNb`].
+    AmrWb,
     /// MPEG-1/2/2.5 audio layer III; no extradata. Packets are whole
     /// frames, fed in file order so that the decoder can follow the bit
     /// reservoir itself.

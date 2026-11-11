@@ -1,5 +1,7 @@
 #!/bin/sh
-# Regenerates the committed test fixtures. Requires python3, flac and ffmpeg.
+# Regenerates the committed test fixtures. Requires python3, flac and ffmpeg,
+# and for AMR the libraries libopencore-amrnb and libvo-amrwbenc (see
+# amr_encode.py).
 # Run from anywhere; output goes next to this script.
 set -eu
 cd "$(dirname "$0")"
@@ -145,6 +147,16 @@ $og -i "$tmp/lb.wav" -fflags +bitexact -c:a alac -movflags frag_keyframe \
 # stereo speech, as ffmpeg writes it. A video with Opus follows below.
 $og -i "$tmp/o.wav" -fflags +bitexact -c:a libopus -b:a 64k mp4_opus_stereo.mp4
 
+# AMR in 3GP, as phones record voice notes: AMR-NB at 12.2 kbit/s and
+# AMR-WB at 23.85 kbit/s, speech, one 20 ms frame per sample, remuxed by
+# ffmpeg from the storage format amr_encode.py writes.
+$synth "$tmp/an.wav" 8000 1 16 1.5 0 speech
+python3 amr_encode.py "$tmp/an.wav" "$tmp/an.amr" nb
+$og -i "$tmp/an.amr" -c copy -fflags +bitexact mp4_amrnb_8k.3gp
+$synth "$tmp/aw.wav" 16000 1 16 1.5 0 speech
+python3 amr_encode.py "$tmp/aw.wav" "$tmp/aw.amr" wb
+$og -i "$tmp/aw.amr" -c copy -fflags +bitexact mp4_amrwb_16k.3gp
+
 # Raw AC-3, encoded by ffmpeg's native (fixed-point) AC-3 encoder: stereo
 # 2/0 at 44.1 kHz (frame sizes alternate between 834 and 836 bytes),
 # 5.1 (3/2 + LFE) at 48 kHz and mono at 32 kHz.
@@ -205,3 +217,8 @@ $og $vs -i "$tmp/va.wav" $vo -c:v mpeg4 -g 15 -bf 0 video_mpeg4.3gp
 $og $vs -i "$tmp/va.wav" -fflags +bitexact -c:a libopus -b:a 64k \
     -c:v libx264 -bf 0 -g 15 -keyint_min 15 -sc_threshold 0 -pix_fmt yuv420p \
     video_h264_opus.mp4
+# MPEG-4 Part 2 with AMR-NB sound, as older phones record.
+$synth "$tmp/vn.wav" 8000 1 16 2.0 0 speech
+python3 amr_encode.py "$tmp/vn.wav" "$tmp/vn.amr" nb
+$og $vs -i "$tmp/vn.amr" -fflags +bitexact -c:a copy -c:v mpeg4 -g 15 -bf 0 \
+    video_mpeg4_amr.3gp
