@@ -1,4 +1,4 @@
-//! The audio file types the program opens.
+//! The audio and video file types the program opens.
 //!
 //! One list for the GUI's open dialog and for the desktop integration of
 //! the packages: the Linux desktop files' `MimeType=`, the macOS
@@ -125,14 +125,14 @@ pub const FILE_TYPES: &[FileType] = &[
         uti: "org.matroska.mka",
     },
     FileType {
-        name: n_("WebM audio"),
+        name: n_("WebM audio or video"),
         extensions: &["webm"],
         mime_types: &["audio/webm"],
         by_extension: false,
         uti: "org.webmproject.webm",
     },
     FileType {
-        name: n_("Matroska video (audio track only)"),
+        name: n_("Matroska video"),
         extensions: &["mkv"],
         // video/x-matroska would offer the program for every film.
         mime_types: &[],
@@ -140,12 +140,30 @@ pub const FILE_TYPES: &[FileType] = &[
         uti: "org.matroska.mkv",
     },
     FileType {
-        name: n_("MP4 video (audio track only)"),
+        name: n_("MP4 video"),
         extensions: &["mp4"],
         // video/mp4 would offer the program for every film.
         mime_types: &[],
         by_extension: false,
         uti: "public.mpeg-4",
+    },
+    FileType {
+        name: n_("QuickTime video"),
+        extensions: &["mov"],
+        // As for MP4: not offered for every film.
+        mime_types: &[],
+        by_extension: false,
+        // System-defined.
+        uti: "com.apple.quicktime-movie",
+    },
+    FileType {
+        name: n_("3GPP video or voice recording"),
+        extensions: &["3gp", "3g2"],
+        // video/3gpp would offer the program for every phone video.
+        mime_types: &[],
+        by_extension: false,
+        // System-defined; 3GPP2 (.3g2) files are opened under it too.
+        uti: "public.3gpp",
     },
 ];
 
@@ -184,7 +202,7 @@ pub fn dialog_wildcard() -> String {
     let project = format!("*.{}", crate::project::EXTENSION);
     let mut w = format!(
         "{}|{};{project}",
-        tr("Audio files and projects"),
+        tr("Audio and video files and projects"),
         all.join(";")
     );
     for t in FILE_TYPES {
@@ -229,14 +247,16 @@ mod tests {
     fn video_containers_are_not_associated_by_extension() {
         let e = associated_extensions();
         assert!(e.contains(&"mp3") && e.contains(&"opus") && e.contains(&"mka"));
-        assert!(!e.contains(&"webm") && !e.contains(&"mkv") && !e.contains(&"mp4"));
+        for video in ["webm", "mkv", "mp4", "mov", "3gp", "3g2"] {
+            assert!(!e.contains(&video), "{video}");
+        }
     }
 
     #[test]
     fn wildcard_lists_everything_first() {
         let w = dialog_wildcard();
         assert!(w.starts_with(
-            "Audio files and projects|*.mp3;*.m4a;*.m4b;*.ac3;*.aac;*.ogg;*.oga;*.opus;*.spx;*.flac;*.wav;*.aiff;*.aif;*.aifc;*.mka;*.webm;*.mkv;*.mp4;*.lacproj|MP3 audio|*.mp3|"
+            "Audio and video files and projects|*.mp3;*.m4a;*.m4b;*.ac3;*.aac;*.ogg;*.oga;*.opus;*.spx;*.flac;*.wav;*.aiff;*.aif;*.aifc;*.mka;*.webm;*.mkv;*.mp4;*.mov;*.3gp;*.3g2;*.lacproj|MP3 audio|*.mp3|"
         ));
         assert!(w.ends_with("|losslessaudiocut projects|*.lacproj|All files|*"));
         // Description and pattern alternate, so the count is even.
