@@ -1,6 +1,6 @@
 //! The main window's dockable panes, arranged by wxWidgets' AUI manager:
 //! the waveform in the centre, the toolbar, the minimap, the position bar,
-//! the track list and the log around it.
+//! the track list, the log and the video preview around it.
 //! The user can drag panes to another edge, float them, resize and close
 //! them; the View menu shows and hides each one.
 //!
@@ -55,6 +55,7 @@ pub fn menu_label(pane: Pane) -> String {
         Pane::Log => tr_menu("&Log"),
         // The shortcut the track list had before it was a pane.
         Pane::TrackList => tr_menu("&Track list\tCtrl+L"),
+        Pane::Video => tr_menu("&Video"),
     }
 }
 
@@ -66,6 +67,7 @@ pub fn menu_help(pane: Pane) -> String {
         Pane::Minimap => n_("Show the whole recording, with the part in the window framed"),
         Pane::Log => n_("Show every message of the status bar, with the time"),
         Pane::TrackList => n_("Show the tracks and their tags"),
+        Pane::Video => n_("Show the video's picture at the cursor or while playing"),
     })
     .into_owned()
 }
@@ -96,20 +98,39 @@ pub struct Panes {
     fitted: [(Pane, (i32, i32)); 2],
 }
 
+/// The windows the panes hold.
+pub struct Contents<'a> {
+    /// The waveform, in the centre.
+    pub waveform: &'a Panel,
+    /// The toolbar, at the top.
+    pub toolbar: &'a Panel,
+    /// The minimap, under the toolbar.
+    pub minimap: &'a Panel,
+    /// The selection fields and play clock, at the bottom.
+    pub positions: &'a Panel,
+    /// The track list, above the positions.
+    pub track_list: &'a Grid,
+    /// The log, right of the track list.
+    pub log: &'a TextCtrl,
+    /// The video preview, right of the waveform.
+    pub video: &'a Panel,
+}
+
 impl Panes {
-    /// Puts `waveform` in the centre of `frame`, docks `toolbar` and
-    /// under it `minimap` at the top, and `track_list` and under it
-    /// `positions` at the bottom; `log` goes right of the track list.
-    /// Call [`Panes::restore`] next.
-    pub fn new(
-        frame: &Frame,
-        waveform: &Panel,
-        toolbar: &Panel,
-        minimap: &Panel,
-        positions: &Panel,
-        track_list: &Grid,
-        log: &TextCtrl,
-    ) -> Panes {
+    /// Puts the waveform in the centre of `frame`, docks the toolbar and
+    /// under it the minimap at the top, and the track list and under it
+    /// the positions at the bottom; the log goes right of the track list,
+    /// the video right of the waveform. Call [`Panes::restore`] next.
+    pub fn new(frame: &Frame, c: &Contents) -> Panes {
+        let Contents {
+            waveform,
+            toolbar,
+            minimap,
+            positions,
+            track_list,
+            log,
+            video,
+        } = *c;
         let aui = AuiManager::builder(frame).build();
         aui.add_pane_with_info(
             waveform,
@@ -170,6 +191,17 @@ impl Panes {
                 .position(1)
                 .best_size(400, 160)
                 .min_size(150, 60)
+                .close_button(true)
+                .maximize_button(true),
+        );
+        aui.add_pane_with_info(
+            video,
+            PaneInfo::new()
+                .with_name(Pane::Video.name())
+                .with_caption(&tr(Pane::Video.caption()))
+                .right()
+                .best_size(360, 240)
+                .min_size(120, 80)
                 .close_button(true)
                 .maximize_button(true),
         );
@@ -235,6 +267,15 @@ impl Panes {
     /// Whether `pane` is shown.
     pub fn is_shown(&self, pane: Pane) -> bool {
         self.aui.is_pane_shown(pane.name())
+    }
+
+    /// Shows `pane` (if hidden).
+    pub fn show(&self, pane: Pane) {
+        if !self.is_shown(pane) {
+            self.aui.set_pane_shown(pane.name(), true);
+            self.aui.update();
+            self.sync_menu();
+        }
     }
 
     /// Shows `pane` if hidden, else hides it.

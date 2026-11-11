@@ -436,6 +436,12 @@ impl Mp4File {
         Ok(false)
     }
 
+    /// The video media time (ticks of the video timescale) that plays
+    /// with the index's audio sample 0, for a file with a video track.
+    pub fn video_timeline_offset(&self) -> Option<MediaTime> {
+        self.video.as_ref().map(|v| self.video_offset(v))
+    }
+
     /// The video media time that plays with the index's audio sample 0.
     fn video_offset(&self, v: &video::Mp4Video) -> MediaTime {
         let lead = rescale(

@@ -145,6 +145,33 @@ impl Source {
         self.container.video()
     }
 
+    /// How audio positions map to the video's times, if the source has
+    /// a video track.
+    pub fn video_clock(&self) -> Option<crate::video::VideoClock> {
+        let v = self.container.video()?;
+        Some(crate::video::VideoClock::new(
+            self.container.index().info().sample_rate,
+            v.info().timescale,
+            self.container.video_offset(),
+        ))
+    }
+
+    /// A decoder for the pictures of the video track, if there is one;
+    /// it reads through [`Source::video_picture`].
+    pub fn video_decoder(&self) -> Option<lac_decode::VideoDecoder> {
+        lac_decode::VideoDecoder::new(self.container.as_ref())
+    }
+
+    /// The picture `decoder` shows at video time `time`, see
+    /// [`lac_decode::VideoDecoder::picture_at`].
+    pub fn video_picture(
+        &mut self,
+        decoder: &mut lac_decode::VideoDecoder,
+        time: lac_core::MediaTime,
+    ) -> Result<lac_decode::Picture, lac_decode::DecodeError> {
+        decoder.picture_at(&mut self.reader, time)
+    }
+
     /// Problems found while parsing that did not prevent opening the file.
     pub fn warnings(&self) -> &[String] {
         self.container.warnings()

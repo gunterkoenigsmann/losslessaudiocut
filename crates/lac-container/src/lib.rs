@@ -32,7 +32,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
 use lac_core::{
-    CutCapabilities, CutPlan, PacketIndex, PlanError, SamplePos, Tags, VideoIndex, plan_cuts,
+    CutCapabilities, CutPlan, MediaTime, PacketIndex, PlanError, SamplePos, Tags, VideoIndex,
+    plan_cuts,
 };
 
 pub use decode::{Codec, DecodeSection};
@@ -90,6 +91,12 @@ pub trait Container: Send {
     /// frames describe themselves.
     fn video_codec_config(&self) -> &[u8] {
         &[]
+    }
+    /// The video media time (ticks of the video timescale) shown with
+    /// audio sample 0: video time = audio time in ticks + this offset.
+    /// 0 without video.
+    fn video_offset(&self) -> MediaTime {
+        0
     }
     /// Plans the joined output of the kept `ranges` (sorted, not
     /// overlapping) for [`Container::write_cut`]. Audio-only formats plan
@@ -431,6 +438,9 @@ impl Container for mp4::Mp4File {
     }
     fn video_codec_config(&self) -> &[u8] {
         mp4::Mp4File::video(self).map_or(&[], mp4::video::Mp4Video::codec_config)
+    }
+    fn video_offset(&self) -> MediaTime {
+        self.video_timeline_offset().unwrap_or(0)
     }
     fn plan(&self, ranges: &[Range<SamplePos>]) -> std::result::Result<Vec<CutPlan>, PlanError> {
         mp4::Mp4File::plan(self, ranges)

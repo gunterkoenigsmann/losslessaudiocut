@@ -818,6 +818,14 @@ crate still needs libavcodec only, not libswscale. HDR pictures are not
 tone-mapped. Tests compare every picture of each codec fixture, also by
 random access, with what the ffmpeg tool decodes.
 
+GUI *(implemented: preview pane)*: `lac_app::video` maps audio
+positions to video times (`VideoClock`, from `Container::video_offset`),
+steps from picture to picture, and fits a picture into the pane (rotated
+by the file's display matrix); a `VideoLoader` thread decodes the picture
+for the latest position, so the GUI never waits for the decoder. The
+*Video* pane shows it, at the cursor or the playhead, and is shown when a
+file with video is opened. `,` and `.` step by one picture (Play menu).
+
 The waveform, playback and analysis stay audio-only; the GUI adds a video
 preview pane driven by the audio clock and a keyframe thumbnail lane. Video
 is decoded with libavcodec from our own packet index, like audio.
