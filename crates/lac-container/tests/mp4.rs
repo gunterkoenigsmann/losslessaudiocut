@@ -1,9 +1,10 @@
-//! Tests of the MP4 demuxer and muxer with AAC, ALAC and Opus.
+//! Tests of the MP4 demuxer and muxer with AAC, ALAC, Opus and AMR.
 //!
 //! Fixtures come from `tests/fixtures/generate.sh` (ffmpeg's AAC-LC
 //! encoder: moov after and before mdat, without an edit list, with a
 //! video track, and fragmented; ffmpeg's ALAC encoder at 16 and 24 bit,
-//! and fragmented; libopus).
+//! and fragmented; libopus; AMR-NB and AMR-WB from the 3GPP reference
+//! encoders in 3GP files).
 //!
 //! Oracles:
 //! 1. Samples are copied verbatim: re-opening the output with our demuxer
@@ -18,7 +19,9 @@
 //!    sample-exact at joins too. Opus decoders carry state much further
 //!    and need not become bit-exact again: as for Opus in Matroska (issue
 //!    #54), after its window each sample must stay within
-//!    [`OPUS_JOIN_TOLERANCE`].
+//!    [`JOIN_TOLERANCE`]; AMR's predictors likewise (as for Speex, issue
+//!    #17). AMR-WB fills its top band with generated noise, so it is
+//!    compared like a PNS stream ([`amr_wb_differs_only_in_its_noise_band`]).
 //! 3. ffmpeg honours the edit list's start. Whether it honours its end
 //!    depends on the version: ffmpeg 6.1 decodes the last frame whole, so
 //!    its output is our planned length plus the hidden tail of the last
@@ -51,7 +54,7 @@ use proptest::prelude::*;
 /// Fixtures: (name, sample rate, channels, length in samples). With an
 /// edit list the length is exactly the encoder's input; without one it
 /// includes the 1024 priming samples.
-const FIXTURES: [(&str, u32, u16, u64); 10] = [
+const FIXTURES: [(&str, u32, u16, u64); 12] = [
     ("mp4_aac_stereo_44k.m4a", 44_100, 2, 66_150),
     ("mp4_aac_mono_48k.m4a", 48_000, 1, 48_000),
     ("mp4_aac_noedit_22k.m4a", 22_050, 2, 22_050 + 1024),
@@ -62,6 +65,8 @@ const FIXTURES: [(&str, u32, u16, u64); 10] = [
     ("mp4_aac_fragmented_44k.m4a", 44_100, 2, 66_150 + 1024),
     ("mp4_alac_fragmented_48k.m4a", 48_000, 1, 24_000),
     ("mp4_opus_stereo.mp4", 48_000, 2, 72_000),
+    ("mp4_amrnb_8k.3gp", 8_000, 1, 12_000),
+    ("mp4_amrwb_16k.3gp", 16_000, 1, 24_000),
 ];
 
 /// The ALAC fixtures.
@@ -80,6 +85,8 @@ fn max_frame(f: &Mp4File) -> u64 {
         Mp4Codec::Aac { .. } => 1024,
         Mp4Codec::Alac { .. } => 4096,
         Mp4Codec::Opus { .. } => 5760,
+        // One frame per sample in the fixtures.
+        Mp4Codec::Amr { wideband } => 160 << u8::from(*wideband),
     }
 }
 
@@ -88,20 +95,29 @@ fn max_frame(f: &Mp4File) -> u64 {
 /// with the second half of the frame before the join (ISO/IEC 14496-3
 /// 4.6.11); from the next frame on, the decoder state holds only the
 /// current frame, so the output is bit-exact again. ALAC: none, every
-/// frame decodes on its own. Opus: 400 ms, as in `tests/mkv.rs`, after
-/// which the output must stay within [`OPUS_JOIN_TOLERANCE`].
+/// frame decodes on its own. Opus and AMR: 400 ms, as in `tests/mkv.rs`
+/// and for Speex, after which the output must stay within
+/// [`JOIN_TOLERANCE`].
 fn join_window(f: &Mp4File) -> usize {
     match f.codec() {
         Mp4Codec::Aac { .. } => 1024,
         Mp4Codec::Alac { .. } => 0,
-        Mp4Codec::Opus { .. } => 19_200,
+        Mp4Codec::Opus { .. } | Mp4Codec::Amr { .. } => {
+            f.index().info().sample_rate as usize * 2 / 5
+        }
     }
 }
 
-/// Largest difference allowed after an Opus join's window: one 16-bit LSB
-/// (2^-15), as for Opus in Matroska (issue #54) and Speex (issue #17).
+/// Largest difference allowed after the join window of a codec whose
+/// decoder never provably becomes bit-exact again (Opus, AMR): one 16-bit
+/// LSB (2^-15), as for Opus in Matroska (issue #54) and Speex (issue #17).
 /// Wrong packets or offsets differ by orders of magnitude more.
-const OPUS_JOIN_TOLERANCE: f32 = 1.0 / 32768.0;
+const JOIN_TOLERANCE: f32 = 1.0 / 32768.0;
+
+/// Whether `f` is AMR-WB, whose top band is noise (see the module docs).
+fn is_amr_wb(f: &Mp4File) -> bool {
+    matches!(f.codec(), Mp4Codec::Amr { wideband: true })
+}
 
 /// Whether two decoded f32le frames agree: bit for bit when `tolerance` is
 /// 0, otherwise each sample within `tolerance`.
@@ -188,7 +204,7 @@ fn assert_samples_copied(src: &[u8], out: &[u8], plans: &[CutPlan]) -> Mp4File {
     assert_eq!(o.index().info(), f.index().info());
     let alac_cfg = match f.codec() {
         Mp4Codec::Alac { cookie } => Some(alac::AlacConfig::parse(cookie).expect("config")),
-        Mp4Codec::Aac { .. } | Mp4Codec::Opus { .. } => None,
+        _ => None,
     };
     let got = payloads(&o, out, 0..o.index().packets().len());
     let mut k = 0;
@@ -268,13 +284,18 @@ fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPl
         s.len() / frame >= f.index().total_samples() as usize,
         "{name}: source length"
     );
+    if is_amr_wb(&f) {
+        // Its noise band differs after any cut: covered by
+        // `amr_wb_differs_only_in_its_noise_band`.
+        return;
+    }
 
     let mut out_pos = 0usize;
     let mut prev_end = 0u64;
     let mut window_end = 0usize;
-    // Opus: all parts share one decoder, so the state of a join carries
-    // into every later part, even contiguous ones.
-    let opus = matches!(f.codec(), Mp4Codec::Opus { .. });
+    // Opus and AMR: all parts share one decoder, so the state of a join
+    // carries into every later part, even contiguous ones.
+    let converging = matches!(f.codec(), Mp4Codec::Opus { .. } | Mp4Codec::Amr { .. });
     let mut after_join = false;
     for p in plans {
         let r = p.actual.start as usize..p.actual.end as usize;
@@ -283,8 +304,8 @@ fn assert_decodes_like_source(name: &str, src: &[u8], out: &[u8], plans: &[CutPl
             window_end = r.start + join_window(&f);
             after_join = true;
         }
-        let tolerance = if opus && after_join {
-            OPUS_JOIN_TOLERANCE
+        let tolerance = if converging && after_join {
+            JOIN_TOLERANCE
         } else {
             0.0
         };
@@ -606,6 +627,75 @@ fn noise_substitution_differs_only_in_noise() {
     );
     // The fixture's noise bands carry about 1 % of the energy.
     assert!(diff < signal / 30.0, "{diff} vs {signal}");
+}
+
+/// AMR-WB synthesises its top band (6.4 to 7 kHz) from random noise
+/// (3GPP TS 26.190 6.3) with a generator that decoders run from the
+/// stream's start, so after a cut that band holds other noise of the same
+/// level, at the file's start as after a join; oracles 1 and 3 hold. Below
+/// 5 kHz a cut decodes like the source (the difference has a millionth of
+/// the signal's energy there, rounding and the band filters' leakage), and
+/// above 6.4 kHz the noise keeps its loudness. The export report says so.
+#[test]
+fn amr_wb_differs_only_in_its_noise_band() {
+    let name = "mp4_amrwb_16k.3gp";
+    let src = fixture(name);
+    let f = open(&src);
+    let len = f.index().total_samples();
+    let r = len / 4..len * 3 / 4;
+    let p = plans(&f, std::slice::from_ref(&r));
+    let out = write(&src, &f, &p);
+    assert_samples_copied(&src, &out, &p);
+    assert_decodes_like_source(name, &src, &out, &p);
+    let c = lac_container::open(&mut Cursor::new(&src)).expect("opens");
+    let notes = c.cut_notes(&mut Cursor::new(&src)).expect("reads");
+    assert_eq!(notes, vec![lac_container::mp4::AMR_WB_NOTE.to_owned()]);
+    let (Some(s), Some(d)) = (
+        ffmpeg_decode(&temp_file("src-wb.3gp", &src), "f32le"),
+        ffmpeg_decode(&temp_file("out-wb.3gp", &out), "f32le"),
+    ) else {
+        return;
+    };
+    let f32s = |b: &[u8]| -> Vec<f64> {
+        b.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&x| f64::from(f32::from_le_bytes(x)))
+            .collect()
+    };
+    let n = (r.end - r.start) as usize;
+    let want = &f32s(&s)[r.start as usize..r.end as usize];
+    let got = &f32s(&d)[..n];
+    let diff: Vec<f64> = want.iter().zip(got).map(|(a, b)| a - b).collect();
+    // Energy below and above a frequency, from a plain DFT (n is 12000:
+    // a few hundred million operations, fine for a test).
+    let bands = |x: &[f64]| -> (f64, f64) {
+        let (mut low, mut high) = (0.0, 0.0);
+        for k in 0..n / 2 {
+            let (mut re, mut im) = (0.0, 0.0);
+            let w = -2.0 * std::f64::consts::PI * k as f64 / n as f64;
+            for (t, v) in x.iter().enumerate() {
+                let a = w * t as f64;
+                re += v * a.cos();
+                im += v * a.sin();
+            }
+            let hz = k as f64 * 16_000.0 / n as f64;
+            if hz < 5_000.0 {
+                low += re * re + im * im;
+            } else if hz >= 6_400.0 {
+                high += re * re + im * im;
+            }
+        }
+        (low, high)
+    };
+    let (signal_low, signal_high) = bands(want);
+    let (diff_low, _) = bands(&diff);
+    let (_, got_high) = bands(got);
+    assert!(diff_low < signal_low * 1e-6, "{diff_low} vs {signal_low}");
+    assert!(
+        got_high > signal_high / 2.0 && got_high < signal_high * 2.0,
+        "noise band {got_high} vs {signal_high}"
+    );
 }
 
 /// A few samples from the middle of one AAC frame: our demuxer reads back

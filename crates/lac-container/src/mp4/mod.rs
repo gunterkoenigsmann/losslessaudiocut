@@ -1,9 +1,11 @@
 //! MP4 / M4A files (ISO/IEC 14496-12, the ISO base media file format, and
-//! 14496-14, the MP4 file format) with AAC, ALAC or Opus audio.
+//! 14496-14, the MP4 file format) with AAC, ALAC, Opus or AMR audio.
 //!
 //! Phones, iTunes and most podcast tools record and distribute AAC this
 //! way (`.m4a`, `.m4b`, `.mp4`); Apple Lossless (ALAC) uses the same
-//! container, and Android phones record videos with Opus sound in it. QuickTime `.mov` files share the box structure and open too.
+//! container, and Android phones record videos with Opus sound in it.
+//! 3GPP files (`.3gp`, 3GPP TS 26.244) are MP4 files too; phones record
+//! voice notes, and older phones videos, with AMR sound in them. QuickTime `.mov` files share the box structure and open too.
 //!
 //! ## Structure
 //!
@@ -93,6 +95,11 @@
 //! decoder converges within a few hundred milliseconds (as for Opus in
 //! Matroska).
 //!
+//! AMR (narrowband and wideband) is cut like Opus, with
+//! [`AMR_PREROLL_MS`] of pre-roll. AMR-WB generates its top band from
+//! random noise, so after any cut that band holds other noise of the same
+//! level ([`AMR_WB_NOTE`]).
+//!
 //! ALAC is lossless and its frames are independent, so every frame that a
 //! cut point cuts (at the file's ends or at a join, or by the source's own
 //! edit list) is decoded and written back as an uncompressed ALAC frame
@@ -140,6 +147,17 @@ pub const OPUS_PREROLL: u64 = 3840;
 /// The sample rate of every Opus stream's decoder output (RFC 7845 4).
 const OPUS_RATE: u32 = 48_000;
 
+/// AMR pre-roll in milliseconds. AMR's predictors (LSF, pitch, gains)
+/// carry state from frame to frame; on the fixtures AMR-NB decodes bit for
+/// bit again after 200 ms of pre-roll.
+pub const AMR_PREROLL_MS: u64 = 400;
+
+/// What the export report says about every cut of an AMR-WB stream.
+pub const AMR_WB_NOTE: &str = "this AMR-WB stream's highest band (6.4 to \
+     7 kHz) is noise that decoders generate; after a cut, players generate \
+     different noise of the same loudness there, everything else is \
+     unchanged";
+
 /// The codec of the audio track.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mp4Codec {
@@ -164,6 +182,13 @@ pub enum Mp4Codec {
         /// The `OpusHead`.
         head: Vec<u8>,
     },
+    /// AMR (3GPP TS 26.244 6.5: `samr` and `sawb` sample entries), as
+    /// phones record voice notes and older phones videos in 3GP files.
+    Amr {
+        /// AMR-WB (16 kHz, 320 samples per frame) rather than AMR-NB
+        /// (8 kHz, 160 samples per frame).
+        wideband: bool,
+    },
 }
 
 impl Mp4Codec {
@@ -173,6 +198,8 @@ impl Mp4Codec {
             Self::Aac { .. } => "AAC",
             Self::Alac { .. } => "ALAC",
             Self::Opus { .. } => "Opus",
+            Self::Amr { wideband: false } => "AMR-NB",
+            Self::Amr { wideband: true } => "AMR-WB",
         }
     }
 }
@@ -507,13 +534,15 @@ impl Mp4File {
     /// uncompressed frame of the kept samples (see [`alac`]).
     pub fn capabilities(&self) -> CutCapabilities {
         match self.codec {
-            Mp4Codec::Aac { .. } | Mp4Codec::Opus { .. } => CutCapabilities {
-                preroll_packets: 0,
-                can_trim_start: true,
-                can_trim_end: true,
-                lossless_reencode: false,
-                trims_at_file_ends_only: true,
-            },
+            Mp4Codec::Aac { .. } | Mp4Codec::Opus { .. } | Mp4Codec::Amr { .. } => {
+                CutCapabilities {
+                    preroll_packets: 0,
+                    can_trim_start: true,
+                    can_trim_end: true,
+                    lossless_reencode: false,
+                    trims_at_file_ends_only: true,
+                }
+            }
             Mp4Codec::Alac { .. } => CutCapabilities {
                 lossless_reencode: true,
                 ..CutCapabilities::default()
@@ -534,6 +563,8 @@ impl Mp4File {
             Mp4Codec::Aac { asc } => (crate::Codec::Aac, asc.clone()),
             Mp4Codec::Alac { cookie } => (crate::Codec::Alac, cookie.clone()),
             Mp4Codec::Opus { head } => (crate::Codec::Opus, head.clone()),
+            Mp4Codec::Amr { wideband: false } => (crate::Codec::AmrNb, Vec::new()),
+            Mp4Codec::Amr { wideband: true } => (crate::Codec::AmrWb, Vec::new()),
         };
         Ok(vec![crate::DecodeSection {
             codec,
@@ -639,14 +670,20 @@ impl Mp4File {
 
     /// The first raw packet to write for a cut whose first kept sample is
     /// raw packet `first`: [`AAC_PREROLL_FRAMES`] earlier for AAC, as many
-    /// as hold [`OPUS_PREROLL`] samples for Opus (fewer at the stream's
-    /// start, where the decoder starts clean anyway).
+    /// as hold [`OPUS_PREROLL`] samples for Opus and [`AMR_PREROLL_MS`] for
+    /// AMR (fewer at the stream's start, where the decoder starts clean
+    /// anyway).
     fn preroll_start(&self, first: usize) -> usize {
+        let preroll = match self.codec {
+            Mp4Codec::Opus { .. } => OPUS_PREROLL,
+            Mp4Codec::Amr { .. } => u64::from(self.rate) * AMR_PREROLL_MS / 1000,
+            _ => 0,
+        };
         match self.codec {
-            Mp4Codec::Opus { .. } => {
+            Mp4Codec::Opus { .. } | Mp4Codec::Amr { .. } => {
                 let mut start = first;
                 let mut held = 0u64;
-                while start > 0 && held < OPUS_PREROLL {
+                while start > 0 && held < preroll {
                     start -= 1;
                     held += u64::from(self.raw[start].out);
                 }
@@ -988,7 +1025,8 @@ impl Mp4File {
     fn roll_distance(&self) -> Option<i16> {
         match self.codec {
             Mp4Codec::Aac { .. } => Some(-1),
-            Mp4Codec::Alac { .. } => None,
+            // ffmpeg writes none for AMR, and players start AMR anywhere.
+            Mp4Codec::Alac { .. } | Mp4Codec::Amr { .. } => None,
             Mp4Codec::Opus { .. } => {
                 let outs: Vec<u32> = self.raw.iter().map(|p| p.out).collect();
                 let frame = u64::from(most_common(&outs).unwrap_or(960).max(1));
@@ -1096,11 +1134,18 @@ fn parse_track<R: Read + Seek + ?Sized>(
     // The body follows the box header.
     let preskip_at = preskip_at.map(|at| at + stsd_box.len() - stsd.body.len());
     let opus = matches!(codec, Mp4Codec::Opus { .. });
-    if opus && timescale != OPUS_RATE {
-        // Sample durations would have to be rescaled to the decoder's
-        // 48 kHz; the mapping recommends 48000 and recorders write it.
+    // Sample durations would have to be rescaled to the decoder's rate
+    // otherwise; the mappings recommend it and recorders write it.
+    let (needed, amr_frame) = match codec {
+        Mp4Codec::Opus { .. } => (Some(OPUS_RATE), None),
+        Mp4Codec::Amr { wideband: false } => (Some(8_000), Some(160)),
+        Mp4Codec::Amr { wideband: true } => (Some(16_000), Some(320)),
+        _ => (None, None),
+    };
+    if let Some(rate) = needed.filter(|&r| r != timescale) {
         return Err(ContainerError::Unsupported(format!(
-            "Opus in MP4 with a timescale of {timescale} (only 48000 is supported)"
+            "{} in MP4 with a timescale of {timescale} (only {rate} is supported)",
+            codec.name()
         )));
     }
 
@@ -1118,7 +1163,7 @@ fn parse_track<R: Read + Seek + ?Sized>(
         // padding, and a muxer may lengthen the first one's to fill a gap
         // before it (ffmpeg's fragmented files without an edit list).
         Mp4Codec::Aac { .. } => most_common(&durations[..count]),
-        Mp4Codec::Alac { .. } | Mp4Codec::Opus { .. } => None,
+        Mp4Codec::Alac { .. } | Mp4Codec::Opus { .. } | Mp4Codec::Amr { .. } => None,
     };
     let mut raw = Vec::with_capacity(count);
     let mut start = 0u64;
@@ -1134,6 +1179,12 @@ fn parse_track<R: Read + Seek + ?Sized>(
             break;
         }
         let mut out = fixed_out.unwrap_or(durations[i]);
+        if let Some(frame) = amr_frame {
+            // A sample holds one or more whole frames (3GPP TS 26.244
+            // 6.7: `frames_per_sample`); a shortened duration (the last
+            // sample's, stating padding) still decodes whole frames.
+            out = out.div_ceil(frame) * frame;
+        }
         if opus && (i == 0 || i + 1 == count) {
             // An Opus packet's duration is in its TOC (RFC 6716 3.1). The
             // muxer shortens the last sample's `stts` duration by the
@@ -1654,8 +1705,12 @@ fn parse_stsd(b: &[u8]) -> Result<(Mp4Codec, u16, Option<usize>)> {
             let at = dops.body.as_ptr() as usize - b.as_ptr() as usize + 2;
             Ok((Mp4Codec::Opus { head }, channels, Some(at)))
         }
+        // AMR is always mono; 3GPP TS 26.244 6.5 asks for a channel count
+        // of 2 in the entry and for readers to ignore it.
+        b"samr" => Ok((Mp4Codec::Amr { wideband: false }, 1, None)),
+        b"sawb" => Ok((Mp4Codec::Amr { wideband: true }, 1, None)),
         other => Err(ContainerError::Unsupported(format!(
-            "MP4 audio codec {:?} (only AAC, ALAC and Opus are supported)",
+            "MP4 audio codec {:?} (only AAC, ALAC, Opus and AMR are supported)",
             String::from_utf8_lossy(other)
         ))),
     }

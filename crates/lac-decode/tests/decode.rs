@@ -211,7 +211,7 @@ fn mp4_decodes_like_ffmpeg_up_to_its_untrimmed_end() {
 }
 
 /// The MP4 fixtures without perceptual noise substitution.
-const MP4: [&str; 7] = [
+const MP4: [&str; 10] = [
     "mp4_aac_stereo_44k.m4a",
     "mp4_aac_mono_48k.m4a",
     "mp4_aac_noedit_22k.m4a",
@@ -219,6 +219,9 @@ const MP4: [&str; 7] = [
     "mp4_aac_fragmented_44k.m4a",
     "mp4_opus_stereo.mp4",
     "video_h264_opus.mp4",
+    "mp4_amrnb_8k.3gp",
+    "mp4_amrwb_16k.3gp",
+    "video_mpeg4_amr.3gp",
 ];
 
 /// Files where our timeline deliberately differs from ffmpeg's (random
@@ -236,6 +239,7 @@ fn every_fixture_decodes_to_the_index_length() {
         "mp3_junk.mp3",
         "mp4_aac_pns_44k.m4a",
         "adts_aac_pns_44k.aac",
+        "mp4_amrwb_16k.3gp",
     ] {
         let (pcm, report, total, channels) = ours(name);
         assert_eq!(report.frames, total, "{name}");
@@ -296,7 +300,7 @@ fn sink_can_stop_decoding() {
 }
 
 /// Every fixture with its chained and damaged variants.
-const ALL: [&str; 47] = [
+const ALL: [&str; 49] = [
     "adts_aac_stereo_44k.aac",
     "adts_aac_mono_22k.aac",
     "ac3_stereo_44k.ac3",
@@ -344,6 +348,8 @@ const ALL: [&str; 47] = [
     "mkv_opus_with_video.mkv",
     "mp4_opus_stereo.mp4",
     "video_h264_opus.mp4",
+    "mp4_amrnb_8k.3gp",
+    "video_mpeg4_amr.3gp",
 ];
 
 /// Ranges at the start, the end, around section boundaries and spread over
@@ -369,9 +375,13 @@ fn probe_ranges(total: u64, boundaries: &[u64]) -> Vec<std::ops::Range<u64>> {
 
 /// Largest absolute difference random access may have from a whole-file
 /// decode: none for codecs whose decoders have finite memory, a small one
-/// for the IIR state of Opus and Speex.
+/// for the IIR state of Opus, Speex and AMR.
 fn range_tolerance(name: &str) -> f32 {
-    if name.contains("opus") || name.contains("speex") || name.ends_with(".spx") {
+    if name.contains("opus")
+        || name.contains("speex")
+        || name.ends_with(".spx")
+        || name.contains("amr")
+    {
         TOLERANCE_IIR
     } else {
         0.0

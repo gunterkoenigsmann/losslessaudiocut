@@ -229,6 +229,11 @@ fn preroll(codec: lac_container::Codec, sample_rate: u32) -> (usize, u64) {
         // bit-exact at all (issue #17); after 400 ms it is far below one
         // 16-bit LSB.
         Codec::Speex => (1, ms(400)),
+        // AMR's predictors (LSF, pitch, gains) converge like Speex's; on
+        // the fixtures AMR-NB is bit-exact again after 200 ms. AMR-WB's
+        // high band is noise from a generator run from the stream's start,
+        // which no pre-roll reproduces (see `lac_container::mp4`).
+        Codec::AmrNb | Codec::AmrWb => (1, ms(400)),
     }
 }
 
@@ -336,6 +341,8 @@ fn codec_name(c: lac_container::Codec) -> &'static str {
         Codec::Opus => "Opus",
         Codec::Speex => "Speex",
         Codec::Mp3 => "MP3",
+        Codec::AmrNb => "AMR-NB",
+        Codec::AmrWb => "AMR-WB",
         Codec::Aac => "AAC",
         Codec::Alac => "ALAC",
         Codec::Ac3 => "AC-3",
