@@ -37,13 +37,17 @@ pub enum Pane {
     Minimap,
     /// The messages of the status bar, kept (see [`crate::log`]).
     Log,
+    /// The picture of a video file at the cursor or playhead (see
+    /// [`crate::video`]).
+    Video,
 }
 
 impl Pane {
     /// Every pane, in the order of the View menu.
-    pub const ALL: [Pane; 5] = [
+    pub const ALL: [Pane; 6] = [
         Pane::Toolbar,
         Pane::Minimap,
+        Pane::Video,
         Pane::Positions,
         Pane::TrackList,
         Pane::Log,
@@ -58,6 +62,7 @@ impl Pane {
             Pane::TrackList => "track_list",
             Pane::Minimap => "minimap",
             Pane::Log => "log",
+            Pane::Video => "video",
         }
     }
 
@@ -70,6 +75,7 @@ impl Pane {
             Pane::TrackList => n_("Track list"),
             Pane::Minimap => n_("Minimap"),
             Pane::Log => n_("Log"),
+            Pane::Video => n_("Video"),
         }
     }
 
@@ -79,6 +85,8 @@ impl Pane {
             Pane::Toolbar | Pane::Positions | Pane::TrackList | Pane::Minimap => true,
             // Wanted now and then, e.g. to read a warning again.
             Pane::Log => false,
+            // Shown when a file with a video track is opened.
+            Pane::Video => false,
         }
     }
 
@@ -288,7 +296,14 @@ mod tests {
         let names: Vec<&str> = Pane::ALL.iter().map(|p| p.name()).collect();
         assert_eq!(
             names,
-            ["toolbar", "minimap", "positions", "track_list", "log"]
+            [
+                "toolbar",
+                "minimap",
+                "video",
+                "positions",
+                "track_list",
+                "log"
+            ]
         );
         for p in Pane::ALL {
             assert_eq!(Pane::from_name(p.name()), Some(p));
@@ -325,11 +340,13 @@ mod tests {
     fn a_stored_layout_is_loaded_as_it_is() {
         let r = restore(Some(SAVED), |_| true);
         assert_eq!(r.perspective.as_deref(), Some(SAVED));
-        // Saved before the minimap, the position bar and the log existed.
+        // Saved before the minimap, the video pane, the position bar and
+        // the log existed.
         assert_eq!(
             r.then_show,
             [
                 (Pane::Minimap, true),
+                (Pane::Video, true),
                 (Pane::Positions, true),
                 (Pane::Log, true)
             ]
@@ -345,6 +362,7 @@ mod tests {
             r.then_show,
             [
                 (Pane::Minimap, false),
+                (Pane::Video, false),
                 (Pane::Positions, false),
                 (Pane::TrackList, true),
                 (Pane::Log, false),

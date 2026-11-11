@@ -49,6 +49,8 @@
 //! - [`theme`]: light or dark windows, and the track list's colours in each.
 //! - [`metrics`]: sizes of the waveform window's marks, scaled to the
 //!   screen.
+//! - [`video`]: the video preview: which picture belongs to an audio
+//!   position, frame stepping, and pictures decoded in the background.
 //!
 //! See `docs/architecture.md` in the repository for how this crate fits in.
 
@@ -84,6 +86,7 @@ pub mod tag_edits;
 pub mod theme;
 pub mod time;
 pub mod track_list;
+pub mod video;
 pub mod waveform;
 
 /// Returned by progress callbacks such as [`Source::analyze`] to go on or stop.

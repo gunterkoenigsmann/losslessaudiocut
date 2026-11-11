@@ -47,6 +47,7 @@ mod surface;
 mod tints;
 mod toolbar;
 mod track_list;
+mod video_pane;
 
 use std::cell::RefCell;
 use std::ops::Range;
@@ -80,6 +81,7 @@ use lac_app::project::Project;
 use lac_app::recent_files::RecentFiles;
 use lac_app::theme::{ListPalette, Theme};
 use lac_app::track_list::Bound;
+use lac_app::video::{Picture, VideoLoader};
 use lac_app::waveform::{DrawMode, WaveformView};
 use lac_core::{SamplePos, Tags};
 use lac_peaks::PeakSummary;
@@ -108,6 +110,9 @@ const ID_MOVE_UP: Id = ID_HIGHEST + 39;
 const ID_MOVE_DOWN: Id = ID_HIGHEST + 40;
 /// Play > Control surface (issue #95).
 const ID_CONTROL_SURFACE: Id = ID_HIGHEST + 41;
+/// Play > Next and Previous video frame: move the cursor by one picture.
+const ID_NEXT_FRAME: Id = ID_HIGHEST + 42;
+const ID_PREVIOUS_FRAME: Id = ID_HIGHEST + 43;
 const ID_UNDO: Id = ID_HIGHEST + 7;
 const ID_REDO: Id = ID_HIGHEST + 8;
 const ID_DELETE: Id = ID_HIGHEST + 9;
@@ -393,6 +398,16 @@ struct State {
     minimap_width: u32,
     /// The minimap pane, redrawn whenever the waveform is.
     minimap_panel: Option<Panel>,
+    /// Decodes the pictures of a video file in the background.
+    video_loader: Option<VideoLoader>,
+    /// Generation of the last picture taken from `video_loader`.
+    video_seen: Option<u64>,
+    /// The picture the video pane shows.
+    video_picture: Option<std::sync::Arc<Picture>>,
+    /// The video pane was shown for the file opened last (once, so the
+    /// user can close it again).
+    video_pane_offered: bool,
+
     /// Height of the time ruler as last painted (0 when hidden), so the
     /// tooltip knows where the ruler is.
     ruler_height: std::cell::Cell<i32>,
@@ -435,6 +450,10 @@ impl State {
         self.autosave_failed = false;
         self.job = Some(PeakJob::start(&path, PUBLISH_INTERVAL, self.cache.clone()));
         self.detail_loader = Some(DetailLoader::start(&path));
+        self.video_loader = Some(VideoLoader::start(&path));
+        self.video_seen = None;
+        self.video_picture = None;
+        self.video_pane_offered = false;
         let path_for_analysis = path.clone();
         self.path = Some(path);
         self.seen = None;
@@ -966,6 +985,76 @@ impl State {
 
     /// Asks for the samples the view needs and takes new ones. Returns
     /// whether the display must be redrawn.
+    /// Timer: asks for the picture at the playhead (or the cursor) and
+    /// takes a newly decoded one. Returns whether the video pane needs
+    /// redrawing, and whether it should be shown because a file with a
+    /// video track was just opened.
+    fn poll_video(&mut self) -> (bool, bool) {
+        let pos = self
+            .playhead()
+            .or_else(|| self.editor.as_ref().map(Editor::cursor));
+        let Some(loader) = &self.video_loader else {
+            return (false, false);
+        };
+        let show = !self.video_pane_offered && loader.track().is_some();
+        if show {
+            self.video_pane_offered = true;
+        }
+        if let Some(pos) = pos {
+            loader.request(pos);
+        }
+        let repaint = match loader.poll(self.video_seen) {
+            Some((g, Ok(p))) => {
+                self.video_seen = Some(g);
+                self.video_picture = Some(p);
+                true
+            }
+            // Keep showing the last picture; a damaged frame is no news
+            // for the status line.
+            Some((g, Err(_))) => {
+                self.video_seen = Some(g);
+                false
+            }
+            None => false,
+        };
+        (repaint, show)
+    }
+
+    /// Next/Previous video frame: moves the cursor to the start of the
+    /// next picture, or back to the start of the picture at the cursor
+    /// (the one before if it is there already), and the view with it.
+    /// Returns a message when there is nothing to step to.
+    fn step_frame(&mut self, forward: bool) -> Option<String> {
+        let Some(track) = self.video_loader.as_ref().and_then(VideoLoader::track) else {
+            return Some(tr("this file has no video").into_owned());
+        };
+        let editor = self.editor.as_mut()?;
+        let from = editor.cursor();
+        let Some(to) =
+            lac_app::video::step(&track.index, &track.clock, from, editor.total(), forward)
+        else {
+            return Some(
+                if forward {
+                    tr("no later video frame")
+                } else {
+                    tr("no earlier video frame")
+                }
+                .into_owned(),
+            );
+        };
+        editor.clear_selection();
+        editor.set_cursor(to);
+        self.seek_to_cursor();
+        if let Some(v) = &mut self.view {
+            let visible = v.visible();
+            if !visible.contains(&to) {
+                // Keep the cursor a quarter into the window.
+                v.scroll_to(to.saturating_sub((visible.end - visible.start) / 4));
+            }
+        }
+        None
+    }
+
     fn poll_detail(&mut self) -> bool {
         let packet_len = self.packet_len();
         let wanted = self.view.as_ref().and_then(|v| v.detail_wanted(packet_len));
@@ -1214,6 +1303,7 @@ fn main() {
         let grid = track_list::create(&frame, &list_palette);
 
         let map = minimap::create(&frame);
+        let video = video_pane::create(&frame);
         let cache = PeakCache::default_dir().map(PeakCache::new);
         if let Some(c) = cache.clone() {
             // Startup eviction (orphans, old and excess entries) off the
@@ -1270,15 +1360,20 @@ fn main() {
             })
         };
         bind_minimap(&map, &panel, &state);
+        bind_video(&video, &state);
         let log = log_pane::create(&frame);
+        let positions = bar.panel();
         let panes = Panes::new(
             &frame,
-            &panel,
-            &tools.panel,
-            &map,
-            &bar.panel(),
-            &grid,
-            &log,
+            &panes::Contents {
+                waveform: &panel,
+                toolbar: &tools.panel,
+                minimap: &map,
+                positions: &positions,
+                track_list: &grid,
+                log: &log,
+                video: &video,
+            },
         );
         panes.restore();
         {
@@ -1355,6 +1450,16 @@ fn main() {
                 };
                 if let Some(msg) = &autosave {
                     report(&frame, msg);
+                }
+                let (repaint_video, show_video) = state.borrow_mut().poll_video();
+                // Copied out first: showing the pane lays out the window,
+                // whose size handlers borrow the state.
+                let panes = state.borrow().panes;
+                if show_video && let Some(p) = panes {
+                    p.show(Pane::Video);
+                }
+                if repaint_video || show_video {
+                    video.refresh(false, None);
                 }
                 offer_recovery(&frame, &state);
                 if playing {
@@ -1545,6 +1650,16 @@ fn menu_bar(options: Options) -> MenuBar {
             ID_TO_START,
             &tr_menu("Cursor to &start\tHome"),
             &tr("Put the cursor at the beginning"),
+        )
+        .append_item(
+            ID_PREVIOUS_FRAME,
+            &tr_menu("Previous &video frame\t,"),
+            &tr("Move the cursor to the start of the video frame at it, or of the one before"),
+        )
+        .append_item(
+            ID_NEXT_FRAME,
+            &tr_menu("&Next video frame\t."),
+            &tr("Move the cursor to the start of the next video frame"),
         )
         .append_item(
             ID_PLAY_TRACK_START,
@@ -1800,6 +1915,11 @@ fn command(f: &Frame, panel: &Panel, state: &Rc<RefCell<State>>, id: Id, checked
     } else if id == ID_SETTINGS {
         open_settings(&f, panel, state);
         return;
+    } else if id == ID_NEXT_FRAME || id == ID_PREVIOUS_FRAME {
+        let msg = state.borrow_mut().step_frame(id == ID_NEXT_FRAME);
+        if let Some(msg) = msg {
+            report(&f, &msg);
+        }
     } else if id == ID_TO_START {
         let mut st = state.borrow_mut();
         if let Some(e) = &mut st.editor {
@@ -3422,6 +3542,33 @@ fn bind_paint(panel: &Panel, state: &Rc<RefCell<State>>) {
     });
 }
 
+/// The video pane: paints the current picture, and again when resized.
+fn bind_video(video: &Panel, state: &Rc<RefCell<State>>) {
+    let v = *video;
+    {
+        let state = Rc::clone(state);
+        video.on_paint(move |_| {
+            let dc = AutoBufferedPaintDC::new(&v);
+            let st = state.borrow();
+            let rotation = st
+                .video_loader
+                .as_ref()
+                .and_then(VideoLoader::track)
+                .map_or(0, |t| t.rotation);
+            video_pane::draw(
+                &dc,
+                v.get_client_size(),
+                st.video_picture.as_deref(),
+                rotation,
+            );
+        });
+    }
+    video.on_size(move |e| {
+        v.refresh(false, None);
+        e.skip(true);
+    });
+}
+
 /// The minimap pane: painting, resizing, and dragging its frame to scroll
 /// the waveform (`waveform`, which is redrawn after a scroll; its paint
 /// handler redraws the minimap in turn).
@@ -3978,6 +4125,8 @@ mod tests {
             ID_SETTINGS,
             ID_PLAY_TRACK_START,
             ID_PLAY_TRACK_END,
+            ID_NEXT_FRAME,
+            ID_PREVIOUS_FRAME,
         ];
         ids.extend((0..Perspective::ALL.len()).map(|i| ID_PERSPECTIVE_FIRST + i as Id));
         for (i, id) in ids.iter().enumerate() {

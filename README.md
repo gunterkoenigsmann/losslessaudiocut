@@ -172,6 +172,15 @@ a word or a note can be found by ear. Released, playback goes on from there
 if it was running before; otherwise it stops and the cursor stays where the
 scrub ended.
 
+Videos (MP4, MOV and 3GP from phones and cameras: H.264, HEVC, AV1, VP9,
+ProRes, MPEG-4) are edited by their sound. Opening one shows the *Video*
+pane with the picture at the cursor, following playback; `,` and `.`
+(*Play > Previous / Next video frame*) move the cursor by one picture.
+Exports keep the video without re-encoding it: the file's start and end
+are exact to the frame, and where a part was deleted the video continues
+at the next keyframe, with the sound following it to within half an
+audio frame.
+
 A right click (or the menu key) opens a menu for the place clicked. In the
 selection it offers to make the selection a new track, to fit the track
 under the pointer to it or move one end of that track to one of its edges,
