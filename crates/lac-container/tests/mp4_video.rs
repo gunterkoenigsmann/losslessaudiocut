@@ -73,6 +73,17 @@ const FIXTURES: &[Expected] = &[
         demoted: 0,
         audio_rate: 8_000,
     },
+    // H.264 with uncompressed sound in QuickTime (16 kHz), as cameras
+    // record: sound cut points are exact anywhere.
+    Expected {
+        name: "video_h264_pcm.mov",
+        codec: VideoCodec::H264,
+        rotation: 0,
+        keyframes: GOP15,
+        unclean: &[],
+        demoted: 0,
+        audio_rate: 16_000,
+    },
     // The same video with Opus sound (20 ms packets instead of AAC's
     // 1024 samples).
     Expected {

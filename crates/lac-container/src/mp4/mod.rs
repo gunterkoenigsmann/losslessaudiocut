@@ -1,11 +1,14 @@
 //! MP4 / M4A files (ISO/IEC 14496-12, the ISO base media file format, and
-//! 14496-14, the MP4 file format) with AAC, ALAC, Opus or AMR audio.
+//! 14496-14, the MP4 file format) with AAC, ALAC, Opus, AMR or uncompressed (PCM) audio.
 //!
 //! Phones, iTunes and most podcast tools record and distribute AAC this
 //! way (`.m4a`, `.m4b`, `.mp4`); Apple Lossless (ALAC) uses the same
 //! container, and Android phones record videos with Opus sound in it.
 //! 3GPP files (`.3gp`, 3GPP TS 26.244) are MP4 files too; phones record
-//! voice notes, and older phones videos, with AMR sound in them. QuickTime `.mov` files share the box structure and open too.
+//! voice notes, and older phones videos, with AMR sound in them. QuickTime `.mov` files share the box structure and open too;
+//! cameras and screen recorders store uncompressed sound in them
+//! (`sowt`, `twos`, `lpcm`, `in24`, `fl32`, ...), as ISO files may
+//! (`ipcm`/`fpcm`, ISO/IEC 23003-5).
 //!
 //! ## Structure
 //!
@@ -189,7 +192,34 @@ pub enum Mp4Codec {
         /// (8 kHz, 160 samples per frame).
         wideband: bool,
     },
+    /// Uncompressed audio, as cameras record it in QuickTime files
+    /// (`sowt`, `twos`, `raw `, `in24`, `in32`, `fl32`, `fl64`, `lpcm`,
+    /// `alaw`, `ulaw`; QuickTime File Format, "Sound sample descriptions")
+    /// and ISO/IEC 23003-5 in MP4 (`ipcm`, `fpcm`).
+    Pcm(PcmFormat),
 }
+
+/// How uncompressed samples are stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PcmFormat {
+    /// Integer, float, A-law or µ-law.
+    pub encoding: crate::wav::SampleEncoding,
+    /// Bits per sample (8, 16, 24, 32 or 64).
+    pub bits: u16,
+    /// Most significant byte first.
+    pub big_endian: bool,
+    /// 8-bit integers are signed (`twos`) rather than offset by 128
+    /// (`raw `).
+    pub signed_8bit: bool,
+    /// Bytes per sample frame (all channels).
+    pub frame_bytes: u32,
+}
+
+/// Sample frames per raw packet of uncompressed audio: QuickTime stores
+/// each frame as a sample, which is far too fine for the packet index, so
+/// the frames of a chunk are grouped (as WAV's are, see
+/// [`crate::wav::BLOCK_FRAMES`]).
+const PCM_BLOCK_FRAMES: u32 = 4096;
 
 impl Mp4Codec {
     /// The codec's name.
@@ -200,6 +230,11 @@ impl Mp4Codec {
             Self::Opus { .. } => "Opus",
             Self::Amr { wideband: false } => "AMR-NB",
             Self::Amr { wideband: true } => "AMR-WB",
+            Self::Pcm(f) => match f.encoding {
+                crate::wav::SampleEncoding::ALaw => "A-law",
+                crate::wav::SampleEncoding::MuLaw => "µ-law",
+                _ => "PCM",
+            },
         }
     }
 }
@@ -391,7 +426,7 @@ impl Mp4File {
                 hidden_before: (a - p.start) as u32,
                 hidden_after: (end - b) as u32,
                 flags: PacketFlags {
-                    independent: matches!(t.codec, Mp4Codec::Alac { .. }),
+                    independent: matches!(t.codec, Mp4Codec::Alac { .. } | Mp4Codec::Pcm(_)),
                 },
             });
             entry_raw.push(i);
@@ -547,6 +582,9 @@ impl Mp4File {
                 lossless_reencode: true,
                 ..CutCapabilities::default()
             },
+            // Any frame boundary is a cut point: the frames a cut keeps of
+            // a packet are written as a packet of their own.
+            Mp4Codec::Pcm(_) => CutCapabilities::PCM,
         }
     }
 
@@ -565,6 +603,17 @@ impl Mp4File {
             Mp4Codec::Opus { head } => (crate::Codec::Opus, head.clone()),
             Mp4Codec::Amr { wideband: false } => (crate::Codec::AmrNb, Vec::new()),
             Mp4Codec::Amr { wideband: true } => (crate::Codec::AmrWb, Vec::new()),
+            Mp4Codec::Pcm(f) => (
+                crate::Codec::Pcm {
+                    encoding: f.encoding,
+                    bits_per_sample: f.bits,
+                    // Fits: checked when parsing.
+                    block_align: f.frame_bytes as u16,
+                    big_endian: f.big_endian,
+                    signed_8bit: f.signed_8bit,
+                },
+                Vec::new(),
+            ),
         };
         Ok(vec![crate::DecodeSection {
             codec,
@@ -623,7 +672,7 @@ impl Mp4File {
             }
             let trims_inside =
                 (p.trim_start != 0 && i != 0) || (p.trim_end != 0 && i + 1 != kept.len());
-            if trims_inside && !matches!(self.codec, Mp4Codec::Alac { .. }) {
+            if trims_inside && !matches!(self.codec, Mp4Codec::Alac { .. } | Mp4Codec::Pcm(_)) {
                 return Err(ContainerError::InvalidPlan(format!(
                     "MP4 with {} can only trim at the start and end of the file",
                     self.codec.name()
@@ -637,6 +686,10 @@ impl Mp4File {
             .map(|(t, frames)| (t.clone(), frames.as_slice()));
         if let Mp4Codec::Alac { cookie } = &self.codec {
             let samples = self.alac_samples(r, cookie, &kept)?;
+            return self.write_file(r, &samples, (0, 0), video, tags, w);
+        }
+        if let Mp4Codec::Pcm(f) = &self.codec {
+            let samples = self.pcm_samples(r, f.frame_bytes, &kept)?;
             return self.write_file(r, &samples, (0, 0), video, tags, w);
         }
         let (Some(first), Some(last)) = (kept.first(), kept.last()) else {
@@ -816,8 +869,58 @@ impl Mp4File {
             empty_edit,
             media_time,
             edit_duration,
+            pcm_frame_bytes: None,
         };
         Ok(Some((trak, frames)))
+    }
+
+    /// The samples of an uncompressed cut: kept packets verbatim, and of
+    /// each packet that a cut point cuts, the kept frames' bytes.
+    fn pcm_samples<R: Read + Seek + ?Sized>(
+        &self,
+        r: &mut R,
+        frame_bytes: u32,
+        kept: &[&CutPlan],
+    ) -> Result<Vec<OutSample>> {
+        let mut out = Vec::new();
+        for p in kept {
+            for e in p.packets.clone() {
+                let raw_i = self.entry_raw[e];
+                let raw = &self.raw[raw_i];
+                let info = &self.index.packets()[e];
+                let skip = u64::from(info.hidden_before)
+                    + if e == p.packets.start {
+                        p.trim_start
+                    } else {
+                        0
+                    };
+                let drop = u64::from(info.hidden_after)
+                    + if e + 1 == p.packets.end {
+                        p.trim_end
+                    } else {
+                        0
+                    };
+                if skip == 0 && drop == 0 {
+                    out.push(OutSample::Source(raw_i));
+                    continue;
+                }
+                let end = u64::from(raw.out)
+                    .checked_sub(drop)
+                    .filter(|&end| end > skip)
+                    .ok_or_else(|| {
+                        ContainerError::InvalidPlan(format!("trims beyond packet {e}"))
+                    })?;
+                let fb = u64::from(frame_bytes);
+                let mut data = vec![0; ((end - skip) * fb) as usize];
+                read_exact_at(r, raw.offset + skip * fb, &mut data)?;
+                out.push(OutSample::Rewritten {
+                    data,
+                    // At most one packet's frames.
+                    out: (end - skip) as u32,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// The samples of an ALAC cut: kept frames verbatim, and each frame
@@ -917,7 +1020,7 @@ impl Mp4File {
             })
             .collect();
         let decoded: u64 = durations.iter().map(|&d| u64::from(d)).sum();
-        let lossy = !matches!(self.codec, Mp4Codec::Alac { .. });
+        let lossy = !matches!(self.codec, Mp4Codec::Alac { .. } | Mp4Codec::Pcm(_));
         if let (Some(d), true) = (durations.last_mut(), lossy) {
             // discard < out: the last packet keeps at least one sample.
             *d -= discard as u32;
@@ -941,6 +1044,10 @@ impl Mp4File {
             empty_edit: 0,
             media_time: i64::try_from(media_time).unwrap_or(i64::MAX),
             edit_duration: duration,
+            pcm_frame_bytes: match &self.codec {
+                Mp4Codec::Pcm(f) => Some(f.frame_bytes),
+                _ => None,
+            },
         };
         debug_assert_eq!(
             audio.durations.iter().map(|&d| u64::from(d)).sum::<u64>(),
@@ -1026,7 +1133,7 @@ impl Mp4File {
         match self.codec {
             Mp4Codec::Aac { .. } => Some(-1),
             // ffmpeg writes none for AMR, and players start AMR anywhere.
-            Mp4Codec::Alac { .. } | Mp4Codec::Amr { .. } => None,
+            Mp4Codec::Alac { .. } | Mp4Codec::Amr { .. } | Mp4Codec::Pcm(_) => None,
             Mp4Codec::Opus { .. } => {
                 let outs: Vec<u32> = self.raw.iter().map(|p| p.out).collect();
                 let frame = u64::from(most_common(&outs).unwrap_or(960).max(1));
@@ -1149,68 +1256,84 @@ fn parse_track<R: Read + Seek + ?Sized>(
         )));
     }
 
-    let Samples {
-        offsets,
-        sizes,
-        durations,
-        ..
-    } = read_samples(trak, stbl.body, frag, file_len, "audio", warnings)?;
-    let count = offsets.len();
-
-    let fixed_out = match codec {
-        // An AAC frame always decodes to the same length: the most common
-        // duration. The encoder may shorten the last sample's to state its
-        // padding, and a muxer may lengthen the first one's to fill a gap
-        // before it (ffmpeg's fragmented files without an edit list).
-        Mp4Codec::Aac { .. } => most_common(&durations[..count]),
-        Mp4Codec::Alac { .. } | Mp4Codec::Opus { .. } | Mp4Codec::Amr { .. } => None,
-    };
-    let mut raw = Vec::with_capacity(count);
-    let mut start = 0u64;
-    let mut stts_total = 0u64;
-    for i in 0..count {
-        let len = sizes[i];
-        let end = offsets[i].saturating_add(u64::from(len));
-        if end > file_len {
-            warnings.push(format!(
-                "the file is truncated; {} of {count} samples are present",
-                raw.len()
+    // The decoder output of each sample; `stts_total` is the sum of the
+    // durations, which may state padding at the end; `first_duration`
+    // the first sample's, which may state a gap before it.
+    let (raw, stts_total, first_duration) = if let Mp4Codec::Pcm(fmt) = &codec {
+        if !frag.moofs.is_empty() {
+            return Err(ContainerError::Unsupported(
+                "uncompressed audio in movie fragments".into(),
             ));
-            break;
         }
-        let mut out = fixed_out.unwrap_or(durations[i]);
-        if let Some(frame) = amr_frame {
-            // A sample holds one or more whole frames (3GPP TS 26.244
-            // 6.7: `frames_per_sample`); a shortened duration (the last
-            // sample's, stating padding) still decodes whole frames.
-            out = out.div_ceil(frame) * frame;
-        }
-        if opus && (i == 0 || i + 1 == count) {
-            // An Opus packet's duration is in its TOC (RFC 6716 3.1). The
-            // muxer shortens the last sample's `stts` duration by the
-            // encoder's padding, and may lengthen the first one's to fill
-            // a gap before it, like for AAC.
-            let mut toc = [0u8; 2];
-            let n = read_up_to(r, offsets[i], &mut toc[..(len as usize).min(2)])?;
-            match crate::ogg::codec::opus_packet_samples(&toc[..n]) {
-                Ok(samples) => out = samples,
-                Err(e) => warnings.push(format!("Opus sample {i}: {e}")),
+        let raw = read_pcm(stbl.body, fmt.frame_bytes, file_len, warnings)?;
+        let total = raw.last().map_or(0, |p| p.start + u64::from(p.out));
+        (raw, total, None)
+    } else {
+        let Samples {
+            offsets,
+            sizes,
+            durations,
+            ..
+        } = read_samples(trak, stbl.body, frag, file_len, "audio", warnings)?;
+        let count = offsets.len();
+
+        let fixed_out = match codec {
+            // An AAC frame always decodes to the same length: the most common
+            // duration. The encoder may shorten the last sample's to state its
+            // padding, and a muxer may lengthen the first one's to fill a gap
+            // before it (ffmpeg's fragmented files without an edit list).
+            Mp4Codec::Aac { .. } => most_common(&durations[..count]),
+            _ => None,
+        };
+        let mut raw = Vec::with_capacity(count);
+        let mut start = 0u64;
+        let mut stts_total = 0u64;
+        for i in 0..count {
+            let len = sizes[i];
+            let end = offsets[i].saturating_add(u64::from(len));
+            if end > file_len {
+                warnings.push(format!(
+                    "the file is truncated; {} of {count} samples are present",
+                    raw.len()
+                ));
+                break;
             }
+            let mut out = fixed_out.unwrap_or(durations[i]);
+            if let Some(frame) = amr_frame {
+                // A sample holds one or more whole frames (3GPP TS 26.244
+                // 6.7: `frames_per_sample`); a shortened duration (the last
+                // sample's, stating padding) still decodes whole frames.
+                out = out.div_ceil(frame) * frame;
+            }
+            if opus && (i == 0 || i + 1 == count) {
+                // An Opus packet's duration is in its TOC (RFC 6716 3.1). The
+                // muxer shortens the last sample's `stts` duration by the
+                // encoder's padding, and may lengthen the first one's to fill
+                // a gap before it, like for AAC.
+                let mut toc = [0u8; 2];
+                let n = read_up_to(r, offsets[i], &mut toc[..(len as usize).min(2)])?;
+                match crate::ogg::codec::opus_packet_samples(&toc[..n]) {
+                    Ok(samples) => out = samples,
+                    Err(e) => warnings.push(format!("Opus sample {i}: {e}")),
+                }
+            }
+            if out == 0 {
+                warnings.push(format!("skipped sample {i} without duration"));
+                continue;
+            }
+            raw.push(RawPacket {
+                offset: offsets[i],
+                len,
+                out,
+                start,
+            });
+            start += u64::from(out);
+            stts_total += u64::from(durations[i]);
         }
-        if out == 0 {
-            warnings.push(format!("skipped sample {i} without duration"));
-            continue;
-        }
-        raw.push(RawPacket {
-            offset: offsets[i],
-            len,
-            out,
-            start,
-        });
-        start += u64::from(out);
-        stts_total += u64::from(durations[i]);
-    }
-    let total = start;
+        let first_duration = durations.first().copied();
+        (raw, stts_total, first_duration)
+    };
+    let total = raw.last().map_or(0, |p| p.start + u64::from(p.out));
 
     // The edit list (ISO/IEC 14496-12 8.6.6): the first non-empty edit.
     let edits = boxes::path(trak.body, &[b"edts", b"elst"])
@@ -1244,8 +1367,8 @@ fn parse_track<R: Read + Seek + ?Sized>(
             a..b
         }
     };
-    let lead = match (edits.is_empty(), raw.first()) {
-        (true, Some(p)) => u64::from(durations[0].saturating_sub(p.out)),
+    let lead = match (edits.is_empty(), raw.first(), first_duration) {
+        (true, Some(p), Some(d)) => u64::from(d.saturating_sub(p.out)),
         _ => 0,
     };
     Ok(Track {
@@ -1259,6 +1382,95 @@ fn parse_track<R: Read + Seek + ?Sized>(
         audible,
         lead,
     })
+}
+
+/// The raw packets of an uncompressed track from its sample table `stbl`:
+/// QuickTime stores one sample per sample frame (`stts` durations of 1),
+/// `frame_bytes` each, so the frames of each chunk are grouped into
+/// packets of up to [`PCM_BLOCK_FRAMES`] without expanding the table.
+fn read_pcm(
+    stbl: &[u8],
+    frame_bytes: u32,
+    file_len: u64,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<RawPacket>> {
+    let at = |m: &str| malformed(0, &format!("audio track: {m}"));
+    let get = |k: &[u8; 4]| boxes::find(stbl, k).map(|b| b.body);
+    // stts (8.6.1.2): the number of frames.
+    let mut r = Reader::new(get(b"stts").ok_or_else(|| at("no stts box"))?);
+    let invalid_stts = || at("invalid stts box");
+    r.u32().ok_or_else(invalid_stts)?;
+    let mut frames = 0u64;
+    for _ in 0..r.u32().ok_or_else(invalid_stts)? {
+        let (count, delta) = (
+            r.u32().ok_or_else(invalid_stts)?,
+            r.u32().ok_or_else(invalid_stts)?,
+        );
+        if delta != 1 && count > 0 {
+            return Err(ContainerError::Unsupported(
+                "uncompressed audio with several frames per sample".into(),
+            ));
+        }
+        frames += u64::from(count);
+    }
+    let chunk_offsets = match (get(b"stco"), get(b"co64")) {
+        (Some(b), _) => parse_offsets(b, false),
+        (None, Some(b)) => parse_offsets(b, true),
+        _ => None,
+    }
+    .ok_or_else(|| at("missing or invalid chunk offsets"))?;
+    let stsc = parse_stsc(get(b"stsc").ok_or_else(|| at("no stsc box"))?)
+        .ok_or_else(|| at("invalid stsc box"))?;
+    if stsc.iter().any(|e| e.2 != 1) {
+        return Err(ContainerError::Unsupported(
+            "MP4 track with several sample descriptions".into(),
+        ));
+    }
+    let fb = u64::from(frame_bytes);
+    let mut out = Vec::new();
+    let mut start = 0u64;
+    for (c, &chunk_off) in chunk_offsets.iter().enumerate() {
+        let chunk_no = c as u32 + 1;
+        // The last stsc entry whose first chunk is at most this one.
+        let per = stsc
+            .iter()
+            .take_while(|e| e.0 <= chunk_no)
+            .last()
+            .map_or(0, |e| e.1);
+        let mut left = u64::from(per).min(frames - start);
+        let mut off = chunk_off;
+        while left > 0 {
+            let n = left.min(u64::from(PCM_BLOCK_FRAMES));
+            // Whatever of the block the file still holds.
+            let present = file_len.saturating_sub(off) / fb;
+            let n = n.min(present);
+            if n == 0 {
+                warnings.push(format!(
+                    "the file is truncated; {start} of {frames} sample frames are present"
+                ));
+                return Ok(out);
+            }
+            out.push(RawPacket {
+                offset: off,
+                // At most PCM_BLOCK_FRAMES frames of at most u16 bytes.
+                len: (n * fb) as u32,
+                out: n as u32,
+                start,
+            });
+            start += n;
+            off += n * fb;
+            left -= n;
+        }
+        if start == frames {
+            break;
+        }
+    }
+    if start < frames {
+        warnings.push(format!(
+            "the chunk table covers only {start} of {frames} sample frames"
+        ));
+    }
+    Ok(out)
 }
 
 /// The sample table of a track, in decode order, with the samples of
@@ -1709,11 +1921,129 @@ fn parse_stsd(b: &[u8]) -> Result<(Mp4Codec, u16, Option<usize>)> {
         // of 2 in the entry and for readers to ignore it.
         b"samr" => Ok((Mp4Codec::Amr { wideband: false }, 1, None)),
         b"sawb" => Ok((Mp4Codec::Amr { wideband: true }, 1, None)),
+        kind @ (b"sowt" | b"twos" | b"raw " | b"in24" | b"in32" | b"fl32" | b"fl64" | b"lpcm"
+        | b"alaw" | b"ulaw" | b"ipcm" | b"fpcm") => {
+            let (format, channels) = pcm_format(kind, version, entry.body, children)
+                .ok_or_else(|| bad("unsupported uncompressed audio format"))?;
+            Ok((Mp4Codec::Pcm(format), channels, None))
+        }
         other => Err(ContainerError::Unsupported(format!(
             "MP4 audio codec {:?} (only AAC, ALAC, Opus and AMR are supported)",
             String::from_utf8_lossy(other)
         ))),
     }
+}
+
+/// The format and channel count of an uncompressed sound sample entry
+/// `kind` of `version` (0, 1 or 2) with the entry's `body` and the child
+/// boxes after its fields (QuickTime File Format, "Sound sample
+/// descriptions" and "Sound sample description extensions"; ISO/IEC
+/// 23003-5 5 for `ipcm` and `fpcm`). `None` for a combination that is no
+/// plain PCM, A-law or µ-law.
+fn pcm_format(
+    kind: &[u8; 4],
+    version: u16,
+    body: &[u8],
+    children: &[u8],
+) -> Option<(PcmFormat, u16)> {
+    use crate::wav::SampleEncoding::{ALaw, Float, MuLaw, Pcm};
+    let u16_at = |at: usize| {
+        body.get(at..at + 2)
+            .map(|b| u16::from_be_bytes([b[0], b[1]]))
+    };
+    let u32_at = |at: usize| {
+        body.get(at..at + 4)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let mut channels = u16_at(16)?;
+    // Version 0 states the sample size in bits; version 1 adds the bytes
+    // per sample (36: bytes per frame, 40: bytes per sample).
+    let mut bits = match version {
+        1 => u16::try_from(u32_at(40)?.checked_mul(8)?).ok()?,
+        _ => u16_at(18)?,
+    };
+    // `in24`, `in32`, `fl32` and `fl64` are big-endian unless an `enda`
+    // box (in `wave`) says 1.
+    let little = boxes::find(children, b"enda")
+        .or_else(|| boxes::path(children, &[b"wave", b"enda"]))
+        .and_then(|b| b.body.get(..2))
+        .is_some_and(|b| b == [0, 1]);
+    let (encoding, big_endian, signed_8bit) = match kind {
+        b"sowt" => (Pcm, false, true),
+        b"twos" => (Pcm, true, true),
+        b"raw " => {
+            bits = 8;
+            (Pcm, false, false)
+        }
+        b"in24" => {
+            bits = 24;
+            (Pcm, !little, true)
+        }
+        b"in32" => {
+            bits = 32;
+            (Pcm, !little, true)
+        }
+        b"fl32" => {
+            bits = 32;
+            (Float, !little, true)
+        }
+        b"fl64" => {
+            bits = 64;
+            (Float, !little, true)
+        }
+        b"alaw" | b"ulaw" => {
+            bits = 8;
+            (if kind == b"alaw" { ALaw } else { MuLaw }, false, true)
+        }
+        b"lpcm" => {
+            // Version 2 (Apple Core Audio's description): 40 channels,
+            // 48 bits per channel, 52 flags (1 float, 2 big-endian, 4
+            // signed integer).
+            if version != 2 {
+                return None;
+            }
+            channels = u16::try_from(u32_at(40)?).ok()?;
+            bits = u16::try_from(u32_at(48)?).ok()?;
+            let flags = u32_at(52)?;
+            let float = flags & 1 != 0;
+            if !float && flags & 4 == 0 && bits != 8 {
+                return None; // unsigned integers wider than 8 bits
+            }
+            (
+                if float { Float } else { Pcm },
+                flags & 2 != 0,
+                flags & 4 != 0,
+            )
+        }
+        _ => {
+            // ISO/IEC 23003-5 5.1: pcmC holds format_flags (bit 0: little
+            // endian) and PCM_sample_size after version and flags.
+            let pcmc = boxes::find(children, b"pcmC")?;
+            let little = pcmc.body.get(4)? & 1 == 1;
+            bits = u16::from(*pcmc.body.get(5)?);
+            (if kind == b"fpcm" { Float } else { Pcm }, !little, true)
+        }
+    };
+    let valid = match encoding {
+        Float => matches!(bits, 32 | 64),
+        ALaw | MuLaw => bits == 8,
+        Pcm => matches!(bits, 8 | 16 | 24 | 32),
+    };
+    let frame_bytes = u32::from(channels) * u32::from(bits / 8);
+    // The decoder's block_align is 16 bits wide.
+    if !valid || channels == 0 || u16::try_from(frame_bytes).is_err() {
+        return None;
+    }
+    Some((
+        PcmFormat {
+            encoding,
+            bits,
+            big_endian: big_endian && bits > 8,
+            signed_8bit,
+            frame_bytes,
+        },
+        channels,
+    ))
 }
 
 /// The `OpusHead` (RFC 7845 5.1) that says what a `dOps` body says (the

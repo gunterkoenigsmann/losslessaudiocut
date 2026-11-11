@@ -157,6 +157,21 @@ $synth "$tmp/aw.wav" 16000 1 16 1.5 0 speech
 python3 amr_encode.py "$tmp/aw.wav" "$tmp/aw.amr" wb
 $og -i "$tmp/aw.amr" -c copy -fflags +bitexact mp4_amrwb_16k.3gp
 
+# Uncompressed audio in QuickTime, as cameras record it, one sample per
+# frame: 16-bit little-endian (sowt), 24-bit little-endian (in24 with an
+# enda box), 16-bit big-endian (twos), 32-bit big-endian float (fl32),
+# 4 channels of 24 bit at 96 kHz (a version 2 lpcm entry), and the
+# ISO/IEC 23003-5 form in MP4 (ipcm).
+$synth "$tmp/pa.wav" 44100 2 16 0.3
+$synth "$tmp/pb.wav" 22050 1 16 0.3
+$synth "$tmp/pc.wav" 96000 4 24 0.05
+$og -i "$tmp/pa.wav" -fflags +bitexact -c:a pcm_s16le mp4_pcm_s16le.mov
+$og -i "$tmp/pa.wav" -fflags +bitexact -c:a pcm_s24le mp4_pcm_s24le.mov
+$og -i "$tmp/pb.wav" -fflags +bitexact -c:a pcm_s16be mp4_pcm_s16be.mov
+$og -i "$tmp/pb.wav" -fflags +bitexact -c:a pcm_f32be mp4_pcm_f32be.mov
+$og -i "$tmp/pc.wav" -fflags +bitexact -c:a pcm_s24le mp4_pcm_lpcm_4ch.mov
+$og -i "$tmp/pb.wav" -fflags +bitexact -c:a pcm_s16le mp4_pcm_iso.mp4
+
 # Raw AC-3, encoded by ffmpeg's native (fixed-point) AC-3 encoder: stereo
 # 2/0 at 44.1 kHz (frame sizes alternate between 834 and 836 bytes),
 # 5.1 (3/2 + LFE) at 48 kHz and mono at 32 kHz.
@@ -222,3 +237,9 @@ $synth "$tmp/vn.wav" 8000 1 16 2.0 0 speech
 python3 amr_encode.py "$tmp/vn.wav" "$tmp/vn.amr" nb
 $og $vs -i "$tmp/vn.amr" -fflags +bitexact -c:a copy -c:v mpeg4 -g 15 -bf 0 \
     video_mpeg4_amr.3gp
+# H.264 with uncompressed sound (16-bit, 16 kHz mono to keep it small),
+# as cameras record.
+$synth "$tmp/vp.wav" 16000 1 16 2.0
+$og $vs -i "$tmp/vp.wav" -fflags +bitexact -c:a pcm_s16le \
+    -c:v libx264 -bf 0 -g 15 -keyint_min 15 -sc_threshold 0 -pix_fmt yuv420p \
+    video_h264_pcm.mov

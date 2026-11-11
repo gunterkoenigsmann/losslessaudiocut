@@ -72,7 +72,7 @@ fn ffmpeg_file(path: &Path) -> Option<Vec<f32>> {
 }
 
 /// Fixtures whose timeline ffmpeg reproduces exactly.
-const EXACT: [&str; 31] = [
+const EXACT: [&str; 38] = [
     "adts_aac_stereo_44k.aac",
     "adts_aac_mono_22k.aac",
     "ac3_stereo_44k.ac3",
@@ -104,6 +104,13 @@ const EXACT: [&str; 31] = [
     "mkv_opus_stereo.webm",
     "mkv_opus_mono_10ms.mka",
     "mkv_opus_live.webm",
+    "mp4_pcm_s16le.mov",
+    "mp4_pcm_s24le.mov",
+    "mp4_pcm_s16be.mov",
+    "mp4_pcm_f32be.mov",
+    "mp4_pcm_lpcm_4ch.mov",
+    "mp4_pcm_iso.mp4",
+    "video_h264_pcm.mov",
 ];
 
 #[test]
@@ -300,7 +307,7 @@ fn sink_can_stop_decoding() {
 }
 
 /// Every fixture with its chained and damaged variants.
-const ALL: [&str; 49] = [
+const ALL: [&str; 56] = [
     "adts_aac_stereo_44k.aac",
     "adts_aac_mono_22k.aac",
     "ac3_stereo_44k.ac3",
@@ -350,6 +357,13 @@ const ALL: [&str; 49] = [
     "video_h264_opus.mp4",
     "mp4_amrnb_8k.3gp",
     "video_mpeg4_amr.3gp",
+    "mp4_pcm_s16le.mov",
+    "mp4_pcm_s24le.mov",
+    "mp4_pcm_s16be.mov",
+    "mp4_pcm_f32be.mov",
+    "mp4_pcm_lpcm_4ch.mov",
+    "mp4_pcm_iso.mp4",
+    "video_h264_pcm.mov",
 ];
 
 /// Ranges at the start, the end, around section boundaries and spread over

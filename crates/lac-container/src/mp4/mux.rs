@@ -65,6 +65,11 @@ pub(super) struct TrakOut {
     pub media_time: i64,
     /// The edit list's duration (movie timescale).
     pub edit_duration: u64,
+    /// Uncompressed audio of this many bytes per sample frame: each of
+    /// `sizes` and `durations` describes a block of frames, written as one
+    /// chunk, but the sample table lists every frame as a sample of
+    /// duration 1, as QuickTime stores uncompressed audio.
+    pub pcm_frame_bytes: Option<u32>,
 }
 
 impl TrakOut {
@@ -98,6 +103,7 @@ pub(super) fn layout(tracks: &[TrakOut]) -> Vec<Chunk> {
             let mut end = start;
             let mut span = 0u64;
             match trak.handler {
+                Handler::Sound if trak.pcm_frame_bytes.is_some() => end = start + 1,
                 Handler::Sound => end = (start + CHUNK_SAMPLES).min(n),
                 Handler::Video { .. } => {
                     while end < n
@@ -177,11 +183,15 @@ pub(super) fn moov(
     let mut moov = Vec::new();
     boxes::put_full(&mut moov, b"mvhd", version, 0, &mvhd);
     for (i, t) in tracks.iter().enumerate() {
-        // Samples per chunk, in this track's chunk order.
+        // Samples per chunk, in this track's chunk order; for uncompressed
+        // audio, sample frames.
         let per_chunk: Vec<u32> = chunks
             .iter()
             .filter(|c| c.track == i)
-            .map(|c| (c.samples.end - c.samples.start) as u32)
+            .map(|c| match t.pcm_frame_bytes {
+                Some(_) => t.durations[c.samples.clone()].iter().sum(),
+                None => (c.samples.end - c.samples.start) as u32,
+            })
             .collect();
         let trak = trak(
             t,
@@ -288,9 +298,24 @@ fn trak(
     boxes::put_full(&mut dinf, b"dref", 0, 0, &dref);
 
     let mut stbl = t.stsd.clone();
-    // stts: runs of equal durations.
+    // stts: runs of equal durations; uncompressed audio has one sample of
+    // duration 1 per frame.
+    let frames = t.media_duration();
     let mut stts = Vec::new();
-    put_runs(&mut stts, t.durations.iter().map(|&d| d.to_be_bytes()));
+    match t.pcm_frame_bytes {
+        Some(_) => {
+            let entries = u32::from(frames > 0);
+            stts.extend(entries.to_be_bytes());
+            if frames > 0 {
+                // Frame counts beyond u32 would need several entries; a
+                // 4 GiB mdat of 1-byte frames is the most a 32-bit stsz
+                // count allows anyway.
+                stts.extend(u32::try_from(frames).unwrap_or(u32::MAX).to_be_bytes());
+                stts.extend(1u32.to_be_bytes());
+            }
+        }
+        None => put_runs(&mut stts, t.durations.iter().map(|&d| d.to_be_bytes())),
+    }
     boxes::put_full(&mut stbl, b"stts", 0, 0, &stts);
     if t.ctts.iter().any(|&c| c != 0) {
         // ctts (8.6.1.3): version 1 when an offset is negative.
@@ -324,9 +349,19 @@ fn trak(
     }
     boxes::put_full(&mut stbl, b"stsc", 0, 0, &stsc);
     let n = t.sizes.len();
-    let mut stsz = 0u32.to_be_bytes().to_vec();
-    stsz.extend((n as u32).to_be_bytes());
-    t.sizes.iter().for_each(|s| stsz.extend(s.to_be_bytes()));
+    let mut stsz = Vec::new();
+    match t.pcm_frame_bytes {
+        // Every frame a sample of the same size, no table.
+        Some(fb) => {
+            stsz.extend(fb.to_be_bytes());
+            stsz.extend(u32::try_from(frames).unwrap_or(u32::MAX).to_be_bytes());
+        }
+        None => {
+            stsz.extend(0u32.to_be_bytes());
+            stsz.extend((n as u32).to_be_bytes());
+            t.sizes.iter().for_each(|s| stsz.extend(s.to_be_bytes()));
+        }
+    }
     boxes::put_full(&mut stbl, b"stsz", 0, 0, &stsz);
     let mut co = (offsets.len() as u32).to_be_bytes().to_vec();
     for &off in offsets {
@@ -402,6 +437,7 @@ mod tests {
             roll: None,
             empty_edit: 0,
             media_time: 0,
+            pcm_frame_bytes: None,
             edit_duration: 0,
         }
     }
