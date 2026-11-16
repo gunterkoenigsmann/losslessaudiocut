@@ -22,7 +22,10 @@ the bash, zsh and fish completions of `lac`, for any Unix) and
 Every package holds the GUI and the command line tool `lac`:
 
 - Windows: `lac.exe` next to `losslessaudiocut.exe` (in the zip folder, or
-  the installation folder).
+  the installation folder). `losslessaudiocut.exe` is a GUI-subsystem
+  program, so it opens no console window; started from a terminal it
+  still prints `--help` and `--version` there (issue #176). `lac.exe` is a
+  console program.
 - macOS: `losslessaudiocut.app/Contents/MacOS/lac`.
 - Linux: `./losslessaudiocut-*.AppImage --cli ARGS...` runs `lac`, and so
   does a symlink named `lac` to the AppImage (`ln -s
@@ -91,7 +94,9 @@ from the package and outside the build tree: the command line tool runs
 `info`, `cut` and `detect` on fixtures (`detect` decodes, so it proves
 that the bundled FFmpeg has the MP3 and Speex decoders), and the GUI
 must start and still run after 15-20 s. On Windows both the unpacked zip
-and a silent installation are tested; on macOS the programs run from the
+and a silent installation are tested, including that
+`losslessaudiocut.exe` is a GUI-subsystem and `lac.exe` a console program
+and that `losslessaudiocut.exe --version` output can be captured; on macOS the programs run from the
 mounted disk image, and the packaging script fails if any library still
 points into Homebrew.
 

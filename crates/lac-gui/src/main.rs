@@ -31,6 +31,15 @@
 //!
 //! Usage: `losslessaudiocut [FILE]`.
 
+// A release build is a GUI program on Windows: started from Explorer it
+// gets no console window next to its own, which would also end the program
+// when closed (issue #176). Debug builds keep the console for their output.
+// `console::attach_parent_console` lets a release build started from a
+// terminal still print there.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+#[cfg(windows)]
+mod console;
 #[cfg(test)]
 mod hotkeys;
 mod icons;
@@ -1296,6 +1305,10 @@ impl State {
 }
 
 fn main() {
+    // First of all, so that --help, --version and clap's errors below reach
+    // the terminal the program was started from (see console.rs).
+    #[cfg(windows)]
+    console::attach_parent_console();
     // Before any window: --help and --version print and exit, a malformed
     // command line exits with clap's message.
     let args = GuiArgs::try_parse_os(std::env::args_os()).unwrap_or_else(|e| e.exit());

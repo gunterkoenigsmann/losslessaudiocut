@@ -36,14 +36,20 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 objc2-metal = "0.3.2"
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalLayer", "CATransaction", "objc2-metal", "objc2-core-foundation"] }
 
+# Attaching a release build to the console of the terminal it was started
+# from (console.rs, issue #176). Already in the tree through other crates.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console"] }
+
 [build-dependencies]
 # Compiles the Windows resources (icon, version, manifest) with rc.exe or
 # windres; see build.rs. Unused on other targets.
 embed-resource = "3.0.12"
 
 # The workspace forbids `unsafe`; the GPU calls of the video pane's
-# renderers (video_gl.rs, video_metal.rs) are FFI and the only places in this
-# crate allowed to use it (AGENTS.md), with `#[allow(unsafe_code)]` and a `// SAFETY:`
+# renderers (video_gl.rs, video_metal.rs) and the Win32 console calls
+# (console.rs) are FFI and the only places in this crate allowed to use it
+# (AGENTS.md), with `#[allow(unsafe_code)]` and a `// SAFETY:`
 # comment per block.
 [lints.rust]
 missing_docs = "deny"

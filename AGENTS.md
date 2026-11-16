@@ -95,8 +95,9 @@ lac-gui, lac-cli  ->  lac-app  ->  lac-analysis, lac-peaks, lac-playback
   `unwrap()`/`expect()` on data that comes from a file; malformed input must
   produce an error, never a panic.
 - **No `unsafe`** outside FFI wrappers: FFmpeg in `lac-decode` and the
-  GPU calls of `crates/lac-gui/src/video_gl.rs` (OpenGL) and
-  `video_metal.rs` (Metal); each `unsafe` block gets a `// SAFETY:`
+  GPU calls of `crates/lac-gui/src/video_gl.rs` (OpenGL),
+  `video_metal.rs` (Metal), and the Win32 console calls of
+  `crates/lac-gui/src/console.rs`; each `unsafe` block gets a `// SAFETY:`
   comment.
 - Parsers take `&[u8]` or `Read + Seek` so they can be unit-tested on
   hand-crafted byte buffers.

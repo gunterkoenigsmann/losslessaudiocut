@@ -320,6 +320,21 @@ jobs:
             . "$dir\lac-completion.ps1"
             Remove-Item cut.mp3
             Pop-Location
+            # The GUI opens no console window, the CLI is a console program
+            # (issue #176): the Subsystem field of the PE optional header,
+            # 0x5C bytes after the "PE\0\0" signature whose offset is at
+            # 0x3C, is 2 (IMAGE_SUBSYSTEM_WINDOWS_GUI) or 3 (_CUI).
+            foreach ($exe in @(@{ Name = 'losslessaudiocut.exe'; Want = 2 }, @{ Name = 'lac.exe'; Want = 3 })) {
+              $bytes = [System.IO.File]::ReadAllBytes("$dir\$($exe.Name)")
+              $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+              $subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x5C)
+              if ($subsystem -ne $exe.Want) { throw "$($exe.Name): subsystem $subsystem, expected $($exe.Want)" }
+            }
+            # Even so, its --version output must reach whoever captures it.
+            # (Only the form is checked: on pull requests the package version
+            # has a -dev suffix that the program's own version lacks.)
+            $version = & "$dir\losslessaudiocut.exe" --version | Out-String
+            if ($version -notmatch '^losslessaudiocut \d+\.\d+\.\d+') { throw "GUI --version printed '$version'" }
             # The GUI must still be running after 15 s: a crash at start-up
             # ends it. (Missing DLLs would only show a dialog and keep it
             # "running", but the CLI above links the same DLLs and would
