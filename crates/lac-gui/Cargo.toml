@@ -16,6 +16,9 @@ lac-app.workspace = true
 lac-core.workspace = true
 lac-peaks.workspace = true
 lac-playback.workspace = true
+# OpenGL function loader for the video pane's GPU renderer (video_gl.rs);
+# the functions come from wxWidgets' GL context.
+glow.workspace = true
 # MIDI input from control surfaces (issue #95, see surface.rs).
 midir.workspace = true
 # Without default features: they pull in the Linux tray icon library
@@ -28,5 +31,13 @@ wxdragon = { version = "0.9.24", default-features = false, features = ["aui"] }
 # windres; see build.rs. Unused on other targets.
 embed-resource = "3.0.12"
 
-[lints]
-workspace = true
+# The workspace forbids `unsafe`; the OpenGL calls of the video pane's
+# renderer (video_gl.rs) are FFI and the one place in this crate allowed to
+# use it (AGENTS.md), with `#[allow(unsafe_code)]` and a `// SAFETY:`
+# comment per block.
+[lints.rust]
+missing_docs = "deny"
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"

@@ -63,7 +63,7 @@ pub enum Matrix {
 
 impl Matrix {
     /// The luma weights of red and blue (Kr, Kb).
-    fn weights(self) -> (f32, f32) {
+    pub(crate) fn weights(self) -> (f32, f32) {
         match self {
             Self::Bt601 => (0.299, 0.114),
             Self::Bt709 => (0.2126, 0.0722),
