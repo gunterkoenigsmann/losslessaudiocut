@@ -190,3 +190,32 @@ fn pictures_convert_to_rgb() {
     let f = v.frame_at(&mut r, 0).expect("decodes");
     assert_eq!(f.to_rgb(), p);
 }
+
+/// Every fixture's pictures can go to a GPU plane by plane, and the
+/// colour matrix a shader applies gives the CPU conversion's colours
+/// (within one 8-bit step).
+#[test]
+fn gpu_layouts_match_the_cpu_conversion() {
+    for name in FIXTURES {
+        let (mut r, mut v) = open(name);
+        let f = v.frame_at(&mut r, 0).expect("decodes");
+        let g = f
+            .gpu_layout()
+            .unwrap_or_else(|| panic!("{name}: {} has no GPU layout", f.layout.name));
+        let cpu = f.to_rgb();
+        for y in 0..f.height as usize {
+            for x in 0..f.width as usize {
+                let got = g.pixel(&f, x, y);
+                for (k, c) in got.iter().enumerate() {
+                    let have = (c * 255.0).round().clamp(0.0, 255.0) as u8;
+                    let want = cpu.rgb[(y * f.width as usize + x) * 3 + k];
+                    assert!(
+                        have.abs_diff(want) <= 1,
+                        "{name} ({}): pixel {x},{y} component {k}: {have} vs {want}",
+                        f.layout.name
+                    );
+                }
+            }
+        }
+    }
+}

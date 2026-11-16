@@ -9,13 +9,20 @@
 //! ([`lac_decode::VideoDecoder`]), so playback and scrolling never wait
 //! for the decoder: the pane shows the last picture until the next one
 //! arrives.
+//!
+//! The pane draws with the GPU where it can (OpenGL in `lac-gui`): the
+//! loader then hands over the decoded planes ([`Image::Planes`]) and the
+//! GPU converts and scales them. Otherwise, or for pixel formats a GPU
+//! cannot read plane by plane, it converts to RGB itself
+//! ([`Image::Rgb`]). [`Output`] chooses.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use lac_core::{MediaTime, Rounding, SamplePos, VideoIndex, rescale};
-pub use lac_decode::Picture;
+pub use lac_decode::gpu::{Channel, GpuLayout, GpuTexture};
+pub use lac_decode::{Frame, Picture};
 
 use crate::Source;
 
@@ -109,6 +116,53 @@ pub fn step(
         .find(|&p| if forward { p > pos } else { p < pos })
 }
 
+/// Where a picture of `width` x `height` pixels, turned clockwise by
+/// `rotation` degrees (0, 90, 180 or 270; other values count as 0), goes
+/// in a pane of `pane_width` x `pane_height`: the largest size that keeps
+/// its aspect ratio, centred, as (x, y, width, height); `None` for an
+/// empty pane or picture.
+pub fn fit_rect(
+    width: u32,
+    height: u32,
+    rotation: u16,
+    pane_width: u32,
+    pane_height: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let (sw, sh) = (u64::from(width), u64::from(height));
+    if sw == 0 || sh == 0 || pane_width == 0 || pane_height == 0 {
+        return None;
+    }
+    let turned = matches!(rotation, 90 | 270);
+    // Size as displayed, before scaling.
+    let (rw, rh) = if turned { (sh, sw) } else { (sw, sh) };
+    let (pw, ph) = (u64::from(pane_width), u64::from(pane_height));
+    // The largest size of rw:rh that fits: limited by width or height.
+    let (w, h) = if pw * rh <= ph * rw {
+        (pw, (pw * rh / rw).max(1))
+    } else {
+        ((ph * rw / rh).max(1), ph)
+    };
+    Some((
+        ((pw - w) / 2) as u32,
+        ((ph - h) / 2) as u32,
+        w as u32,
+        h as u32,
+    ))
+}
+
+/// The point of the source picture shown at point (`u`, `v`) of the
+/// displayed (turned) picture, both in 0.0..=1.0 from the top left: how
+/// a GPU renderer maps the corners of its quad to texture coordinates.
+/// Rotation as for [`fit_rect`].
+pub fn source_point(rotation: u16, u: f32, v: f32) -> (f32, f32) {
+    match rotation {
+        90 => (v, 1.0 - u),
+        180 => (1.0 - u, 1.0 - v),
+        270 => (1.0 - v, u),
+        _ => (u, v),
+    }
+}
+
 /// A picture scaled and rotated to fit a pane, centred in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fitted {
@@ -130,19 +184,12 @@ pub struct Fitted {
 /// picture. Each pixel is taken from the nearest source pixel, which is
 /// enough for a preview.
 pub fn fit(picture: &Picture, rotation: u16, width: u32, height: u32) -> Option<Fitted> {
-    let (sw, sh) = (picture.width as u64, picture.height as u64);
-    if sw == 0 || sh == 0 || width == 0 || height == 0 {
-        return None;
-    }
+    let (x, y, w, h) = fit_rect(picture.width, picture.height, rotation, width, height)?;
+    let (sw, sh) = (u64::from(picture.width), u64::from(picture.height));
     let turned = matches!(rotation, 90 | 270);
     // Size as displayed, before scaling.
     let (rw, rh) = if turned { (sh, sw) } else { (sw, sh) };
-    // The largest size of rw:rh that fits: limited by width or height.
-    let (w, h) = if u64::from(width) * rh <= u64::from(height) * rw {
-        (u64::from(width), (u64::from(width) * rh / rw).max(1))
-    } else {
-        ((u64::from(height) * rw / rh).max(1), u64::from(height))
-    };
+    let (w, h) = (u64::from(w), u64::from(h));
     let mut rgba = Vec::with_capacity((w * h * 4) as usize);
     for oy in 0..h {
         let ry = oy * rh / h;
@@ -161,12 +208,58 @@ pub fn fit(picture: &Picture, rotation: u16, width: u32, height: u32) -> Option<
         }
     }
     Some(Fitted {
-        x: ((u64::from(width) - w) / 2) as u32,
-        y: ((u64::from(height) - h) / 2) as u32,
+        x,
+        y,
         width: w as u32,
         height: h as u32,
         rgba,
     })
+}
+
+/// What a [`VideoLoader`] delivers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Output {
+    /// Pictures converted to RGB ([`Image::Rgb`]), for drawing as bitmaps.
+    #[default]
+    Rgb,
+    /// Decoded planes where a GPU can read them ([`Image::Planes`], see
+    /// [`lac_decode::gpu`]), RGB for other pixel formats.
+    Planes,
+}
+
+/// A decoded picture as a [`VideoLoader`] delivers it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Image {
+    /// Converted to RGB.
+    Rgb(Picture),
+    /// As decoded; [`Frame::gpu_layout`] says how to show it.
+    Planes(Frame),
+}
+
+impl Image {
+    /// Width and height in pixels, before rotation.
+    pub fn size(&self) -> (u32, u32) {
+        match self {
+            Image::Rgb(p) => (p.width, p.height),
+            Image::Planes(f) => (f.width, f.height),
+        }
+    }
+
+    /// Presentation time (ticks of the video timescale).
+    pub fn time(&self) -> MediaTime {
+        match self {
+            Image::Rgb(p) => p.time,
+            Image::Planes(f) => f.time,
+        }
+    }
+
+    /// The picture in RGB, converting decoded planes.
+    pub fn to_rgb(&self) -> std::borrow::Cow<'_, Picture> {
+        match self {
+            Image::Rgb(p) => std::borrow::Cow::Borrowed(p),
+            Image::Planes(f) => std::borrow::Cow::Owned(f.to_rgb()),
+        }
+    }
 }
 
 /// What a [`VideoLoader`] knows about the file's video track once it has
@@ -190,7 +283,9 @@ struct Shared {
     track: Option<Arc<VideoTrack>>,
     /// Increases with every new picture or error.
     generation: u64,
-    picture: Option<Arc<Picture>>,
+    picture: Option<Arc<Image>>,
+    /// What to deliver.
+    output: Option<Output>,
     error: Option<String>,
 }
 
@@ -207,12 +302,16 @@ pub struct VideoLoader {
 
 impl VideoLoader {
     /// Starts a thread that opens `path` (independently of any other
-    /// [`Source`] on it) and waits for requests. Dropping the loader ends
-    /// the thread after the picture it is working on.
-    pub fn start(path: impl Into<PathBuf>) -> Self {
+    /// [`Source`] on it) and waits for requests, delivering pictures as
+    /// `output` says. Dropping the loader ends the thread after the
+    /// picture it is working on.
+    pub fn start(path: impl Into<PathBuf>, output: Output) -> Self {
         let path = path.into();
         let (tx, rx) = channel();
-        let shared = Arc::new(Mutex::new(Shared::default()));
+        let shared = Arc::new(Mutex::new(Shared {
+            output: Some(output),
+            ..Shared::default()
+        }));
         {
             let shared = Arc::clone(&shared);
             std::thread::spawn(move || run(&path, &rx, &shared));
@@ -254,9 +353,15 @@ impl VideoLoader {
         let _ = self.requests.send(t);
     }
 
+    /// Delivers later pictures as `output` says (for example RGB after
+    /// the GPU renderer failed). The current picture stays as it is.
+    pub fn set_output(&self, output: Output) {
+        lock(&self.shared).output = Some(output);
+    }
+
     /// The latest picture if its generation differs from `seen`, with
     /// that generation; errors are reported as text for the status line.
-    pub fn poll(&self, seen: Option<u64>) -> Option<(u64, Result<Arc<Picture>, String>)> {
+    pub fn poll(&self, seen: Option<u64>) -> Option<(u64, Result<Arc<Image>, String>)> {
         let s = lock(&self.shared);
         if seen == Some(s.generation) || s.generation == 0 {
             return None;
@@ -303,7 +408,11 @@ fn run(path: &Path, rx: &Receiver<MediaTime>, shared: &Mutex<Shared>) {
         while let Ok(newer) = rx.try_recv() {
             t = newer;
         }
-        let result = source.video_picture(&mut decoder, t);
+        let output = lock(shared).output.unwrap_or(Output::Rgb);
+        let result = source.video_frame(&mut decoder, t).map(|f| match output {
+            Output::Planes if f.gpu_layout().is_some() => Image::Planes(f),
+            _ => Image::Rgb(f.to_rgb()),
+        });
         let mut s = lock(shared);
         s.generation += 1;
         match result {
@@ -455,7 +564,7 @@ mod tests {
 
     #[test]
     fn loader_delivers_the_picture_at_a_position() {
-        let l = VideoLoader::start(fixture("video_h264_opengop_rot90.mp4"));
+        let l = VideoLoader::start(fixture("video_h264_opengop_rot90.mp4"), Output::Rgb);
         let track = wait(|| l.track());
         assert_eq!(track.rotation, 270);
         assert!(!l.has_no_video());
@@ -465,8 +574,9 @@ mod tests {
         let (g, p) = wait(|| l.poll(None));
         let p = p.expect("decodes");
         let want = picture_time(&track.index, track.clock.time_at(24_000));
-        assert_eq!(Some(p.time), want);
-        assert_eq!((p.width, p.height), (64, 64));
+        assert!(matches!(*p, Image::Rgb(_)));
+        assert_eq!(Some(p.time()), want);
+        assert_eq!(p.size(), (64, 64));
         // The same picture again starts nothing new.
         l.request(24_001);
         std::thread::sleep(Duration::from_millis(50));
@@ -475,10 +585,81 @@ mod tests {
 
     #[test]
     fn audio_files_have_no_video() {
-        let l = VideoLoader::start(fixture("mp3_vbr_44k.mp3"));
+        let l = VideoLoader::start(fixture("mp3_vbr_44k.mp3"), Output::Planes);
         wait(|| l.has_no_video().then_some(()));
         assert!(l.track().is_none());
         l.request(1000);
         assert!(l.poll(None).is_none());
+    }
+
+    #[test]
+    fn loader_delivers_planes_for_the_gpu_and_switches_back() {
+        let l = VideoLoader::start(fixture("video_h264_opengop_rot90.mp4"), Output::Planes);
+        wait(|| l.track());
+        l.request(0);
+        let (g, p) = wait(|| l.poll(None));
+        let p = p.expect("decodes");
+        let Image::Planes(f) = &*p else {
+            panic!("expected planes");
+        };
+        assert!(f.gpu_layout().is_some());
+        let rgb = p.to_rgb();
+        assert_eq!((rgb.width, rgb.height, rgb.time), (64, 64, p.time()));
+        // After the GPU renderer gave up: RGB again.
+        l.set_output(Output::Rgb);
+        l.request(24_000);
+        let (_, p) = wait(|| l.poll(Some(g)));
+        assert!(matches!(*p.expect("decodes"), Image::Rgb(_)));
+    }
+
+    #[test]
+    fn fit_rect_matches_fit() {
+        // 3 x 2 picture in panes of different shapes and every rotation.
+        let pic = Picture {
+            time: 0,
+            width: 3,
+            height: 2,
+            rgb: vec![0; 18],
+        };
+        for rotation in [0, 90, 180, 270] {
+            for (w, h) in [(3, 2), (2, 3), (30, 7), (7, 30), (1, 1)] {
+                let f = fit(&pic, rotation, w, h).expect("fits");
+                assert_eq!(
+                    fit_rect(3, 2, rotation, w, h),
+                    Some((f.x, f.y, f.width, f.height))
+                );
+            }
+        }
+        assert_eq!(fit_rect(3, 2, 0, 0, 5), None);
+        assert_eq!(fit_rect(0, 2, 0, 5, 5), None);
+    }
+
+    #[test]
+    fn source_point_matches_the_rotation_of_fit() {
+        // A 3 x 2 picture with a different value in every pixel, shown
+        // unscaled: the centre of each displayed pixel must map to the
+        // centre of the source pixel `fit` takes.
+        let pic = Picture {
+            time: 0,
+            width: 3,
+            height: 2,
+            rgb: (0..6).flat_map(|i| [i * 40, 0, 0]).collect(),
+        };
+        for rotation in [0u16, 90, 180, 270] {
+            let (dw, dh) = if rotation % 180 == 90 { (2, 3) } else { (3, 2) };
+            let f = fit(&pic, rotation, dw, dh).expect("fits");
+            for y in 0..dh {
+                for x in 0..dw {
+                    let u = (x as f32 + 0.5) / dw as f32;
+                    let v = (y as f32 + 0.5) / dh as f32;
+                    let (su, sv) = source_point(rotation, u, v);
+                    let sx = (su * 3.0) as usize;
+                    let sy = (sv * 2.0) as usize;
+                    let want = pic.rgb[(sy * 3 + sx) * 3];
+                    let got = f.rgba[((y * dw + x) * 4) as usize];
+                    assert_eq!(got, want, "rotation {rotation} at {x},{y}");
+                }
+            }
+        }
     }
 }

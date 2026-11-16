@@ -47,6 +47,7 @@ mod surface;
 mod tints;
 mod toolbar;
 mod track_list;
+mod video_gl;
 mod video_pane;
 
 use std::cell::RefCell;
@@ -82,7 +83,7 @@ use lac_app::recent_files::RecentFiles;
 use lac_app::theme::{ListPalette, Theme};
 use lac_app::thumbnails::{ThumbnailLoader, strip_layout, thumbnail_width};
 use lac_app::track_list::Bound;
-use lac_app::video::{Picture, VideoLoader};
+use lac_app::video::{Image, Output, VideoLoader};
 use lac_app::waveform::{DrawMode, WaveformView};
 use lac_core::{SamplePos, Tags};
 use lac_peaks::PeakSummary;
@@ -92,6 +93,7 @@ use options::Options;
 use panes::Panes;
 use position_bar::PositionBar;
 use toolbar::{Tool, Toolbar};
+use video_pane::VideoPane;
 use wxdragon::prelude::*;
 
 /// Menu command ids (above wxWidgets' reserved range).
@@ -404,7 +406,10 @@ struct State {
     /// Generation of the last picture taken from `video_loader`.
     video_seen: Option<u64>,
     /// The picture the video pane shows.
-    video_picture: Option<std::sync::Arc<Picture>>,
+    video_picture: Option<std::sync::Arc<Image>>,
+    /// What the video pane draws: decoded planes with OpenGL, RGB
+    /// otherwise (see `video_pane`).
+    video_output: Output,
     /// The video pane was shown for the file opened last (once, so the
     /// user can close it again).
     video_pane_offered: bool,
@@ -459,7 +464,7 @@ impl State {
         self.autosave_failed = false;
         self.job = Some(PeakJob::start(&path, PUBLISH_INTERVAL, self.cache.clone()));
         self.detail_loader = Some(DetailLoader::start(&path));
-        self.video_loader = Some(VideoLoader::start(&path));
+        self.video_loader = Some(VideoLoader::start(&path, self.video_output));
         self.video_seen = None;
         self.video_picture = None;
         self.video_pane_offered = false;
@@ -1325,7 +1330,9 @@ fn main() {
         let grid = track_list::create(&frame, &list_palette);
 
         let map = minimap::create(&frame);
-        let video = video_pane::create(&frame);
+        // Before the video pane, which logs how it draws.
+        let log = log_pane::create(&frame);
+        let video = VideoPane::create(&frame);
         let cache = PeakCache::default_dir().map(PeakCache::new);
         if let Some(c) = cache.clone() {
             // Startup eviction (orphans, old and excess entries) off the
@@ -1345,6 +1352,7 @@ fn main() {
             recent: recent_files,
             grid: Some(grid),
             recovery: Recovery::default_dir().map(Recovery::new),
+            video_output: video.output(),
             ..State::default()
         }));
         bind_track_list(&grid, &frame, &panel, &state);
@@ -1383,7 +1391,6 @@ fn main() {
         };
         bind_minimap(&map, &panel, &state);
         bind_video(&video, &state);
-        let log = log_pane::create(&frame);
         let positions = bar.panel();
         let panes = Panes::new(
             &frame,
@@ -1394,7 +1401,7 @@ fn main() {
                 positions: &positions,
                 track_list: &grid,
                 log: &log,
-                video: &video,
+                video: &video.panel,
             },
         );
         panes.restore();
@@ -1482,7 +1489,7 @@ fn main() {
                     p.show(Pane::Video);
                 }
                 if repaint_video || show_video {
-                    video.refresh(false, None);
+                    video.refresh();
                 }
                 offer_recovery(&frame, &state);
                 if playing {
@@ -3624,29 +3631,54 @@ fn draw_thumbnails(
     }
 }
 
-/// The video pane: paints the current picture, and again when resized.
-fn bind_video(video: &Panel, state: &Rc<RefCell<State>>) {
-    let v = *video;
+/// The video pane: paints the current picture, and again when resized,
+/// with OpenGL or as a bitmap (see `video_pane`).
+fn bind_video(video: &VideoPane, state: &Rc<RefCell<State>>) {
+    /// The picture to show and its rotation.
+    fn current(state: &RefCell<State>) -> (Option<std::sync::Arc<Image>>, u16) {
+        let st = state.borrow();
+        let rotation = st
+            .video_loader
+            .as_ref()
+            .and_then(VideoLoader::track)
+            .map_or(0, |t| t.rotation);
+        (st.video_picture.clone(), rotation)
+    }
+    let v = video.panel;
     {
         let state = Rc::clone(state);
-        video.on_paint(move |_| {
+        video.panel.on_paint(move |_| {
             let dc = AutoBufferedPaintDC::new(&v);
-            let st = state.borrow();
-            let rotation = st
-                .video_loader
-                .as_ref()
-                .and_then(VideoLoader::track)
-                .map_or(0, |t| t.rotation);
-            video_pane::draw(
-                &dc,
-                v.get_client_size(),
-                st.video_picture.as_deref(),
-                rotation,
-            );
+            let (image, rotation) = current(&state);
+            video_pane::draw(&dc, v.get_client_size(), image.as_deref(), rotation);
         });
     }
-    video.on_size(move |e| {
+    video.panel.on_size(move |e| {
         v.refresh(false, None);
+        e.skip(true);
+    });
+    let Some(canvas) = video.canvas() else {
+        return;
+    };
+    let (pane, state) = (video.clone(), Rc::clone(state));
+    canvas.on_paint(move |_| {
+        // Every paint handler needs a paint DC, even when GL draws.
+        let _dc = PaintDC::new(&canvas);
+        let (image, rotation) = current(&state);
+        if let Err(e) = pane.paint_gl(image.as_ref(), rotation) {
+            log_pane::append(&trf(
+                "Video: OpenGL failed ({error}), drawing pictures without it",
+                &[("error", &e)],
+            ));
+            let mut st = state.borrow_mut();
+            st.video_output = Output::Rgb;
+            if let Some(l) = &st.video_loader {
+                l.set_output(Output::Rgb);
+            }
+        }
+    });
+    canvas.on_size(move |e| {
+        canvas.refresh(false, None);
         e.skip(true);
     });
 }

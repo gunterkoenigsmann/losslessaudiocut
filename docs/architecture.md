@@ -860,6 +860,26 @@ keyframes from the file's start, so the choice stays put while scrolling,
 and a `ThumbnailLoader` thread decodes and scales the visible ones, newest
 request first, keeping a few hundred.
 
+Drawing the picture *(implemented)*: where the display offers OpenGL, the
+*Video* pane is an OpenGL canvas (`lac-gui/src/video_gl.rs`, through
+`glow`): the loader hands over the decoded planes (`Output::Planes`,
+`Image::Planes`) and the GPU converts and scales them. Each plane becomes a
+texture (one or two channels of 8 or 16 bits), and one GLSL 1.50 shader
+picks Y, Cb and Cr from them and applies a 3x4 matrix, both described by
+`lac_decode::gpu::GpuLayout`, which is `Frame::to_rgb`'s arithmetic
+rearranged (tests compare the two on every video fixture); formats without
+such a layout (RGB, packed 4:2:2, big-endian) are uploaded as RGB. It
+needs an OpenGL 3.2 core context, the newest macOS offers. When that is
+missing, or creating the context, compiling the shader or drawing fails,
+the canvas is hidden for good and the pane draws bitmaps scaled by
+`lac_app::video::fit` again, the loader switching to `Output::Rgb`; the
+log says which way is used, and `LAC_VIDEO_RENDERER=software` chooses
+bitmaps from the start. The bitmap way stays because OpenGL may go away
+(Apple deprecated it); a Metal renderer would be a third way (issue
+#172). wxWidgets shows a message box when it cannot create the context
+(issue #173). The GL calls are FFI, so `video_gl.rs` is the second
+place allowed to use `unsafe` (after `lac-decode`).
+
 The waveform, playback and analysis stay audio-only; the GUI adds a video
 preview pane driven by the audio clock and a keyframe thumbnail lane. Video
 is decoded with libavcodec from our own packet index, like audio.

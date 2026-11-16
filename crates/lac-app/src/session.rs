@@ -172,6 +172,16 @@ impl Source {
         decoder.picture_at(&mut self.reader, time)
     }
 
+    /// The decoded frame `decoder` shows at video time `time`, in the
+    /// decoder's pixel format, see [`lac_decode::VideoDecoder::frame_at`].
+    pub fn video_frame(
+        &mut self,
+        decoder: &mut lac_decode::VideoDecoder,
+        time: lac_core::MediaTime,
+    ) -> Result<lac_decode::Frame, lac_decode::DecodeError> {
+        decoder.frame_at(&mut self.reader, time)
+    }
+
     /// Problems found while parsing that did not prevent opening the file.
     pub fn warnings(&self) -> &[String] {
         self.container.warnings()

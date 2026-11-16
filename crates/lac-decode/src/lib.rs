@@ -18,6 +18,7 @@
 //! Requires FFmpeg 5.1 or newer (the `AVChannelLayout` API).
 
 mod ffi;
+pub mod gpu;
 pub mod picture;
 mod video;
 

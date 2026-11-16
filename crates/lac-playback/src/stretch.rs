@@ -123,8 +123,8 @@ impl Stretcher {
                 }
             }
             let mut tail = Vec::with_capacity(hop * ch);
-            for i in hop..2 * hop {
-                let w = self.window[i];
+            // The second half of the window fades the frame out.
+            for (i, &w) in self.window.iter().enumerate().take(2 * hop).skip(hop) {
                 tail.extend(x(i).iter().map(|v| w * v));
             }
             self.tail = tail;

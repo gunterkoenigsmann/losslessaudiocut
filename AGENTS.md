@@ -94,7 +94,8 @@ lac-gui, lac-cli  ->  lac-app  ->  lac-analysis, lac-peaks, lac-playback
 - **Errors**: `thiserror` enums in libraries, `anyhow` only in binaries. No
   `unwrap()`/`expect()` on data that comes from a file; malformed input must
   produce an error, never a panic.
-- **No `unsafe`** outside FFI wrappers in `lac-decode`; each `unsafe` block
+- **No `unsafe`** outside FFI wrappers: FFmpeg in `lac-decode` and the
+  OpenGL calls of `crates/lac-gui/src/video_gl.rs`; each `unsafe` block
   gets a `// SAFETY:` comment.
 - Parsers take `&[u8]` or `Read + Seek` so they can be unit-tested on
   hand-crafted byte buffers.
