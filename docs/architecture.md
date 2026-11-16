@@ -860,25 +860,31 @@ keyframes from the file's start, so the choice stays put while scrolling,
 and a `ThumbnailLoader` thread decodes and scales the visible ones, newest
 request first, keeping a few hundred.
 
-Drawing the picture *(implemented)*: where the display offers OpenGL, the
-*Video* pane is an OpenGL canvas (`lac-gui/src/video_gl.rs`, through
-`glow`): the loader hands over the decoded planes (`Output::Planes`,
-`Image::Planes`) and the GPU converts and scales them. Each plane becomes a
-texture (one or two channels of 8 or 16 bits), and one GLSL 1.50 shader
-picks Y, Cb and Cr from them and applies a 3x4 matrix, both described by
-`lac_decode::gpu::GpuLayout`, which is `Frame::to_rgb`'s arithmetic
-rearranged (tests compare the two on every video fixture); formats without
-such a layout (RGB, packed 4:2:2, big-endian) are uploaded as RGB. It
-needs an OpenGL 3.2 core context, the newest macOS offers. When that is
-missing, or creating the context, compiling the shader or drawing fails,
-the canvas is hidden for good and the pane draws bitmaps scaled by
-`lac_app::video::fit` again, the loader switching to `Output::Rgb`; the
-log says which way is used, and `LAC_VIDEO_RENDERER=software` chooses
-bitmaps from the start. The bitmap way stays because OpenGL may go away
-(Apple deprecated it); a Metal renderer would be a third way (issue
-#172). wxWidgets shows a message box when it cannot create the context
-(issue #173). The GL calls are FFI, so `video_gl.rs` is the second
-place allowed to use `unsafe` (after `lac-decode`).
+Drawing the picture *(implemented)*: the *Video* pane draws with the GPU
+where it can: on macOS with Metal (`lac-gui/src/video_metal.rs`, a
+`CAMetalLayer` on the native view of a panel filling the pane, through
+`objc2-metal`), elsewhere, or when Metal is missing, with OpenGL
+(`lac-gui/src/video_gl.rs`, an OpenGL canvas, through `glow`). The loader
+then hands over the decoded planes (`Output::Planes`, `Image::Planes`) and
+the GPU converts and scales them. Both renderers draw what
+`lac-gui/src/video_gpu.rs` prepares: each plane becomes a texture (one or
+two channels of 8 or 16 bits), and the shader (GLSL 1.50 or the Metal
+Shading Language, the same arithmetic) picks Y, Cb and Cr from them and
+applies a 3x4 matrix, both described by `lac_decode::gpu::GpuLayout`,
+which is `Frame::to_rgb`'s arithmetic rearranged (tests compare the two
+on every video fixture, and on macOS what Metal draws with the CPU's
+picture); formats without such a layout (RGB, packed 4:2:2, big-endian)
+are uploaded as RGBA. OpenGL needs a 3.2 core context, the newest macOS
+offers. When the GPU way is missing, or creating it, compiling the shader
+or drawing fails, its window is hidden for good and the pane draws bitmaps
+scaled by `lac_app::video::fit` again, the loader switching to
+`Output::Rgb`; the log says which way is used. `LAC_VIDEO_RENDERER=software`
+chooses bitmaps from the start, `LAC_VIDEO_RENDERER=opengl` skips Metal.
+The bitmap way stays because a GPU interface may go away (Apple deprecated
+OpenGL, which is why Metal came, issue #172). wxWidgets shows a message box
+when it cannot create an OpenGL context (issue #173). The GPU calls are
+FFI, so `video_gl.rs` and `video_metal.rs` may use `unsafe`, like
+`lac-decode`.
 
 The waveform, playback and analysis stay audio-only; the GUI adds a video
 preview pane driven by the audio clock and a keyframe thumbnail lane. Video
