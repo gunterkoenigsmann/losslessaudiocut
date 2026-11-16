@@ -304,6 +304,7 @@ impl Renderer {
 }
 
 /// A texture descriptor for a `width` x `height` render target.
+#[cfg(test)]
 fn target_descriptor(width: u32, height: u32) -> Retained<MTLTextureDescriptor> {
     // SAFETY: plain values; sizes of 0 are clamped by the caller.
     unsafe {
