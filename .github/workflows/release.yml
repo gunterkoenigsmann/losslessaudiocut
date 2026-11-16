@@ -331,8 +331,10 @@ jobs:
               if ($subsystem -ne $exe.Want) { throw "$($exe.Name): subsystem $subsystem, expected $($exe.Want)" }
             }
             # Even so, its --version output must reach whoever captures it.
+            # (Only the form is checked: on pull requests the package version
+            # has a -dev suffix that the program's own version lacks.)
             $version = & "$dir\losslessaudiocut.exe" --version | Out-String
-            if ($version -notmatch '${{ needs.version.outputs.version }}') { throw "GUI --version printed '$version'" }
+            if ($version -notmatch '^losslessaudiocut \d+\.\d+\.\d+') { throw "GUI --version printed '$version'" }
             # The GUI must still be running after 15 s: a crash at start-up
             # ends it. (Missing DLLs would only show a dialog and keep it
             # "running", but the CLI above links the same DLLs and would
