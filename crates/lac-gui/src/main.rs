@@ -48,6 +48,9 @@ mod tints;
 mod toolbar;
 mod track_list;
 mod video_gl;
+mod video_gpu;
+#[cfg(target_os = "macos")]
+mod video_metal;
 mod video_pane;
 
 use std::cell::RefCell;
@@ -1000,10 +1003,18 @@ impl State {
     }
 
     /// Timer: asks for the picture at the playhead (or the cursor) and
-    /// takes a newly decoded one. Returns whether the video pane needs
+    /// takes a newly decoded one, delivered as `output` (what the pane can
+    /// draw). Returns whether the video pane needs
     /// redrawing, and whether it should be shown because a file with a
     /// video track was just opened.
-    fn poll_video(&mut self) -> (bool, bool) {
+    fn poll_video(&mut self, output: Output) -> (bool, bool) {
+        // The pane draws with bitmaps once its GPU renderer failed.
+        if output != self.video_output {
+            self.video_output = output;
+            if let Some(l) = &self.video_loader {
+                l.set_output(output);
+            }
+        }
         let pos = self
             .playhead()
             .or_else(|| self.editor.as_ref().map(Editor::cursor));
@@ -1481,7 +1492,7 @@ fn main() {
                 if let Some(msg) = &autosave {
                     report(&frame, msg);
                 }
-                let (repaint_video, show_video) = state.borrow_mut().poll_video();
+                let (repaint_video, show_video) = state.borrow_mut().poll_video(video.output());
                 // Copied out first: showing the pane lays out the window,
                 // whose size handlers borrow the state.
                 let panes = state.borrow().panes;
@@ -3631,55 +3642,19 @@ fn draw_thumbnails(
     }
 }
 
-/// The video pane: paints the current picture, and again when resized,
-/// with OpenGL or as a bitmap (see `video_pane`).
+/// The video pane: draws the current picture (see `video_pane`).
 fn bind_video(video: &VideoPane, state: &Rc<RefCell<State>>) {
-    /// The picture to show and its rotation.
-    fn current(state: &RefCell<State>) -> (Option<std::sync::Arc<Image>>, u16) {
-        let st = state.borrow();
+    let state = Rc::clone(state);
+    video.bind(move || {
+        // Busy while the state is changed, e.g. when a size event comes
+        // during layout; the pane draws again later.
+        let st = state.try_borrow().ok()?;
         let rotation = st
             .video_loader
             .as_ref()
             .and_then(VideoLoader::track)
             .map_or(0, |t| t.rotation);
-        (st.video_picture.clone(), rotation)
-    }
-    let v = video.panel;
-    {
-        let state = Rc::clone(state);
-        video.panel.on_paint(move |_| {
-            let dc = AutoBufferedPaintDC::new(&v);
-            let (image, rotation) = current(&state);
-            video_pane::draw(&dc, v.get_client_size(), image.as_deref(), rotation);
-        });
-    }
-    video.panel.on_size(move |e| {
-        v.refresh(false, None);
-        e.skip(true);
-    });
-    let Some(canvas) = video.canvas() else {
-        return;
-    };
-    let (pane, state) = (video.clone(), Rc::clone(state));
-    canvas.on_paint(move |_| {
-        // Every paint handler needs a paint DC, even when GL draws.
-        let _dc = PaintDC::new(&canvas);
-        let (image, rotation) = current(&state);
-        if let Err(e) = pane.paint_gl(image.as_ref(), rotation) {
-            log_pane::append(&trf(
-                "Video: OpenGL failed ({error}), drawing pictures without it",
-                &[("error", &e)],
-            ));
-            let mut st = state.borrow_mut();
-            st.video_output = Output::Rgb;
-            if let Some(l) = &st.video_loader {
-                l.set_output(Output::Rgb);
-            }
-        }
-    });
-    canvas.on_size(move |e| {
-        canvas.refresh(false, None);
-        e.skip(true);
+        Some((st.video_picture.clone(), rotation))
     });
 }
 

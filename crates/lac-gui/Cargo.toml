@@ -26,14 +26,24 @@ midir.workspace = true
 # panes (toolbar and friends, see `panes.rs`).
 wxdragon = { version = "0.9.24", default-features = false, features = ["aui"] }
 
+# The video pane's Metal renderer on macOS (video_metal.rs, issue #172).
+# objc2 is already in the tree there through cpal.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.3"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSResponder", "NSView", "NSWindow", "NSGraphics", "objc2-quartz-core", "objc2-core-foundation"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSError"] }
+objc2-metal = "0.3.2"
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalLayer", "CATransaction", "objc2-metal", "objc2-core-foundation"] }
+
 [build-dependencies]
 # Compiles the Windows resources (icon, version, manifest) with rc.exe or
 # windres; see build.rs. Unused on other targets.
 embed-resource = "3.0.12"
 
-# The workspace forbids `unsafe`; the OpenGL calls of the video pane's
-# renderer (video_gl.rs) are FFI and the one place in this crate allowed to
-# use it (AGENTS.md), with `#[allow(unsafe_code)]` and a `// SAFETY:`
+# The workspace forbids `unsafe`; the GPU calls of the video pane's
+# renderers (video_gl.rs, video_metal.rs) are FFI and the only places in this
+# crate allowed to use it (AGENTS.md), with `#[allow(unsafe_code)]` and a `// SAFETY:`
 # comment per block.
 [lints.rust]
 missing_docs = "deny"

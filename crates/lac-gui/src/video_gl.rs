@@ -2,12 +2,9 @@
 //! picture as textures and lets a shader convert YCbCr to RGB, scale and
 //! turn the picture (architecture section 13, "Drawing the picture").
 //!
-//! The colour arithmetic comes from [`GpuLayout`]; this
-//! module only moves it to the GPU. One shader serves every format: it
-//! samples up to three textures, picks the luma and chroma channels with
-//! the dot products in [`picks`] and applies the layout's 3x4 matrix. An
-//! RGB picture (formats without a GPU layout) is one RGB texture with an
-//! identity matrix.
+//! The textures and the colour arithmetic come from
+//! [`crate::video_gpu::prepare`]; this module only moves them to the GPU.
+//! One shader serves every format.
 //!
 //! Needs OpenGL 3.2 core (GLSL 1.50), which macOS gives as its newest
 //! version; [`crate::video_pane`] falls back to drawing bitmaps when it
@@ -21,7 +18,9 @@
 #![allow(unsafe_code)]
 
 use glow::{HasContext, PixelUnpackData};
-use lac_app::video::{Channel, GpuLayout, GpuTexture, Image, fit_rect, source_point};
+use lac_app::video::{Image, fit_rect};
+
+use crate::video_gpu::{IDENTITY, Plane, TexFormat, prepare, quad};
 
 /// Passes the corner's position and texture coordinate on.
 const VERTEX_SHADER: &str = r"#version 150
@@ -64,46 +63,6 @@ void main() {
 const POS: u32 = 0;
 /// See [`POS`].
 const TEX: u32 = 1;
-
-/// The `pick` uniform for luma at `y` and chroma at `chroma` (texture,
-/// channel): entry `3 * component + texture` has a 1 in the channel's
-/// place. Gray pictures pick no chroma, their matrix ignores it.
-pub fn picks(y: Channel, chroma: Option<(Channel, Channel)>) -> [[f32; 4]; 9] {
-    let mut p = [[0.0; 4]; 9];
-    let mut set = |component: usize, (texture, channel): Channel| {
-        p[3 * component + texture][channel] = 1.0;
-    };
-    set(0, y);
-    if let Some((cb, cr)) = chroma {
-        set(1, cb);
-        set(2, cr);
-    }
-    p
-}
-
-/// The quad for a picture turned by `rotation`, as a triangle strip of
-/// (x, y, u, v): the corners of the viewport in normalized device
-/// coordinates (y up) with the texture coordinates of the source
-/// picture shown there (row 0 of a texture is the picture's top).
-pub fn quad(rotation: u16) -> [f32; 16] {
-    let mut q = [0.0; 16];
-    // Top left, top right, bottom left, bottom right of the display.
-    for (i, (u, v)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
-        .into_iter()
-        .enumerate()
-    {
-        let (su, sv) = source_point(rotation, u, v);
-        q[4 * i..4 * i + 4].copy_from_slice(&[2.0 * u - 1.0, 1.0 - 2.0 * v, su, sv]);
-    }
-    q
-}
-
-/// The identity colour matrix, for RGB textures.
-const IDENTITY: [[f32; 4]; 3] = [
-    [1.0, 0.0, 0.0, 0.0],
-    [0.0, 1.0, 0.0, 0.0],
-    [0.0, 0.0, 1.0, 0.0],
-];
 
 /// The GL objects drawing the picture.
 pub struct Renderer {
@@ -270,7 +229,11 @@ impl Renderer {
         };
         let key = std::sync::Arc::as_ptr(image) as usize;
         if self.uploaded != Some(key) {
-            self.colour = self.upload(image);
+            let p = prepare(image);
+            for (unit, plane) in p.planes.iter().enumerate() {
+                self.texture(unit, plane);
+            }
+            self.colour = (p.pick, p.rows);
             self.uploaded = Some(key);
         }
         let (pick, rows) = &self.colour;
@@ -294,149 +257,39 @@ impl Renderer {
         }
     }
 
-    /// Uploads `image`'s textures; returns the picks and matrix to draw
-    /// them with.
-    fn upload(&self, image: &Image) -> ([[f32; 4]; 9], [[f32; 4]; 3]) {
-        if let Image::Planes(frame) = image
-            && let Some(layout) = frame.gpu_layout().filter(native_order)
-        {
-            for (unit, t) in layout.textures.iter().enumerate() {
-                let p = &frame.planes[t.plane];
-                // `gpu_layout` checked that the plane holds this much.
-                let len = (t.height as usize - 1) * p.stride + t.width as usize * texel(t);
-                self.texture(unit, t, &p.data[..len]);
-            }
-            return (picks(layout.y, layout.chroma), layout.matrix);
-        }
-        let rgb = image.to_rgb();
-        let t = GpuTexture {
-            plane: 0,
-            channels: 3,
-            bytes: 1,
-            width: rgb.width,
-            height: rgb.height,
-            row_length: rgb.width as usize,
-        };
-        self.texture(0, &t, &rgb.rgb);
-        (picks((0, 0), Some(((0, 1), (0, 2)))), IDENTITY)
-    }
-
-    /// Fills texture `unit` with `data` as `t` describes it.
-    fn texture(&self, unit: usize, t: &GpuTexture, data: &[u8]) {
-        let (internal, format) = match (t.channels, t.bytes) {
-            (1, 1) => (glow::R8, glow::RED),
-            (2, 1) => (glow::RG8, glow::RG),
-            (1, _) => (glow::R16, glow::RED),
-            (2, _) => (glow::RG16, glow::RG),
-            _ => (glow::RGB8, glow::RGB),
-        };
-        let ty = if t.bytes == 2 {
-            glow::UNSIGNED_SHORT
-        } else {
-            glow::UNSIGNED_BYTE
+    /// Fills texture `unit` with `plane`.
+    fn texture(&self, unit: usize, plane: &Plane) {
+        let (internal, format, ty) = match plane.format {
+            TexFormat::R8 => (glow::R8, glow::RED, glow::UNSIGNED_BYTE),
+            TexFormat::Rg8 => (glow::RG8, glow::RG, glow::UNSIGNED_BYTE),
+            TexFormat::R16 => (glow::R16, glow::RED, glow::UNSIGNED_SHORT),
+            TexFormat::Rg16 => (glow::RG16, glow::RG, glow::UNSIGNED_SHORT),
+            TexFormat::Rgba8 => (glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE),
         };
         let gl = &self.gl;
         let int = |v: usize| i32::try_from(v).unwrap_or(i32::MAX);
-        // SAFETY: see the module documentation; `data` holds `height`
-        // rows of `row_length` texels (the last one only `width`), which
-        // is all GL reads with these unpack settings.
+        // SAFETY: see the module documentation; `plane.data` holds
+        // `height` rows of `bytes_per_row` bytes (the last one only
+        // `width` texels), which is all GL reads with these unpack
+        // settings.
         unsafe {
             gl.active_texture(glow::TEXTURE0 + unit as u32);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[unit]));
-            gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, int(t.row_length));
+            // Row length counts texels, not bytes.
+            let row_length = plane.bytes_per_row / plane.format.texel_bytes();
+            gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, int(row_length));
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
                 internal as i32,
-                int(t.width as usize),
-                int(t.height as usize),
+                int(plane.width as usize),
+                int(plane.height as usize),
                 0,
                 format,
                 ty,
-                PixelUnpackData::Slice(Some(data)),
+                PixelUnpackData::Slice(Some(&plane.data)),
             );
             gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
-        }
-    }
-}
-
-/// Bytes per texel.
-fn texel(t: &GpuTexture) -> usize {
-    t.channels * t.bytes
-}
-
-/// GL reads 16-bit texels in the machine's byte order; our 16-bit planes
-/// are little-endian, so big-endian machines upload RGB instead.
-fn native_order(layout: &GpuLayout) -> bool {
-    cfg!(target_endian = "little") || layout.textures.iter().all(|t| t.bytes == 1)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// What the shader computes from `samples` (one RGBA sample per
-    /// texture) with `pick` and `rows`.
-    fn shade(pick: &[[f32; 4]; 9], rows: &[[f32; 4]; 3], samples: [[f32; 4]; 3]) -> [f32; 3] {
-        let dot = |a: &[f32; 4], b: &[f32; 4]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
-        let c = |k: usize| {
-            (0..3)
-                .map(|t| dot(&pick[3 * k + t], &samples[t]))
-                .sum::<f32>()
-        };
-        let ycc = [c(0), c(1), c(2), 1.0];
-        std::array::from_fn(|k| dot(&rows[k], &ycc))
-    }
-
-    #[test]
-    fn picks_select_planar_and_interleaved_channels() {
-        let rows = [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-        ];
-        let s = [
-            [0.1, 0.2, 0.0, 1.0],
-            [0.3, 0.4, 0.0, 1.0],
-            [0.5, 0.6, 0.0, 1.0],
-        ];
-        // Planar: Y, Cb, Cr in the red channel of textures 0, 1, 2.
-        let p = picks((0, 0), Some(((1, 0), (2, 0))));
-        assert_eq!(shade(&p, &rows, s), [0.1, 0.3, 0.5]);
-        // NV12: chroma interleaved in texture 1.
-        let p = picks((0, 0), Some(((1, 0), (1, 1))));
-        assert_eq!(shade(&p, &rows, s), [0.1, 0.3, 0.4]);
-        // Gray: no chroma, and the alpha of unused textures never counts.
-        let p = picks((0, 0), None);
-        assert_eq!(shade(&p, &rows, s), [0.1, 0.0, 0.0]);
-        // RGB in one texture.
-        let p = picks((0, 0), Some(((0, 1), (0, 2))));
-        assert_eq!(shade(&p, &IDENTITY, s), [0.1, 0.2, 0.0]);
-    }
-
-    #[test]
-    fn quad_covers_the_viewport_with_the_turned_picture() {
-        let q = quad(0);
-        assert_eq!(
-            q,
-            [
-                -1.0, 1.0, 0.0, 0.0, // top left
-                1.0, 1.0, 1.0, 0.0, // top right
-                -1.0, -1.0, 0.0, 1.0, // bottom left
-                1.0, -1.0, 1.0, 1.0, // bottom right
-            ]
-        );
-        // Turned clockwise by 90 degrees, the source's bottom left corner
-        // is at the top left.
-        let q = quad(90);
-        assert_eq!(&q[0..4], &[-1.0, 1.0, 0.0, 1.0]);
-        assert_eq!(&q[4..8], &[1.0, 1.0, 0.0, 0.0]);
-        // Every rotation shows each source corner exactly once.
-        for r in [0, 90, 180, 270] {
-            let q = quad(r);
-            let mut corners: Vec<_> = (0..4).map(|i| (q[4 * i + 2], q[4 * i + 3])).collect();
-            corners.sort_by(|a, b| a.partial_cmp(b).expect("no NaN"));
-            assert_eq!(corners, [(0.0, 0.0), (0.0, 1.0), (1.0, 0.0), (1.0, 1.0)]);
         }
     }
 }

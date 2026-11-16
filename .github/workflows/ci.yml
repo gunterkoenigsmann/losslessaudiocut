@@ -176,6 +176,12 @@ jobs:
       # advances) fails here with its log instead of eating the job limit.
       - run: cargo test --workspace
         timeout-minutes: 10
+      # The Metal renderer's pixel tests (crates/lac-gui/src/video_metal.rs)
+      # pass without comparing anything on a Mac without a Metal device;
+      # their output says which it was.
+      - name: Metal renderer tests (macOS)
+        if: runner.os == 'macOS'
+        run: cargo test -p lac-gui video_metal -- --nocapture
       # The GUI's Windows resources (crates/lac-gui/build.rs, issue #62):
       # the version that Explorer shows must be the crate's. The icon and
       # manifest are in the same resource script, so a linked version
