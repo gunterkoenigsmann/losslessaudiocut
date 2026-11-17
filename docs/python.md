@@ -77,7 +77,7 @@ cd ../.. && python -m pytest crates/lac-python/tests packaging/python
 Without `FFMPEG_DIR` the build links the system's FFmpeg (pkg-config), like
 the other crates; fine for development, not for a wheel to share.
 `cargo build --workspace` builds the extension module too, without
-linking libpython (`.cargo/config.toml` sets `PYO3_BUILD_EXTENSION_MODULE`).
+linking libpython (PyO3's `extension-module` feature).
 
 ## Releasing
 

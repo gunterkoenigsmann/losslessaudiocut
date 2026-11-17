@@ -1,5 +1,0 @@
-[env]
-# crates/lac-python is a Python extension module: built without linking
-# libpython, also when it is built as part of `cargo build --workspace`
-# (maturin sets the same variable for the wheels). Only PyO3 reads it.
-PYO3_BUILD_EXTENSION_MODULE = "1"
