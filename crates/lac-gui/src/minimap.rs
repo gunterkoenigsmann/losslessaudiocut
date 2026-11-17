@@ -1,7 +1,8 @@
 //! The minimap pane: the whole recording in one strip, with deleted parts
 //! shaded, track boundaries, the playhead, and a frame around the part the
 //! waveform window shows. Dragging the frame, or clicking beside it,
-//! scrolls the waveform there ([`lac_app::minimap`] decides how).
+//! scrolls the waveform there; dragging beside it zooms the waveform to
+//! the dragged range ([`lac_app::minimap`] decides how).
 
 use std::ops::Range;
 
