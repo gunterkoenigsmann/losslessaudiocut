@@ -85,7 +85,7 @@ use lac_app::i18n::{n_, tr, tr_menu, trf};
 use lac_app::launch::GuiArgs;
 use lac_app::layout::Pane;
 use lac_app::metrics::Metrics;
-use lac_app::minimap::Minimap;
+use lac_app::minimap::{MapAction, Minimap};
 use lac_app::peak_cache::PeakCache;
 use lac_app::peak_job::{JobStatus, PeakJob};
 use lac_app::perspective::Perspective;
@@ -3671,9 +3671,10 @@ fn bind_video(video: &VideoPane, state: &Rc<RefCell<State>>) {
     });
 }
 
-/// The minimap pane: painting, resizing, and dragging its frame to scroll
-/// the waveform (`waveform`, which is redrawn after a scroll; its paint
-/// handler redraws the minimap in turn).
+/// The minimap pane: painting, resizing, dragging its frame to scroll the
+/// waveform and dragging beside it to zoom the waveform to that range
+/// (`waveform`, which is redrawn after a change; its paint handler
+/// redraws the minimap in turn).
 fn bind_minimap(map: &Panel, waveform: &Panel, state: &Rc<RefCell<State>>) {
     let (m, w) = (*map, *waveform);
     {
@@ -3714,12 +3715,18 @@ fn bind_minimap(map: &Panel, waveform: &Panel, state: &Rc<RefCell<State>>) {
             e.skip(true);
         });
     }
-    // Moves the waveform to start at what the minimap says.
-    let scroll = move |st: &mut State, start: Option<SamplePos>| {
-        if let (Some(start), Some(v)) = (start, &mut st.view) {
-            v.scroll_to(start);
-            w.refresh(false, None);
+    // Moves or zooms the waveform as the minimap says.
+    let apply = move |st: &mut State, action: Option<MapAction>| {
+        let (Some(action), Some(v)) = (action, &mut st.view) else {
+            return;
+        };
+        match action {
+            MapAction::ScrollTo(start) => v.scroll_to(start),
+            // Exactly, without zoom_to's margin, so that the minimap's
+            // frame ends up where the pointer is.
+            MapAction::ZoomTo(r) => v.zoom_exactly_to(&r),
         }
+        w.refresh(false, None);
     };
     {
         let state = Rc::clone(state);
@@ -3733,7 +3740,7 @@ fn bind_minimap(map: &Panel, waveform: &Panel, state: &Rc<RefCell<State>>) {
                 return;
             };
             let start = map.press(x, &v.visible());
-            scroll(st, Some(start));
+            apply(st, Some(MapAction::ScrollTo(start)));
             m.capture_mouse();
         });
     }
@@ -3745,8 +3752,8 @@ fn bind_minimap(map: &Panel, waveform: &Panel, state: &Rc<RefCell<State>>) {
             };
             let mut guard = state.borrow_mut();
             let st = &mut *guard;
-            let start = st.minimap.as_mut().and_then(|map| map.drag(x));
-            scroll(st, start);
+            let action = st.minimap.as_mut().and_then(|map| map.drag(x));
+            apply(st, action);
         });
     }
     {

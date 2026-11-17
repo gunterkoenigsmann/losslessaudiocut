@@ -143,6 +143,7 @@ off).
 The minimap above the waveform shows the whole recording with deleted parts
 shaded, track boundaries and the playhead; a frame marks the part the
 waveform window shows. Drag the frame, or click beside it, to go there.
+Drag beside the frame to zoom the waveform to the range you drag over.
 
 The bar *Selection and clock* shows where the selection starts and ends,
 its length, and a large play clock (source time, like the waveform). Type a
