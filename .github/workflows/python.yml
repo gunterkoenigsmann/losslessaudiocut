@@ -239,10 +239,11 @@ jobs:
           cd crates/lac-python
           FFMPEG_DIR="$RUNNER_TEMP/ffmpeg" maturin build --release --locked --out "$GITHUB_WORKSPACE/dist"
           ls -l "$GITHUB_WORKSPACE/dist"
-          # Nothing but system libraries may be linked.
+          # Nothing but system libraries may be linked. (otool lists the
+          # module's own install name, @rpath/losslessaudiocut._native..., too.)
           unzip -o -q "$GITHUB_WORKSPACE"/dist/*.whl -d "$RUNNER_TEMP/whl"
           otool -L "$RUNNER_TEMP"/whl/losslessaudiocut/_native*.so | tee "$RUNNER_TEMP/libs.txt"
-          if tail -n +2 "$RUNNER_TEMP/libs.txt" | grep -v -E '^\s+(/usr/lib/|/System/)'; then
+          if tail -n +2 "$RUNNER_TEMP/libs.txt" | grep -v -E '^\s+(/usr/lib/|/System/|@rpath/losslessaudiocut\._native)'; then
             echo "::error::The module links a library outside the system."
             exit 1
           fi
