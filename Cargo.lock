@@ -1108,7 +1108,7 @@ dependencies = [
 
 [[package]]
 name = "lac-analysis"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "lac-core",
  "proptest",
@@ -1118,7 +1118,7 @@ dependencies = [
 
 [[package]]
 name = "lac-app"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "clap",
  "directories",
@@ -1133,7 +1133,7 @@ dependencies = [
 
 [[package]]
 name = "lac-cli"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "lac-container"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "lac-core",
  "md-5",
@@ -1156,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "lac-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "proptest",
  "thiserror 2.0.21",
@@ -1164,7 +1164,7 @@ dependencies = [
 
 [[package]]
 name = "lac-decode"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "ffmpeg-next",
  "lac-container",
@@ -1174,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "lac-gui"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "embed-resource",
  "glow",
@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "lac-peaks"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "lac-core",
  "proptest",
@@ -1205,7 +1205,7 @@ dependencies = [
 
 [[package]]
 name = "lac-playback"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "cpal",
  "lac-core",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "lac-python"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "lac-analysis",
  "lac-app",
