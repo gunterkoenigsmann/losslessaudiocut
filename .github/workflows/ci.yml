@@ -181,7 +181,8 @@ jobs:
       # their output says which it was.
       - name: Metal renderer tests (macOS)
         if: runner.os == 'macOS'
-        run: cargo test -p lac-gui video_metal -- --nocapture
+        # --workspace, not -p lac-gui: see the version resource step below.
+        run: cargo test --workspace video_metal -- --nocapture
       # The GUI's Windows resources (crates/lac-gui/build.rs, issue #62):
       # the version that Explorer shows must be the crate's. The icon and
       # manifest are in the same resource script, so a linked version
@@ -189,8 +190,13 @@ jobs:
       - name: Check the version resource of losslessaudiocut.exe (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        # --workspace rather than -p lac-gui: one crate alone resolves other
+        # Cargo features for shared dependencies (the Python package's PyO3
+        # is missing), which rebuilds wxdragon-sys into the same CMake
+        # directory, and on Windows that second build links a corrupt PDB
+        # (LNK1103). The whole workspace reuses the test build.
         run: |
-          cargo build -p lac-gui
+          cargo build --workspace
           $exe = (Resolve-Path target\debug\losslessaudiocut.exe).Path
           $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
           $want = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |

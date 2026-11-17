@@ -6,12 +6,16 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "lac"
 path = "src/main.rs"
 
 [dependencies]
 lac-core.workspace = true
+# Without `audio-output`: the CLI only cuts and analyses.
 lac-app.workspace = true
 lac-analysis.workspace = true
 anyhow.workspace = true

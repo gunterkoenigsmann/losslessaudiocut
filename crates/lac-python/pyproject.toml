@@ -1,0 +1,46 @@
+# The Python package `losslessaudiocut`: the command line tool `lac` and a
+# Python API, both on top of the same Rust code. Built with maturin; the
+# wheels bundle a minimal FFmpeg (docs/python.md).
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "losslessaudiocut"
+description = "Cut audio recordings without re-encoding: the kept audio decodes to exactly the same samples (MP3, AAC/M4A, Ogg Vorbis/Opus/Speex, FLAC, WAV, AIFF, AC-3, ...)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+authors = [{ name = "Gunter Königsmann" }]
+keywords = ["audio", "cut", "trim", "lossless", "mp3", "aac", "opus", "flac", "podcast"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Multimedia :: Sound/Audio :: Editors",
+    "Typing :: Typed",
+]
+# From Cargo.toml (the workspace version). The post-releases that only
+# update the bundled FFmpeg set it here (packaging/python/set-version.py).
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/gunterkoenigsmann/losslessaudiocut"
+Documentation = "https://github.com/gunterkoenigsmann/losslessaudiocut/blob/main/docs/python.md"
+Issues = "https://github.com/gunterkoenigsmann/losslessaudiocut/issues"
+
+[project.scripts]
+lac = "losslessaudiocut._cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "losslessaudiocut._native"

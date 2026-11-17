@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/lac-core", "crates/lac-container", "crates/lac-app", "crates/lac-decode", "crates/lac-peaks", "crates/lac-analysis", "crates/lac-cli", "crates/lac-gui", "crates/lac-playback"]
+members = ["crates/lac-core", "crates/lac-container", "crates/lac-app", "crates/lac-decode", "crates/lac-peaks", "crates/lac-analysis", "crates/lac-cli", "crates/lac-gui", "crates/lac-playback", "crates/lac-python"]
 
 [workspace.package]
 version = "1.1.0"
@@ -11,11 +11,13 @@ repository = "https://github.com/gunterkoenigsmann/losslessaudiocut"
 [workspace.dependencies]
 lac-core = { path = "crates/lac-core" }
 lac-container = { path = "crates/lac-container" }
-lac-app = { path = "crates/lac-app" }
+# Without their default features (playback through the sound card), which
+# only the GUI turns on: the CLI and the Python package need no audio library.
+lac-app = { path = "crates/lac-app", default-features = false }
 lac-peaks = { path = "crates/lac-peaks" }
 lac-analysis = { path = "crates/lac-analysis" }
 lac-decode = { path = "crates/lac-decode" }
-lac-playback = { path = "crates/lac-playback" }
+lac-playback = { path = "crates/lac-playback", default-features = false }
 thiserror = "2.0.21"
 anyhow = "1"
 clap = { version = "4.6.7", features = ["derive"] }

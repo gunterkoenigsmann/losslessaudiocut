@@ -12,10 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 lac-analysis.workspace = true
-lac-app.workspace = true
+lac-app = { workspace = true, features = ["audio-output"] }
 lac-core.workspace = true
 lac-peaks.workspace = true
-lac-playback.workspace = true
+lac-playback = { workspace = true, features = ["device"] }
 # OpenGL function loader for the video pane's GPU renderer (video_gl.rs);
 # the functions come from wxWidgets' GL context.
 glow.workspace = true

@@ -66,8 +66,8 @@ Cargo workspace, dependencies only point downwards (see the diagram in the
 architecture doc):
 
 ```
-lac-gui, lac-cli  ->  lac-app  ->  lac-analysis, lac-peaks, lac-playback
-                                ->  lac-decode  ->  lac-container  ->  lac-core
+lac-gui, lac-cli, lac-python  ->  lac-app  ->  lac-analysis, lac-peaks, lac-playback
+                                            ->  lac-decode  ->  lac-container  ->  lac-core
 ```
 
 - `lac-core` has no I/O and no external dependencies.
@@ -76,7 +76,8 @@ lac-gui, lac-cli  ->  lac-app  ->  lac-analysis, lac-peaks, lac-playback
   without a display.
 - Only `lac-decode` may depend on FFmpeg (`ffmpeg-next`), and only on its
   decoders (libavcodec). It is fed packets from our own demuxers, so the
-  packet index stays the single source of truth.
+  packet index stays the single source of truth. The Python wheels bundle
+  a minimal static FFmpeg instead of the system's (`docs/python.md`).
 - Container parsing and writing, cut planning and tag writing are our own
   code in `lac-container`. Never use FFmpeg's demuxers, muxers or stream copy
   for exporting; decoded PCM must never end up in an exported lossy file.

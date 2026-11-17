@@ -1,0 +1,381 @@
+# The Python package `losslessaudiocut` on PyPI (crates/lac-python,
+# docs/python.md): wheels for Linux (x86_64, aarch64; manylinux_2_28),
+# macOS (arm64, x86_64) and Windows (x64, arm64), each with the `lac`
+# command and the Python API, abi3 (one wheel per platform for every
+# CPython from 3.10 on).
+#
+# The wheels bundle FFmpeg, unlike the other packages, which use the
+# system's (issue #61): AI command line clients and other pip users can
+# install a Python package but often not a program. Linux and macOS link a
+# minimal static FFmpeg built from source (packaging/python/build-ffmpeg.sh,
+# version in packaging/python/ffmpeg-version); Windows ships the DLLs of
+# BtbN's LGPL build of the same release branch next to the module.
+#
+# When it runs:
+#
+#   - tag vX.Y.Z: builds the tag, tests every wheel and publishes version
+#     X.Y.Z (X.Y.ZrcN for a vX.Y.Z-rcN tag).
+#   - pull requests touching the package: builds and tests, no upload.
+#   - workflow_dispatch: builds and tests the dispatched ref. With
+#     `publish`, builds the newest release tag (or the one given) instead,
+#     bundling the FFmpeg named in the dispatched ref's ffmpeg-version, and
+#     publishes it as the next post-release (X.Y.Z.postN) if X.Y.Z is
+#     already on PyPI. ffmpeg-update.yml does this after a new FFmpeg point
+#     release, so security fixes reach `pip install -U` within a week.
+#
+# Uploading uses PyPI's trusted publishing (no token): the project on
+# pypi.org trusts this workflow file and the GitHub environment `pypi`.
+name: Python package
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - crates/lac-python/**
+      - packaging/python/**
+      - .github/workflows/python.yml
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish to PyPI (builds a release tag, see `tag`)
+        type: boolean
+        default: false
+      tag:
+        description: Release tag to build when publishing (empty = newest with the Python package)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: python-${{ github.ref }}-${{ inputs.publish || false }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # What to build: which commit, which package version, which FFmpeg.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ref: ${{ steps.plan.outputs.ref }}
+      version: ${{ steps.plan.outputs.version }}
+      ffmpeg: ${{ steps.plan.outputs.ffmpeg }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # All tags, to find the newest release.
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Unit tests of the packaging scripts
+        run: |
+          python -m pip install -q pytest
+          python -m pytest -q packaging/python
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          PUBLISH: ${{ inputs.publish }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          # The FFmpeg of the ref that started the run: for a publish by
+          # ffmpeg-update.yml, main's newer one, not the old tag's.
+          ffmpeg="$(tr -d '[:space:]' < packaging/python/ffmpeg-version)"
+          publish=false
+          version=""
+          ref="$GITHUB_SHA"
+          if [ "$EVENT" = push ]; then
+            # Fails for a tag that does not match Cargo.toml.
+            tag="v$(packaging/version.sh "$GITHUB_REF")"
+            version="$(python packaging/python/pypi_version.py "$tag")"
+            publish=true
+          elif [ "$EVENT" = workflow_dispatch ] && [ "$PUBLISH" = true ]; then
+            if [ -z "$TAG" ]; then
+              # Newest release (no pre-release) that has the Python package.
+              for t in $(git tag --list 'v*' --sort=-version:refname); do
+                case "$t" in *-*) continue ;; esac
+                if git cat-file -e "$t:crates/lac-python/pyproject.toml" 2> /dev/null; then
+                  TAG="$t"
+                  break
+                fi
+              done
+            fi
+            if [ -z "$TAG" ]; then
+              echo "::error::No release tag with the Python package yet; publish by pushing a release tag."
+              exit 1
+            fi
+            ref="$TAG"
+            version="$(python packaging/python/pypi_version.py "$TAG" --post)"
+            publish=true
+          fi
+          {
+            echo "ref=$ref"
+            echo "version=$version"
+            echo "ffmpeg=$ffmpeg"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building $ref as version '${version:-from Cargo.toml}' with FFmpeg $ffmpeg (publish: $publish)"
+
+  linux:
+    name: Linux (${{ matrix.arch }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    # FFmpeg about 3 minutes, the Rust build about 8 (no cache in the
+    # container).
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+      - uses: actions/checkout@v7
+        with:
+          path: current
+      - uses: actions/setup-python@v6
+        with:
+          python-version: |
+            3.10
+            3.13
+      - id: python
+        run: |
+          echo "old=$(command -v python3.10)" >> "$GITHUB_OUTPUT"
+          echo "new=$(command -v python3.13)" >> "$GITHUB_OUTPUT"
+      - &set-version
+        name: Version
+        shell: bash
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          # A tag build may predate the newest packaging scripts; the
+          # version script is taken from the run's own commit.
+          if [ -n "$VERSION" ]; then
+            python current/packaging/python/pypi_version.py "$VERSION" --write crates/lac-python/pyproject.toml
+          fi
+          grep -E '^(version|dynamic) = ' crates/lac-python/pyproject.toml
+      - name: Build in the manylinux_2_28 container
+        env:
+          FFMPEG_VERSION: ${{ needs.plan.outputs.ffmpeg }}
+        run: |
+          docker run --rm -e FFMPEG_VERSION -v "$PWD":/io -w /io \
+            "quay.io/pypa/manylinux_2_28_${{ matrix.arch }}" \
+            packaging/python/build-linux-wheel.sh dist
+          ls -l dist
+      - &test
+        name: Test the wheel
+        shell: bash
+        run: |
+          # The oldest and the newest supported Python; abi3 covers the rest.
+          n=0
+          for py in "$PY_OLD" "$PY_NEW"; do
+            n=$((n + 1))
+            venv="$RUNNER_TEMP/venv-$n"
+            "$py" -m venv "$venv"
+            bin="$venv/bin"; [ -d "$bin" ] || bin="$venv/Scripts"
+            "$bin/python" -m pip install -q dist/*.whl pytest
+            # From a scratch directory, so the source tree's package (which
+            # lacks the native module) cannot shadow the installed one.
+            (cd "$RUNNER_TEMP" && "$bin/python" -m pytest -q "$GITHUB_WORKSPACE/crates/lac-python/tests")
+            "$bin/python" -c 'import losslessaudiocut as l; print(l.__version__, "FFmpeg", l.ffmpeg_version())'
+          done
+        env:
+          PY_OLD: ${{ steps.python.outputs.old }}
+          PY_NEW: ${{ steps.python.outputs.new }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-linux-${{ matrix.arch }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  macos:
+    name: macOS (${{ matrix.arch }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64, runner: macos-latest }
+          - { arch: x86_64, runner: macos-15-intel }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      # FFmpeg, Rust and the wheel tag all follow it.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+      - uses: actions/checkout@v7
+        with:
+          path: current
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: |
+            3.10
+            3.13
+      - *set-version
+      - name: FFmpeg
+        env:
+          FFMPEG_VERSION: ${{ needs.plan.outputs.ffmpeg }}
+        run: |
+          # nasm for FFmpeg's x86 assembly (Intel only).
+          if [ "${{ matrix.arch }}" = x86_64 ]; then brew install nasm; fi
+          packaging/python/build-ffmpeg.sh "$RUNNER_TEMP/ffmpeg"
+          packaging/python/stage-wheel.sh "$RUNNER_TEMP/ffmpeg/share/doc/ffmpeg"
+      - name: Build
+        run: |
+          python -m pip install -q "maturin>=1.9,<2"
+          cd crates/lac-python
+          FFMPEG_DIR="$RUNNER_TEMP/ffmpeg" maturin build --release --locked --out "$GITHUB_WORKSPACE/dist"
+          ls -l "$GITHUB_WORKSPACE/dist"
+          # Nothing but system libraries may be linked. (otool lists the
+          # module's own install name, @rpath/losslessaudiocut._native..., too.)
+          unzip -o -q "$GITHUB_WORKSPACE"/dist/*.whl -d "$RUNNER_TEMP/whl"
+          otool -L "$RUNNER_TEMP"/whl/losslessaudiocut/_native*.so | tee "$RUNNER_TEMP/libs.txt"
+          if tail -n +2 "$RUNNER_TEMP/libs.txt" | grep -v -E '^\s+(/usr/lib/|/System/|@rpath/losslessaudiocut\._native)'; then
+            echo "::error::The module links a library outside the system."
+            exit 1
+          fi
+      - id: python
+        run: |
+          echo "old=$(command -v python3.10)" >> "$GITHUB_OUTPUT"
+          echo "new=$(command -v python3.13)" >> "$GITHUB_OUTPUT"
+      - *test
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-macos-${{ matrix.arch }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  windows:
+    name: Windows (${{ matrix.arch }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ffmpeg: the platform part of BtbN's build names.
+          - { arch: x64, runner: windows-latest, ffmpeg: win64, old: "3.10" }
+          # setup-python has native arm64 builds from 3.11 on.
+          - { arch: arm64, runner: windows-11-arm, ffmpeg: winarm64, old: "3.11" }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+      - uses: actions/checkout@v7
+        with:
+          path: current
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: |
+            ${{ matrix.old }}
+            3.13
+      - *set-version
+      # BtbN's LGPL shared build of the release branch of the pinned
+      # version (ffmpeg-nX.Y-latest-<platform>-lgpl-shared-X.Y.zip), rebuilt
+      # daily from that branch, so it carries the branch's fixes.
+      - name: FFmpeg
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FFMPEG_VERSION: ${{ needs.plan.outputs.ffmpeg }}
+          PLATFORM: ${{ matrix.ffmpeg }}
+        run: |
+          $series = ($env:FFMPEG_VERSION -split '\.')[0..1] -join '.'
+          $name = "ffmpeg-n$series-latest-$env:PLATFORM-lgpl-shared-$series.zip"
+          Write-Host "Using $name"
+          gh release download latest -R BtbN/FFmpeg-Builds -p $name -O ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath "$env:RUNNER_TEMP"
+          $dir = Join-Path "$env:RUNNER_TEMP" ($name -replace '\.zip$', '')
+          "FFMPEG_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # License and source note for the wheel (stage-wheel.sh).
+          $doc = Join-Path "$env:RUNNER_TEMP" ffmpeg-doc
+          New-Item -ItemType Directory -Force $doc | Out-Null
+          Copy-Item (Join-Path $dir LICENSE.txt) (Join-Path $doc LICENSE.txt)
+          @(
+            "This package contains the FFmpeg DLLs of $name",
+            "(https://github.com/BtbN/FFmpeg-Builds), FFmpeg's release branch $series,",
+            "licensed under the GNU Lesser General Public License version 2.1 or later",
+            "(LICENSE.txt). Source: https://git.ffmpeg.org/ffmpeg.git, branch release/$series;",
+            "build scripts: https://github.com/BtbN/FFmpeg-Builds."
+          ) | Out-File -Encoding utf8 (Join-Path $doc README.txt)
+          "FFMPEG_DOC=$doc" | Out-File -FilePath $env:GITHUB_ENV -Append
+      # bindgen (ffmpeg-sys-next) loads libclang.dll, which must match the
+      # runner's architecture; as in release.yml.
+      - name: libclang
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ("${{ matrix.arch }}" -eq "arm64") {
+            $llvm = "20.1.8"
+            gh release download "llvmorg-$llvm" -R llvm/llvm-project -p "LLVM-$llvm-woa64.exe" -O llvm.exe
+            Start-Process -Wait -FilePath .\llvm.exe -ArgumentList '/S', '/D=C:\llvm-arm64'
+            $bin = 'C:\llvm-arm64\bin'
+          } else {
+            $bin = 'C:\Program Files\LLVM\bin'
+          }
+          if (-not (Test-Path "$bin\libclang.dll")) { throw "libclang.dll not found in $bin" }
+          "LIBCLANG_PATH=$bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build
+        shell: bash
+        run: |
+          packaging/python/stage-wheel.sh "$FFMPEG_DOC"
+          python -m pip install -q "maturin>=1.9,<2" delvewheel
+          (cd crates/lac-python && maturin build --release --locked --out "$RUNNER_TEMP/raw")
+          # Copies FFmpeg's DLLs into the wheel (losslessaudiocut.libs) and
+          # makes the package find them.
+          python -m delvewheel repair --add-path "$FFMPEG_DIR/bin" -w dist "$RUNNER_TEMP"/raw/*.whl
+          ls -l dist
+      - id: python
+        shell: bash
+        run: |
+          echo "old=$(py -${{ matrix.old }} -c 'import sys; print(sys.executable)')" >> "$GITHUB_OUTPUT"
+          echo "new=$(py -3.13 -c 'import sys; print(sys.executable)')" >> "$GITHUB_OUTPUT"
+      - *test
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-windows-${{ matrix.arch }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: [plan, linux, macos, windows]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Set up once on pypi.org: Publishing -> trusted publisher for this
+    # repository, workflow python.yml, environment pypi.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/losslessaudiocut/${{ needs.plan.outputs.version }}/
+    permissions:
+      # The OIDC token that trusted publishing exchanges for an upload token.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # A re-run after a partial upload must not fail on the wheels that
+          # are already there.
+          skip-existing: true

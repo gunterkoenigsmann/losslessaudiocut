@@ -25,6 +25,7 @@
 //! speed, they are render stages between the decoder and the ring buffer.
 
 pub mod convert;
+#[cfg(feature = "device")]
 mod device;
 mod engine;
 pub mod scrub;
@@ -52,6 +53,7 @@ pub enum PlaybackError {
 }
 
 /// An [`Engine`] playing through the default output device.
+#[cfg(feature = "device")]
 #[derive(Debug)]
 pub struct Player {
     engine: Engine,
@@ -59,6 +61,7 @@ pub struct Player {
     _device: device::Device,
 }
 
+#[cfg(feature = "device")]
 impl Player {
     /// Opens the default output device and prepares to play `timeline` of
     /// `source`, paused at its start.

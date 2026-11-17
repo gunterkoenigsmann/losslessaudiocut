@@ -29,6 +29,15 @@ The snap can open files in your home directory; for USB sticks and other
 drives run `sudo snap connect losslessaudiocut:removable-media`. Packaging
 and release steps: [`docs/snap.md`](docs/snap.md).
 
+With Python, on Linux, macOS and Windows: the command line tool `lac` and
+a Python API (`import losslessaudiocut`), no other installation needed
+(see [`docs/python.md`](docs/python.md)):
+
+```sh
+pip install losslessaudiocut
+lac --help
+```
+
 For Windows (zip or installer), macOS (DMG) and Linux (AppImage), download
 the package for your system from the
 [releases page](https://github.com/gunterkoenigsmann/losslessaudiocut/releases);
