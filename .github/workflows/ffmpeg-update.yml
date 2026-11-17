@@ -1,0 +1,187 @@
+# Weekly check for a new FFmpeg point release, for the FFmpeg that the
+# Python wheels bundle (python.yml, docs/python.md).
+#
+# The other packages use the system's FFmpeg and get its security updates
+# from the distribution (issue #61). The wheels cannot; instead this
+# workflow keeps packaging/python/ffmpeg-version at the newest point release
+# of its release branch (FFmpeg's point releases are mostly security and
+# bug fixes) and republishes the newest release as a post-release with it,
+# so `pip install -U losslessaudiocut` gets the fix within a week.
+#
+# 1. Lists FFmpeg's release tags (nX.Y, nX.Y.Z) from its git repository.
+# 2. A newer point release of the pinned branch (9.0.2 -> 9.0.3): pushes
+#    the branch `deps/ffmpeg` with the new version, opens or updates a PR,
+#    builds and tests all wheels on it (python.yml by workflow_dispatch;
+#    a PR opened with GITHUB_TOKEN starts no workflows by itself, see
+#    cargo-update.yml), and merges it when they are green. Then it starts
+#    python.yml on main with `publish`, which uploads the newest release
+#    tag with the new FFmpeg as X.Y.Z.postN. A red build leaves the PR open.
+# 3. A newer release branch (9.0 -> 9.1 or 10.0) may need changes in
+#    ffmpeg-next or our decoder code, so it is not taken automatically: the
+#    workflow opens an issue (once) instead.
+#
+# Needs the same repository setting as cargo-update.yml ("Allow GitHub
+# Actions to create and approve pull requests").
+name: FFmpeg update
+
+on:
+  schedule:
+    # Sundays 05:23 UTC: after the Saturday cargo update, before the Monday
+    # snap rebuild, off the full hour.
+    - cron: "23 5 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BRANCH: deps/ffmpeg
+  VERSION_FILE: packaging/python/ffmpeg-version
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    # Mostly waiting for the wheel builds (about 30 minutes).
+    timeout-minutes: 150
+    concurrency:
+      group: ffmpeg-update
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      # gh workflow run / run watch.
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - name: Newest FFmpeg releases
+        id: check
+        run: |
+          pinned="$(tr -d '[:space:]' < "$VERSION_FILE")"
+          series="$(echo "$pinned" | cut -d. -f1-2)"
+          # Release tags only: n9.0, n9.0.2 (not n9.1-dev and the like).
+          git ls-remote --tags --refs https://github.com/FFmpeg/FFmpeg.git 'n*' |
+            sed -n 's#.*refs/tags/n\([0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)\{0,1\}\)$#\1#p' |
+            sort -V > "$RUNNER_TEMP/releases.txt"
+          tail -n 5 "$RUNNER_TEMP/releases.txt"
+          point="$(grep -E "^${series//./\\.}(\.[0-9]+)?$" "$RUNNER_TEMP/releases.txt" | tail -n 1)"
+          newest="$(tail -n 1 "$RUNNER_TEMP/releases.txt")"
+          newest_series="$(echo "$newest" | cut -d. -f1-2)"
+          # Newer than pinned by version order, not just different.
+          newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ]; }
+          update=false
+          if [ -n "$point" ] && newer "$point" "$pinned"; then update=true; fi
+          new_series=false
+          if newer "$newest_series" "$series"; then new_series=true; fi
+          {
+            echo "pinned=$pinned"
+            echo "point=$point"
+            echo "update=$update"
+            echo "newest=$newest"
+            echo "new_series=$new_series"
+          } >> "$GITHUB_OUTPUT"
+          echo "Pinned $pinned; newest of $series: $point (update: $update); newest overall: $newest"
+      - name: Report a new release branch
+        if: steps.check.outputs.new_series == 'true'
+        env:
+          NEWEST: ${{ steps.check.outputs.newest }}
+          PINNED: ${{ steps.check.outputs.pinned }}
+        run: |
+          series="$(echo "$NEWEST" | cut -d. -f1-2)"
+          title="Bundle FFmpeg $series in the Python wheels"
+          if gh issue list --state all --search "\"$title\" in:title" --json title --jq '.[].title' | grep -qxF "$title"; then
+            echo "Issue \"$title\" exists."
+            exit 0
+          fi
+          {
+            echo "FFmpeg $NEWEST is out; the Python wheels bundle $PINNED (\`$VERSION_FILE\`)."
+            echo
+            echo "A new release branch is not taken over automatically (\`ffmpeg-update.yml\`):"
+            echo "it may need a newer \`ffmpeg-next\` or changes in \`lac-decode\`. To switch, set"
+            echo "\`$VERSION_FILE\` to $NEWEST in a PR; \`python.yml\` builds and tests every wheel"
+            echo "with it. Point releases of $PINNED's branch keep arriving automatically meanwhile,"
+            echo "as long as FFmpeg maintains that branch."
+          } > "$RUNNER_TEMP/issue.md"
+          gh issue create --title "$title" --body-file "$RUNNER_TEMP/issue.md"
+      - name: Push branch
+        if: steps.check.outputs.update == 'true'
+        env:
+          POINT: ${{ steps.check.outputs.point }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$BRANCH"
+          echo "$POINT" > "$VERSION_FILE"
+          git commit -m "Bundle FFmpeg $POINT in the Python wheels" -- "$VERSION_FILE"
+          # The branch is ours alone and rebuilt from main every time.
+          git push --force origin "$BRANCH"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Open or update the pull request
+        if: steps.check.outputs.update == 'true'
+        env:
+          POINT: ${{ steps.check.outputs.point }}
+          PINNED: ${{ steps.check.outputs.pinned }}
+        run: |
+          {
+            echo "FFmpeg $POINT is out (bundled so far: $PINNED). Point releases are mostly"
+            echo "security and bug fixes: https://ffmpeg.org/security.html,"
+            echo "https://git.ffmpeg.org/gitweb/ffmpeg.git/shortlog/n$POINT"
+            echo
+            echo "Opened by \`ffmpeg-update.yml\`. It builds and tests every wheel on this branch and"
+            echo "merges when they are green, then publishes the newest release with FFmpeg $POINT"
+            echo "to PyPI as a post-release. A red build leaves the PR open."
+          } > "$RUNNER_TEMP/body.md"
+          title="Bundle FFmpeg $POINT in the Python wheels"
+          if number="$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number')" && [ -n "$number" ]; then
+            gh pr edit "$number" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create --head "$BRANCH" --base main --title "$title" --body-file "$RUNNER_TEMP/body.md" || {
+              echo "::error::Could not open the PR. Enable Settings -> Actions -> General -> 'Allow GitHub Actions to create and approve pull requests'."
+              exit 1
+            }
+          fi
+      - name: Build and test the wheels on the branch
+        if: steps.check.outputs.update == 'true'
+        run: |
+          gh workflow run python.yml --ref "$BRANCH"
+          # A dispatched run takes a few seconds to show up.
+          id=""
+          for _ in $(seq 30); do
+            id="$(gh run list --workflow python.yml --commit "$sha" --event workflow_dispatch \
+              --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+            [ -n "$id" ] && break
+            sleep 10
+          done
+          if [ -z "$id" ]; then
+            echo "::error::The python.yml run on $sha did not show up; leaving the PR open."
+            exit 1
+          fi
+          if ! gh run watch "$id" --exit-status --interval 60 > /dev/null; then
+            echo "::error::The wheels did not build or pass their tests with the new FFmpeg (run $id); leaving the PR open."
+            exit 1
+          fi
+          echo "Run $id passed."
+      - name: Merge and publish
+        if: steps.check.outputs.update == 'true'
+        run: |
+          number="$(gh pr list --head "$BRANCH" --base main --state open --json number,headRefOid \
+            --jq ".[] | select(.headRefOid == \"$sha\") | .number")"
+          if [ -z "$number" ]; then
+            echo "No open PR with head $sha (superseded or already merged)."
+            exit 0
+          fi
+          # Only merge what was tested: the branch must still contain main.
+          status="$(gh api "repos/$GH_REPO/compare/main...$sha" --jq .status)"
+          if [ "$status" != "ahead" ]; then
+            echo "::warning::main has moved since the update ($status); not merging. Run the workflow again."
+            exit 0
+          fi
+          gh pr merge "$number" --squash
+          gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$BRANCH" || true
+          # A merge made with GITHUB_TOKEN starts no push workflows; start
+          # the publishing run on main directly.
+          gh workflow run python.yml --ref main -f publish=true

@@ -39,6 +39,21 @@ pub enum FfmpegError {
     PixelFormat(String),
 }
 
+/// FFmpeg's own version string, e.g. `9.0.2` or `n9.0.2-12-gabcdef`.
+pub(crate) fn version_info() -> String {
+    // SAFETY: av_version_info() takes no arguments and returns a pointer to
+    // a NUL-terminated string constant compiled into libavutil, valid for
+    // the whole run of the program.
+    let ptr = unsafe { ff::ffi::av_version_info() };
+    if ptr.is_null() {
+        return String::new();
+    }
+    // SAFETY: non-null, NUL-terminated and static, see above.
+    unsafe { std::ffi::CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// One opened libavcodec audio decoder.
 pub(crate) struct Decoder {
     inner: ff::decoder::Audio,

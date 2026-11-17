@@ -87,6 +87,13 @@ pub enum Flow {
     Stop,
 }
 
+/// The version of the FFmpeg libraries this program runs with, as FFmpeg
+/// reports it (e.g. `9.0.2`). Shown by the Python package, whose wheels
+/// bundle FFmpeg, so users can see whether they have a fixed release.
+pub fn ffmpeg_version() -> String {
+    ffi::version_info()
+}
+
 /// Decodes the whole timeline of `source` (read through `r`) and hands it
 /// to `sink` in order, as chunks of interleaved `f32` sample frames.
 ///

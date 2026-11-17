@@ -2,10 +2,9 @@
 //! (our demuxers and FFmpeg's decoders) and [`lac_playback`].
 
 use std::ops::Range;
-use std::path::Path;
 
 use lac_core::SamplePos;
-use lac_playback::{PcmSource, Player, Timeline};
+use lac_playback::{PcmSource, Timeline};
 
 use crate::Source;
 use crate::editor::Editor;
@@ -113,9 +112,15 @@ pub fn excerpt_len(rate: u32) -> SamplePos {
 
 /// Opens `path` for playback of `timeline` on the default audio device,
 /// paused at the start. The message is for the user.
-pub fn open_player(path: &Path, timeline: Timeline) -> Result<Player, String> {
+///
+/// Needs the Cargo feature `audio-output` (on by default).
+#[cfg(feature = "audio-output")]
+pub fn open_player(
+    path: &std::path::Path,
+    timeline: Timeline,
+) -> Result<lac_playback::Player, String> {
     let source = Source::open(path).map_err(|e| e.to_string())?;
-    Player::open(SourcePcm::new(source), timeline).map_err(|e| e.to_string())
+    lac_playback::Player::open(SourcePcm::new(source), timeline).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

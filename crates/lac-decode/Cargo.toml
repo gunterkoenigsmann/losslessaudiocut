@@ -10,7 +10,10 @@ repository.workspace = true
 lac-core.workspace = true
 lac-container.workspace = true
 thiserror.workspace = true
-ffmpeg-next = { version = "9.0.0", default-features = false, features = ["codec", "format"] }
+# software-resampling: links libswresample, which FFmpeg's Opus decoder
+# needs. Shared builds pull it in through libavcodec anyway; the static
+# FFmpeg of the Python wheels (packaging/python/build-ffmpeg.sh) does not.
+ffmpeg-next = { version = "9.0.0", default-features = false, features = ["codec", "format", "software-resampling"] }
 
 # The workspace forbids `unsafe`; this crate wraps FFmpeg's C API and is the
 # one place allowed to use it (AGENTS.md), module by module with

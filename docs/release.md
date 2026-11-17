@@ -130,6 +130,9 @@ development version such as `0.1.0-dev.20261104.b46df06`.
 4. A tag with a suffix, such as `v1.2.0-rc1`, becomes a pre-release. It does
    not count as the latest release, so the snap's stable channel ignores
    it.
+5. The same tag publishes the Python package to PyPI (`python.yml`, version
+   `X.Y.Z`, or `X.Y.ZrcN` for a `-rcN` tag); see
+   [`python.md`](python.md) for the one-time PyPI setup.
 
 ## Unsigned packages
 

@@ -1,2 +1,9 @@
 target/
 *.pcm
+# Copied in by packaging/python/stage-wheel.sh before building a wheel.
+/crates/lac-python/LICENSE
+/crates/lac-python/python/losslessaudiocut/ffmpeg/
+# Python build and test leftovers.
+__pycache__/
+*.egg-info/
+/dist/

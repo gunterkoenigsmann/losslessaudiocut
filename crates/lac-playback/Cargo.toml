@@ -6,10 +6,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["device"]
+## `Player`: playing through the system's default output device (cpal).
+device = ["dep:cpal"]
+
 [dependencies]
 lac-core.workspace = true
 thiserror.workspace = true
-cpal.workspace = true
+# The sound card (`Player`). Optional so that front ends without playback
+# (the Python package) need no audio system library such as ALSA.
+cpal = { workspace = true, optional = true }
 rtrb.workspace = true
 
 [lints]
