@@ -131,65 +131,35 @@ impl Frame {
         out
     }
 
-    /// Component `c` of the pixel at (`x`, `y`) of its plane (chroma
-    /// coordinates for subsampled chroma), scaled to 0.0..=1.0.
-    fn component(&self, c: &Component, x: usize, y: usize) -> f32 {
-        let p = &self.planes[c.plane];
-        let at = y * p.stride + x * c.step + c.offset;
-        let wide = c.depth + c.shift > 8;
-        let raw = if wide {
-            let b = [p.data[at], p.data[at + 1]];
-            u32::from(if self.layout.big_endian {
-                u16::from_be_bytes(b)
-            } else {
-                u16::from_le_bytes(b)
-            })
-        } else {
-            u32::from(p.data[at])
-        };
-        let max = (1u32 << c.depth) - 1;
-        ((raw >> c.shift) & max) as f32 / max as f32
-    }
-
     /// Converts the picture to 8-bit RGB.
+    ///
+    /// This runs for every picture the preview shows without a GPU (and
+    /// for 4K at 30 pictures a second), so it is written for speed: each
+    /// component's code values go through tables made once per picture
+    /// (`Converter`), rows are read as slices, and the rows are split
+    /// among the processor's cores. The arithmetic is the plain one of
+    /// ITU-R BT.709 / BT.2020, see `Converter`.
     pub fn to_rgb(&self) -> Picture {
         let (w, h) = (self.width as usize, self.height as usize);
-        let mut rgb = Vec::with_capacity(w * h * 3);
-        let comps = &self.layout.components;
-        let full = self.full_range || self.layout.full_range;
-        let (kr, kb) = self.matrix.weights();
-        let kg = 1.0 - kr - kb;
-        for y in 0..h {
-            for x in 0..w {
-                let (r, g, b) = if self.layout.rgb {
-                    (
-                        self.component(&comps[0], x, y),
-                        self.component(&comps[1], x, y),
-                        self.component(&comps[2], x, y),
-                    )
-                } else {
-                    let depth = comps[0].depth;
-                    let luma = self.component(&comps[0], x, y);
-                    let (cb, cr) = if comps.len() >= 3 {
-                        let (cx, cy) = (
-                            x >> self.layout.log2_chroma_w,
-                            y >> self.layout.log2_chroma_h,
-                        );
-                        (
-                            self.component(&comps[1], cx, cy),
-                            self.component(&comps[2], cx, cy),
-                        )
-                    } else {
-                        // Gray: no colour.
-                        (mid(depth), mid(depth))
-                    };
-                    let (yy, pb, pr) = normalize(luma, cb, cr, depth, full);
-                    let r = yy + 2.0 * (1.0 - kr) * pr;
-                    let b = yy + 2.0 * (1.0 - kb) * pb;
-                    let g = (yy - kr * r - kb * b) / kg;
-                    (r, g, b)
-                };
-                rgb.extend([to_u8(r), to_u8(g), to_u8(b)]);
+        let mut rgb = vec![0; w * h * 3];
+        if let Some(conv) = Converter::new(self) {
+            let row_bytes = w * 3;
+            // Threads only pay off for pictures larger than a thumbnail.
+            let threads = if w * h >= PARALLEL_PIXELS {
+                std::thread::available_parallelism().map_or(1, usize::from)
+            } else {
+                1
+            };
+            let rows_per_chunk = h.div_ceil(threads.max(1)).max(1);
+            if threads <= 1 || row_bytes == 0 {
+                conv.rows(0, &mut rgb);
+            } else {
+                std::thread::scope(|s| {
+                    for (i, chunk) in rgb.chunks_mut(rows_per_chunk * row_bytes).enumerate() {
+                        let conv = &conv;
+                        s.spawn(move || conv.rows(i * rows_per_chunk, chunk));
+                    }
+                });
             }
         }
         Picture {
@@ -201,36 +171,245 @@ impl Frame {
     }
 }
 
-/// The scaled value (as [`Frame::component`] returns it) of the chroma
-/// midpoint `2^(depth-1)`.
-fn mid(depth: u32) -> f32 {
-    let max = ((1u32 << depth) - 1) as f32;
-    (1u32 << (depth - 1)) as f32 / max
+/// Pictures of at least this many pixels are converted on several
+/// threads (a 256x256 picture takes well under a millisecond on one).
+const PARALLEL_PIXELS: usize = 256 * 256;
+
+/// How to read one component of every pixel: where it lies in its plane
+/// and how its code value is stored.
+struct Reader<'a> {
+    plane: &'a Plane,
+    /// Bytes from one pixel's component to the next pixel's.
+    step: usize,
+    /// Bytes before the first pixel's component.
+    offset: usize,
+    /// Bits the value is shifted left by in its storage unit.
+    shift: u32,
+    /// `2^depth - 1`: masks the value after the shift.
+    mask: u32,
+    /// The value is stored in two bytes.
+    wide: bool,
+    big_endian: bool,
 }
 
-/// Y', Pb and Pr (0..1, -0.5..0.5) from scaled code values: limited
-/// ("video") range puts black at 16 and white at 235, chroma at 16..240,
-/// scaled by `2^(depth-8)` for deeper samples (ITU-R BT.709 6.10,
-/// BT.2020 Table 5).
-fn normalize(y: f32, cb: f32, cr: f32, depth: u32, full: bool) -> (f32, f32, f32) {
-    let max = ((1u32 << depth) - 1) as f32;
-    let (y, cb, cr) = (y * max, cb * max, cr * max);
-    let half = (1u32 << (depth - 1)) as f32;
-    if full {
-        (y / max, (cb - half) / max, (cr - half) / max)
-    } else {
-        let s = (1u32 << depth.saturating_sub(8)) as f32;
-        (
-            (y - 16.0 * s) / (219.0 * s),
-            (cb - half) / (224.0 * s),
-            (cr - half) / (224.0 * s),
-        )
+impl<'a> Reader<'a> {
+    /// A reader of `c` in `frame`; `None` if the component lies outside
+    /// the planes or is deeper than 16 bits.
+    fn new(frame: &'a Frame, c: &Component) -> Option<Self> {
+        if c.depth == 0 || c.depth > 16 {
+            return None;
+        }
+        Some(Reader {
+            plane: frame.planes.get(c.plane)?,
+            step: c.step,
+            offset: c.offset,
+            shift: c.shift,
+            mask: (1u32 << c.depth) - 1,
+            wide: c.depth + c.shift > 8,
+            big_endian: frame.layout.big_endian,
+        })
+    }
+
+    /// Row `y` of the plane (empty past its end).
+    fn row(&self, y: usize) -> &'a [u8] {
+        let start = y * self.plane.stride;
+        self.plane
+            .data
+            .get(start..(start + self.plane.stride).min(self.plane.data.len()))
+            .unwrap_or(&[])
+    }
+
+    /// The code value of the component at `x` in `row` (from
+    /// [`Reader::row`]), at most [`Reader::mask`]; 0 for a pixel past
+    /// the row's end.
+    #[inline]
+    fn at(&self, row: &[u8], x: usize) -> usize {
+        let at = x * self.step + self.offset;
+        let raw = if self.wide {
+            match row.get(at..at + 2) {
+                Some(&[a, b]) if self.big_endian => u32::from(u16::from_be_bytes([a, b])),
+                Some(&[a, b]) => u32::from(u16::from_le_bytes([a, b])),
+                _ => 0,
+            }
+        } else {
+            row.get(at).map_or(0, |&v| u32::from(v))
+        };
+        ((raw >> self.shift) & self.mask) as usize
     }
 }
 
-/// 0.0..=1.0 to a byte, rounded and clamped.
-fn to_u8(v: f32) -> u8 {
-    (v * 255.0).round().clamp(0.0, 255.0) as u8
+/// Fractional bits of the fixed-point numbers in [`Converter`]'s tables.
+const FRACTION: u32 = 16;
+
+/// `v` (0.0..=1.0 for the visible range) in 8-bit steps as a fixed-point
+/// number with [`FRACTION`] fractional bits.
+fn fixed(v: f64) -> i32 {
+    (v * 255.0 * f64::from(1u32 << FRACTION)).round() as i32
+}
+
+/// A table from each code value of a component (`mask + 1` entries) to
+/// `value(code)` as a [`fixed`] number.
+fn table(r: &Reader, value: impl Fn(f64) -> f64) -> Vec<i32> {
+    (0..=r.mask).map(|v| fixed(value(f64::from(v)))).collect()
+}
+
+/// What [`Frame::to_rgb`] needs to convert rows of one picture.
+///
+/// R', G' and B' are linear in Y', Pb and Pr (ITU-R BT.709 3.2 and 3.3
+/// solved for them):
+///
+/// ```text
+/// R = Y + 2 (1 - Kr) Pr
+/// B = Y + 2 (1 - Kb) Pb
+/// G = Y - 2 Kr (1 - Kr) / Kg Pr - 2 Kb (1 - Kb) / Kg Pb
+/// ```
+///
+/// so each term is looked up in a table per component, made once per
+/// picture from the code values, and a pixel costs a few additions.
+/// The tables hold fixed-point numbers ([`fixed`]); the result differs
+/// from exact arithmetic by at most one 8-bit step at rounding ties.
+struct Converter<'a> {
+    width: usize,
+    /// R, G, B (RGB formats) or Y, Cb, Cr (Cb and Cr absent for gray).
+    comps: Vec<Reader<'a>>,
+    rgb: bool,
+    log2_chroma_w: u32,
+    log2_chroma_h: u32,
+    /// RGB formats: R, G and B. YCbCr: Y, and the R, G and B terms of
+    /// Pb and Pr as below (empty for gray).
+    first: Vec<i32>,
+    /// RGB: G. YCbCr: Pr's term of R.
+    second: Vec<i32>,
+    /// RGB: B. YCbCr: Pr's term of G.
+    third: Vec<i32>,
+    /// YCbCr: Pb's term of G.
+    g_cb: Vec<i32>,
+    /// YCbCr: Pb's term of B.
+    b_cb: Vec<i32>,
+}
+
+impl<'a> Converter<'a> {
+    /// The converter for `frame`, or `None` if its layout cannot be read
+    /// (then the picture stays black).
+    fn new(frame: &'a Frame) -> Option<Self> {
+        let l = &frame.layout;
+        let comps = &l.components;
+        let full = frame.full_range || l.full_range;
+        let mut readers = Vec::new();
+        let (first, second, third, g_cb, b_cb);
+        if l.rgb {
+            for c in comps.get(..3)? {
+                readers.push(Reader::new(frame, c)?);
+            }
+            // R, G and B: code / maximum.
+            let scaled = |r: &Reader| table(r, |v| v / f64::from(r.mask));
+            first = scaled(&readers[0]);
+            second = scaled(&readers[1]);
+            third = scaled(&readers[2]);
+            (g_cb, b_cb) = (Vec::new(), Vec::new());
+        } else {
+            // Y' 0..1 and Pb, Pr -0.5..0.5 from code values: limited
+            // ("video") range puts black at 16 and white at 235, chroma at
+            // 16..240, scaled by `2^(depth-8)` for deeper samples (ITU-R
+            // BT.709 6.10, BT.2020 Table 5); full range spans 0..max.
+            let luma = Reader::new(frame, comps.first()?)?;
+            let depth = comps[0].depth;
+            let max = f64::from(luma.mask);
+            let half = f64::from(1u32 << (depth - 1));
+            let s = f64::from(1u32 << depth.saturating_sub(8));
+            let (y0, ys, cs) = if full {
+                (0.0, max, max)
+            } else {
+                (16.0 * s, 219.0 * s, 224.0 * s)
+            };
+            first = table(&luma, |v| (v - y0) / ys);
+            readers.push(luma);
+            let (kr, kb) = frame.matrix.weights();
+            let (kr, kb) = (f64::from(kr), f64::from(kb));
+            let kg = 1.0 - kr - kb;
+            if comps.len() >= 3 {
+                readers.push(Reader::new(frame, &comps[1])?);
+                readers.push(Reader::new(frame, &comps[2])?);
+                let chroma = |r: &Reader, k: f64| table(r, |v| k * (v - half) / cs);
+                second = chroma(&readers[2], 2.0 * (1.0 - kr));
+                third = chroma(&readers[2], -2.0 * kr * (1.0 - kr) / kg);
+                g_cb = chroma(&readers[1], -2.0 * kb * (1.0 - kb) / kg);
+                b_cb = chroma(&readers[1], 2.0 * (1.0 - kb));
+            } else {
+                (second, third, g_cb, b_cb) = Default::default();
+            }
+        }
+        Some(Converter {
+            width: frame.width as usize,
+            comps: readers,
+            rgb: l.rgb,
+            log2_chroma_w: l.log2_chroma_w,
+            log2_chroma_h: l.log2_chroma_h,
+            first,
+            second,
+            third,
+            g_cb,
+            b_cb,
+        })
+    }
+
+    /// Converts the rows from `first` on into `out` (whole rows of RGB).
+    fn rows(&self, first: usize, out: &mut [u8]) {
+        let row_bytes = self.width * 3;
+        if row_bytes == 0 {
+            return;
+        }
+        let row = |c: usize, y: usize| self.comps.get(c).map_or(&[][..], |r| r.row(y));
+        // Tables have an entry for every code a reader returns.
+        let t = |table: &[i32], code: usize| table.get(code).copied().unwrap_or(0);
+        for (i, line) in out.chunks_exact_mut(row_bytes).enumerate() {
+            let y = first + i;
+            let pixels = line.as_chunks_mut::<3>().0.iter_mut().enumerate();
+            if self.rgb {
+                let (r0, r1, r2) = (row(0, y), row(1, y), row(2, y));
+                let [cr, cg, cb] = [&self.comps[0], &self.comps[1], &self.comps[2]];
+                for (x, px) in pixels {
+                    *px = [
+                        to_u8(t(&self.first, cr.at(r0, x))),
+                        to_u8(t(&self.second, cg.at(r1, x))),
+                        to_u8(t(&self.third, cb.at(r2, x))),
+                    ];
+                }
+                continue;
+            }
+            let luma = &self.comps[0];
+            let luma_row = row(0, y);
+            match (self.comps.get(1), self.comps.get(2)) {
+                (Some(cb), Some(cr)) => {
+                    let cy = y >> self.log2_chroma_h;
+                    let (cb_row, cr_row) = (cb.row(cy), cr.row(cy));
+                    for (x, px) in pixels {
+                        let yy = t(&self.first, luma.at(luma_row, x));
+                        let cx = x >> self.log2_chroma_w;
+                        let (u, v) = (cb.at(cb_row, cx), cr.at(cr_row, cx));
+                        *px = [
+                            to_u8(yy + t(&self.second, v)),
+                            to_u8(yy + t(&self.third, v) + t(&self.g_cb, u)),
+                            to_u8(yy + t(&self.b_cb, u)),
+                        ];
+                    }
+                }
+                // Gray: no colour.
+                _ => {
+                    for (x, px) in pixels {
+                        let v = to_u8(t(&self.first, luma.at(luma_row, x)));
+                        *px = [v, v, v];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A [`fixed`] number to a byte, rounded and clamped.
+#[inline]
+fn to_u8(v: i32) -> u8 {
+    ((v + (1 << (FRACTION - 1))) >> FRACTION).clamp(0, 255) as u8
 }
 
 #[cfg(test)]
@@ -441,5 +620,114 @@ mod tests {
             ..rgb24.clone()
         };
         assert_eq!(gray.to_rgb().rgb, vec![255, 255, 255]);
+    }
+
+    /// The textbook conversion in floating point (ITU-R BT.709 3.2, 3.3
+    /// and 6.10) of 8-bit limited-range codes, as 0..=255 before
+    /// rounding.
+    fn reference(y: u8, cb: u8, cr: u8, matrix: Matrix) -> [f64; 3] {
+        let (kr, kb) = matrix.weights();
+        let (kr, kb) = (f64::from(kr), f64::from(kb));
+        let yy = (f64::from(y) - 16.0) / 219.0;
+        let pb = (f64::from(cb) - 128.0) / 224.0;
+        let pr = (f64::from(cr) - 128.0) / 224.0;
+        let r = yy + 2.0 * (1.0 - kr) * pr;
+        let b = yy + 2.0 * (1.0 - kb) * pb;
+        let g = (yy - kr * r - kb * b) / (1.0 - kr - kb);
+        [r, g, b].map(|v| (v * 255.0).clamp(0.0, 255.0))
+    }
+
+    /// The table-driven fixed-point conversion stays within half an
+    /// 8-bit step (plus a hair for the fixed point) of exact arithmetic,
+    /// for every luma code and a grid of chroma codes, in every matrix.
+    #[test]
+    fn tables_match_exact_arithmetic() {
+        let chroma: Vec<u8> = (0..=255).step_by(5).chain([128, 255]).collect();
+        for matrix in [Matrix::Bt601, Matrix::Bt709, Matrix::Bt2020] {
+            // One row of 256 pixels per (cb, cr) pair: luma 0..=255.
+            for &cb in &chroma {
+                for &cr in &chroma {
+                    let f = Frame {
+                        width: 256,
+                        height: 1,
+                        planes: vec![
+                            plane((0..=255).collect(), 256, 1),
+                            plane(vec![cb; 128], 128, 1),
+                            plane(vec![cr; 128], 128, 1),
+                        ],
+                        ..solid(0, 0, 0, matrix, false)
+                    };
+                    let got = f.to_rgb().rgb;
+                    for y in 0..=255u8 {
+                        let want = reference(y, cb, cr, matrix);
+                        for k in 0..3 {
+                            let have = f64::from(got[usize::from(y) * 3 + k]);
+                            assert!(
+                                (have - want[k]).abs() <= 0.501,
+                                "{matrix:?} Y {y} Cb {cb} Cr {cr}: {k} is {have}, not {}",
+                                want[k]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A picture large enough to be converted on several threads comes
+    /// out exactly as its rows converted one by one.
+    #[test]
+    fn threaded_conversion_keeps_the_rows_in_place() {
+        let (w, h) = (322usize, 300usize);
+        let stride = w + 6;
+        let luma: Vec<u8> = (0..stride * h).map(|i| (i * 7 % 251) as u8).collect();
+        let cw = w.div_ceil(2);
+        let cb: Vec<u8> = (0..cw * h / 2).map(|i| (i * 3 % 241) as u8).collect();
+        let cr: Vec<u8> = (0..cw * h / 2).map(|i| (i * 5 % 239) as u8).collect();
+        let f = Frame {
+            width: w as u32,
+            height: h as u32,
+            planes: vec![
+                Plane {
+                    data: luma.clone(),
+                    stride,
+                    row_bytes: w,
+                    rows: h,
+                },
+                plane(cb.clone(), cw, h / 2),
+                plane(cr.clone(), cw, h / 2),
+            ],
+            ..solid(0, 0, 0, Matrix::Bt709, false)
+        };
+        assert!(w * h >= PARALLEL_PIXELS);
+        let all = f.to_rgb().rgb;
+        for y in 0..h {
+            // Row y alone: a one-row picture with the same samples.
+            let row = Frame {
+                height: 1,
+                planes: vec![
+                    plane(luma[y * stride..y * stride + w].to_vec(), w, 1),
+                    plane(cb[y / 2 * cw..(y / 2 + 1) * cw].to_vec(), cw, 1),
+                    plane(cr[y / 2 * cw..(y / 2 + 1) * cw].to_vec(), cw, 1),
+                ],
+                ..f.clone()
+            };
+            assert_eq!(
+                &all[y * w * 3..(y + 1) * w * 3],
+                &row.to_rgb().rgb[..],
+                "row {y}"
+            );
+        }
+    }
+
+    /// Planes shorter than the picture (a damaged decoder output) give
+    /// some colour for the missing samples instead of panicking.
+    #[test]
+    fn short_planes_do_not_panic() {
+        let mut f = solid(235, 128, 128, Matrix::Bt709, false);
+        f.planes[0].data.truncate(3);
+        f.planes[2].data.clear();
+        let rgb = f.to_rgb().rgb;
+        assert_eq!(rgb.len(), 12);
     }
 }

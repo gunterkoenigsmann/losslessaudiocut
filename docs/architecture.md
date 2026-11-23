@@ -843,11 +843,21 @@ frames of our `VideoIndex` (with the sample entry's `avcC`/`hvcC`/`av1C`/
 `apvC` body or `esds` DecoderSpecificInfo as extradata), starting at the
 last clean keyframe before the picture in decode order, and continues a
 running decoder when the next request lies further on in the same group
-of pictures (frame stepping). Pictures are converted to RGB by our own
-code (`lac_decode::picture`) from FFmpeg's pixel format descriptor and the
-stream's YCbCr matrix (BT.601/709/2020, limited or full range), so the
-crate still needs libavcodec only, not libswscale. HDR pictures are not
-tone-mapped. Tests compare every picture of each codec fixture, also by
+of pictures (frame stepping, and playback). libavcodec decodes slices of
+a frame on all cores; the preview's playback decoder
+(`VideoDecoder::for_playback`, used by the `VideoLoader`) also decodes
+several consecutive frames at once (frame threading), which multiplies
+its throughput at the price of reading a few frames ahead before the
+first picture comes out, so the keyframe thumbnails go without. Pictures
+are converted to RGB by our own code (`lac_decode::picture`) from FFmpeg's
+pixel format descriptor and the stream's YCbCr matrix (BT.601/709/2020,
+limited or full range), so the crate still needs libavcodec only, not
+libswscale. The conversion looks up each component's terms in
+fixed-point tables made once per picture and splits the rows among the
+cores (a 4K picture in milliseconds instead of a fifth of a second).
+HDR pictures are not tone-mapped. `cargo run --release -p lac-app
+--example video_speed -- <file>` measures decoding, conversion and
+playback rates of a file. Tests compare every picture of each codec fixture, also by
 random access, with what the ffmpeg tool decodes.
 
 GUI *(implemented: preview pane, keyframe strip)*: `lac_app::video` maps audio

@@ -178,7 +178,14 @@ pub(crate) struct VideoDecoder {
 impl VideoDecoder {
     /// Opens a decoder for the stream `info` with the container's codec
     /// configuration `extradata`; times are ticks of `info.timescale`.
-    pub(crate) fn new(info: &VideoStreamInfo, extradata: &[u8]) -> Result<Self, FfmpegError> {
+    /// `frame_threads` decodes several frames at once (see
+    /// [`crate::VideoDecoder::for_playback`]); slices of one frame are
+    /// decoded in parallel either way.
+    pub(crate) fn new(
+        info: &VideoStreamInfo,
+        extradata: &[u8],
+        frame_threads: bool,
+    ) -> Result<Self, FfmpegError> {
         let (codec, timescale) = (info.codec, info.timescale);
         ff::init()?;
         // libdav1d announces its version at the "info" level each time a
@@ -209,6 +216,19 @@ impl VideoDecoder {
             // ProRes decoder warns about a "resolution change" without).
             (*ptr).width = i32::try_from(info.width).unwrap_or(0);
             (*ptr).height = i32::try_from(info.height).unwrap_or(0);
+            // libavcodec decodes on one thread unless told otherwise
+            // (`ffmpeg` and players ask for more): 0 threads lets it pick
+            // one per core. Frame threading decodes consecutive frames
+            // in parallel, which multiplies the throughput of playback
+            // but holds back each picture until about as many frames as
+            // threads have been fed; slice threading has no such delay.
+            // Either way the pictures are bit-identical.
+            (*ptr).thread_count = 0;
+            (*ptr).thread_type = if frame_threads {
+                ff::ffi::FF_THREAD_FRAME | ff::ffi::FF_THREAD_SLICE
+            } else {
+                ff::ffi::FF_THREAD_SLICE
+            };
             // The sample entry's fourcc, as FFmpeg's demuxer passes it:
             // the ProRes decoder takes its profile (Proxy, LT, ...) from it.
             if let VideoCodec::Other(fourcc) = codec {

@@ -385,7 +385,9 @@ fn lock(m: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
 fn run(path: &Path, rx: &Receiver<MediaTime>, shared: &Mutex<Shared>) {
     let opened = Source::open(path).ok().and_then(|source| {
         let clock = source.video_clock()?;
-        let decoder = source.video_decoder()?;
+        // Playback asks for picture after picture: decode them on all
+        // cores at once.
+        let decoder = source.video_decoder()?.for_playback();
         Some((source, clock, decoder))
     });
     let Some((mut source, clock, mut decoder)) = opened else {
