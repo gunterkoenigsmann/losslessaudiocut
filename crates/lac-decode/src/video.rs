@@ -24,6 +24,8 @@ pub struct VideoDecoder {
     codec_config: Vec<u8>,
     /// The decoder of the last request and how far it got.
     run: Option<Run>,
+    /// Decode several frames at once, see [`VideoDecoder::for_playback`].
+    frame_threads: bool,
 }
 
 /// A decoder that has been fed frames from a clean start on.
@@ -47,7 +49,19 @@ impl VideoDecoder {
             index: source.video()?.clone(),
             codec_config: source.video_codec_config().to_vec(),
             run: None,
+            frame_threads: false,
         })
+    }
+
+    /// The decoder tuned for playing: it decodes several consecutive
+    /// frames at once on all processor cores (FFmpeg's frame threading),
+    /// which multiplies how many pictures a second it can deliver. Each
+    /// picture then needs a few frames more to be read first, so a
+    /// decoder asked for single pictures far apart (keyframe thumbnails)
+    /// is better off without.
+    pub fn for_playback(mut self) -> Self {
+        self.frame_threads = true;
+        self
     }
 
     /// The frames of the track.
@@ -88,12 +102,11 @@ impl VideoDecoder {
         });
         if !reusable {
             let info = self.index.info();
-            let decoder = ffi::VideoDecoder::new(&info, &self.codec_config).map_err(|source| {
-                DecodeError::VideoSetup {
+            let decoder = ffi::VideoDecoder::new(&info, &self.codec_config, self.frame_threads)
+                .map_err(|source| DecodeError::VideoSetup {
                     codec: info.codec.name(),
                     source,
-                }
-            })?;
+                })?;
             self.run = Some(Run {
                 decoder,
                 start: clean,

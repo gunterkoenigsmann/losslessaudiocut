@@ -70,6 +70,29 @@ fn step_through(name: &str) -> Vec<Frame> {
         .collect()
 }
 
+/// A decoder made for playback (several frames decoded at once on
+/// several threads) delivers the same pictures, byte for byte, as one
+/// decoding frame by frame: stepping forward, skipping ahead the way
+/// playback does when the screen cannot keep up, and jumping back.
+#[test]
+fn playback_decoder_gives_the_same_pictures() {
+    for name in FIXTURES {
+        let want = step_through(name);
+        let (mut r, v) = open(name);
+        let mut v = v.for_playback();
+        let times = display_times(&v);
+        // Every picture, then every third, then backwards in big steps.
+        let order: Vec<usize> = (0..times.len())
+            .chain((0..times.len()).step_by(3))
+            .chain((0..times.len()).rev().step_by(7))
+            .collect();
+        for k in order {
+            let f = v.frame_at(&mut r, times[k]).expect("decodes");
+            assert!(f == want[k], "{name}: picture {k} differs");
+        }
+    }
+}
+
 /// All pictures of `path` as ffmpeg decodes them in `pix_fmt` (with an
 /// MP4 edit list ignored, so all frames come out), split into frames of
 /// `size` bytes; `None` without ffmpeg (fatal when `LAC_REQUIRE_TOOLS` is
